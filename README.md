@@ -69,7 +69,7 @@ Trade Manager
        +---- Read-only dashboard
 
 Separate research path:
-historical CSV/replay -> StrategyBacktester -> WalkForwardValidator -> validated strategy version
+historical CSV/replay -> prior-session context -> StrategyBacktester -> WalkForwardValidator -> validated strategy version
 ```
 
 ## Optional production dependencies
@@ -89,6 +89,7 @@ python -m pip install -e ".[calendars]"
 ```bash
 pytest
 python -m money_mintter.main
+mm-backtest path/to/ohlcv.csv ABC --timezone America/New_York
 ```
 
 ## Hard live-trading boundary
