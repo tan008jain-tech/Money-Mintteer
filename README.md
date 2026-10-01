@@ -2,58 +2,95 @@
 
 Money Mintter is an event-driven market-analysis and paper-trading system designed to evolve toward autonomous multi-market trading.
 
-## First vertical slice
+## What is built now
 
-This repository currently contains the foundation for:
+### Decision stack
+- external-screener boundary with a provider-neutral HTTP adapter
+- hard market-quality verification before deep analysis
+- maximum of five deep candidates
+- long-only liquidity-sweep reversal strategy with structure, displacement, volume, confirmation, ATR, reward-room and anti-chase filters
+- explicit rejection/veto reasons and deterministic confidence scoring
+- no artificial re-entry cooldown
 
-- global market-session awareness using timezone-aware schedules
-- coarse candidate ranking with a hard maximum of 5 deep candidates
-- a broker abstraction with a realistic paper broker
-- conservative risk-based position sizing
-- Trading Wallet / Profit Reserve accounting with a 20% reserve of realized profit
-- event-driven trade management for stop and target handling
-- an end-to-end executable simulation
-- unit and integration tests
-- Docker packaging and GitHub CI
+### Research stack
+- event-order-aware backtester
+- spread, slippage, commission and next-bar execution modelling
+- pessimistic same-bar stop/target collision handling
+- profit factor, expectancy-R, drawdown and consecutive-loss metrics
+- chronological walk-forward validation framework
+- CSV historical-data loader and deterministic replay feed
 
-The system deliberately does **not** connect to a real broker or place live orders in this slice.
+### Safety and operations
+- PaperBroker with non-ideal fills
+- PostgreSQL runtime snapshots and event log boundary
+- restart recovery and broker/state reconciliation that fails closed
+- heartbeat registry and watchdog with RUN/PAUSE/HALT states
+- execution guard that blocks live orders unless health, data and reconciliation gates are green
+- broker-neutral live adapter, with live trading disabled unless explicitly armed
+- exchange-calendar adapter for holidays and special sessions
+- read-only local dashboard
 
-## Architecture boundary
+The real broker, real market-data provider and external screener can be connected later through these boundaries without rewriting the strategy.
+
+## Strategy warning
+
+The strategy is deliberately strict. It is an engineering translation of publicly described liquidity-trap/sweep, market-structure and execution concepts, not a claim that any particular public educator's exact discretionary method has been captured perfectly.
+
+There is **no verified live win rate yet**. Synthetic unit fixtures prove that the implementation behaves as designed, not that the market will reward it. Real historical data, realistic execution assumptions, walk-forward testing and out-of-sample validation are required before changing strategy thresholds or considering live deployment.
+
+## Architecture
 
 ```text
-market/session discovery
-        |
-        v
-external screener --> candidate ranking --> max 5 deep candidates
-                                      |
-                                      v
-                              strategy signals
-                                      |
-                                      v
-                                risk engine
-                                      |
-                                      v
-                            broker interface
-                           /              \\
-                  PaperBroker        future live adapters
-                           |
-                           v
-                     trade manager
-                           |
-                           v
-                  wallet / reserve ledger
+Global open markets
+       |
+       v
+External screener
+       |
+       v
+Opportunity Analyzer  ---- hard vetoes / quality gates
+       |
+       v
+Candidate Ranker ---- max 5 deep candidates
+       |
+       v
+Deep Strategy ---- liquidity sweep -> MSS -> displacement -> confirmation
+       |
+       v
+Risk Engine
+       |
+       v
+PaperBroker / LiveBrokerAdapter
+       |
+       v
+Trade Manager
+       |
+       +---- PostgreSQL snapshots/events
+       +---- Watchdog / recovery / reconciliation
+       +---- Read-only dashboard
+
+Separate research path:
+historical CSV/replay -> StrategyBacktester -> WalkForwardValidator -> validated strategy version
 ```
 
-The strategy layer is intentionally separated from execution. This lets the trading logic evolve without rewriting broker integration.
+## Optional production dependencies
+
+The core package has no mandatory runtime network dependencies.
+
+```bash
+python -m pip install -e ".[dev]"
+# PostgreSQL runtime:
+python -m pip install -e ".[postgres]"
+# Exchange holidays / special sessions:
+python -m pip install -e ".[calendars]"
+```
 
 ## Run locally
 
 ```bash
-python -m pip install -e .
 pytest
 python -m money_mintter.main
 ```
 
-## Important prototype boundary
+## Hard live-trading boundary
 
-The paper broker is a simulator. It is not evidence that a strategy is profitable. Live trading requires validated market-data adapters, broker-specific order semantics, exchange calendars, persistent state, monitoring, kill switches, reconciliation, and extensive testing under realistic fills and failure conditions.
+Money Mintter does not receive broker credentials from chat and does not assume a live account exists. The live adapter is provider-neutral and is fail-closed by default. A real broker gateway, account permissions, market-data provider, reconciliation process and explicit safety configuration are required before any live order could be sent.
