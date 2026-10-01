@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from money_mintter.brokers.base import Broker
+from money_mintter.core.analyzer import OpportunityAnalyzer
 from money_mintter.core.candidates import CandidateRanker, RankedCandidate
 from money_mintter.core.sessions import SessionEngine
 from money_mintter.core.trade_manager import TradeEvent, TradeManager
@@ -26,11 +27,13 @@ class MoneyMintterEngine:
         trade_manager: TradeManager,
         sessions: SessionEngine,
         ranker: CandidateRanker,
+        analyzer: OpportunityAnalyzer | None = None,
     ) -> None:
         self.broker = broker
         self.trade_manager = trade_manager
         self.sessions = sessions
         self.ranker = ranker
+        self.analyzer = analyzer or OpportunityAnalyzer()
 
     def cycle(
         self,
@@ -56,10 +59,19 @@ class MoneyMintterEngine:
         # Rank only symbols that are not currently active after management. This preserves
         # open positions while allowing immediate, confirmation-driven re-entry.
         active_symbols = set(self.trade_manager.open_trades)
-        eligible_candidates = [
-            c for c in candidates
-            if c.market in open_markets and c.symbol not in active_symbols
-        ]
+        eligible_candidates: list[Candidate] = []
+        for candidate in candidates:
+            if candidate.market not in open_markets or candidate.symbol in active_symbols:
+                continue
+            quote = quotes.get(candidate.symbol)
+            spread_bps = None
+            if quote is not None:
+                midpoint = (quote.bid + quote.ask) / 2
+                spread_bps = ((quote.ask - quote.bid) / midpoint) * 10_000
+            assessment = self.analyzer.assess(candidate, spread_bps)
+            if assessment.eligible:
+                eligible_candidates.append(candidate)
+
         deep = tuple(self.ranker.rank(eligible_candidates))
         deep_symbols = {item.candidate.symbol for item in deep}
 
