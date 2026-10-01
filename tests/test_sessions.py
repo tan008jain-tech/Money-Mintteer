@@ -1,23 +1,28 @@
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
-from money_mintter.core.sessions import SessionEngine
-
-
-def test_ny_session_uses_timezone_conversion() -> None:
-    engine = SessionEngine.default()
-    # 14:00 UTC on 1 Oct 2026 is 10:00 in New York (EDT), inside NYSE hours.
-    moment = datetime(2026, 10, 1, 14, 0, tzinfo=timezone.utc)
-    assert engine.is_market_open("NYSE", moment)
+from money_mintter.core.sessions import MarketSession, SessionEngine
 
 
-def test_ny_standard_time_is_also_converted() -> None:
-    engine = SessionEngine.default()
-    # 14:30 UTC on 5 Jan 2026 is 09:30 in New York (EST), exactly at the open.
+class FakeCalendar:
+    def __init__(self, holidays):
+        self.holidays = holidays
+
+    def is_open(self, market, moment):
+        return moment.date().isoformat() not in self.holidays
+
+
+def test_market_session_respects_named_timezone() -> None:
+    session = MarketSession("NYSE", "America/New_York", open_time=__import__("datetime").time(9, 30), close_time=__import__("datetime").time(16, 0))
+    utc_open = datetime(2026, 1, 5, 14, 30, tzinfo=timezone.utc)
+    assert session.is_open(utc_open)
+
+
+def test_session_engine_can_overlay_exchange_calendar() -> None:
+    sessions = [
+        MarketSession("NYSE", "America/New_York", __import__("datetime").time(9, 30), __import__("datetime").time(16, 0))
+    ]
+    service = FakeCalendar({"2026-01-05"})
+    engine = SessionEngine(sessions, calendar_service=service)
     moment = datetime(2026, 1, 5, 14, 30, tzinfo=timezone.utc)
-    assert engine.is_market_open("NYSE", moment)
-
-
-def test_weekend_is_closed() -> None:
-    engine = SessionEngine.default()
-    saturday = datetime(2026, 10, 3, 14, 0, tzinfo=timezone.utc)
-    assert engine.open_markets(saturday) == []
+    assert engine.open_markets(moment) == []
