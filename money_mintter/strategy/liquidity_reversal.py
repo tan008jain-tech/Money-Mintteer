@@ -208,6 +208,7 @@ class LiquiditySweepReversalStrategy:
             confidence=result.score,
             timestamp=candles[-1].timestamp,
             reason=result.reason,
+            strategy_version="lsr.v1",
         )
 
     def _evaluate_sweep(
