@@ -8,3 +8,7 @@ from money_mintter.research.backtest import (
 )
 
 __all__ = ["BacktestConfig", "BacktestReport", "BacktestTrade", "StrategyBacktester"]
+
+from money_mintter.research.validation import ValidationResult, WalkForwardValidator, WalkForwardWindow
+
+__all__ += ["ValidationResult", "WalkForwardValidator", "WalkForwardWindow"]
