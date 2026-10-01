@@ -25,6 +25,8 @@ class CandleCsvLoader:
             for row_number, row in enumerate(reader, start=2):
                 try:
                     timestamp = datetime.fromisoformat(row["timestamp"].replace("Z", "+00:00"))
+                    if timestamp.tzinfo is None:
+                        raise ValueError("timestamp must include timezone")
                     candle = Candle(
                         symbol=symbol,
                         timestamp=timestamp,
@@ -42,6 +44,6 @@ class CandleCsvLoader:
             raise CsvDataError("CSV contains no candles")
 
         timestamps = [candle.timestamp for candle in candles]
-        if timestamps != sorted(timestamps):
-            raise CsvDataError("candles must be ordered by timestamp")
+        if any(left >= right for left, right in zip(timestamps, timestamps[1:])):
+            raise CsvDataError("candles must be strictly ordered by timestamp")
         return candles
