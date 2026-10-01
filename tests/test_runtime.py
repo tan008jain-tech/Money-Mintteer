@@ -41,7 +41,7 @@ def test_runtime_supervisor_fails_closed_without_snapshot() -> None:
     now = datetime(2026, 10, 1, 14, 0, tzinfo=timezone.utc)
     result = supervisor.reconcile_after_restart(now)
     assert not result.ok
-    assert not guard.health_ok
+    assert not guard.reconciliation_ok
     assert not supervisor.refresh_execution_guard(now).live_execution_allowed
 
 
