@@ -9,7 +9,7 @@ description = "Event-driven autonomous market analysis and paper-trading prototy
 requires-python = ">=3.12"
 dependencies = []
 
-[project.optional-dependencies]
+[project.scripts]\nmm-backtest = "money_mintter.research.cli:main"\n\n[project.optional-dependencies]
 dev = ["pytest>=8,<10"]
 postgres = ["psycopg[binary]>=3.2,<4"]
 calendars = ["exchange-calendars>=4,<5"]
