@@ -42,7 +42,6 @@ def build_setup() -> list[Candle]:
 
     # Confirmation candle closes above the displacement high.
     bars.append(candle("ABC", 32, 101.6, 102.8, 101.2, 102.4, 1800))
-    bars.append(candle("ABC", 33, 102.4, 102.6, 101.9, 102.3, 1600))
     return bars
 
 
@@ -143,3 +142,22 @@ def test_signal_builds_long_trade_only() -> None:
 
     assert signal is not None
     assert signal.side.value == "BUY"
+
+
+def test_does_not_reemit_old_trigger() -> None:
+    bars = build_setup()
+    bars.append(candle("ABC", 33, 102.4, 102.6, 101.9, 102.3, 1600))
+
+    strategy = LiquiditySweepReversalStrategy(
+        StrategyConfig(
+            min_confidence=0.70,
+            min_rr=2.5,
+            preferred_rr=3.0,
+            max_stop_atr=5.0,
+            max_sweep_depth_atr=5.0,
+        )
+    )
+    result = strategy.analyze(bars, StrategyInput(98, 125, 5))
+
+    assert not result.passed
+    assert "stale_trigger" in result.vetoes
