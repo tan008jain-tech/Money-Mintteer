@@ -163,12 +163,31 @@ class LiquiditySweepReversalStrategy:
 
         # Newest sweep first. A failed recent setup must not hide an older,
         # still-valid setup if that older setup completes cleanly.
+        newest_failure: SetupAnalysis | None = None
         for sweep_index in reversed(sweep_candidates):
             result = self._evaluate_sweep(bars, atr_values, context, sweep_index)
             if result.passed:
-                return result
+                if result.trigger_index == len(bars) - 1:
+                    return result
+                newest_failure = SetupAnalysis(
+                    False,
+                    result.score,
+                    "setup completed on an earlier candle",
+                    result.sweep_index,
+                    result.mss_index,
+                    result.trigger_index,
+                    result.entry_price,
+                    result.stop_price,
+                    result.target_price,
+                    result.risk_per_share,
+                    result.reward_risk,
+                    result.confluences,
+                    result.vetoes + ("stale_trigger",),
+                )
+            elif newest_failure is None:
+                newest_failure = result
 
-        return self._evaluate_sweep(bars, atr_values, context, sweep_candidates[-1])
+        return newest_failure or SetupAnalysis(False, 0.0, "no actionable setup")
 
     def signal(self, candles: list[Candle], context: StrategyInput) -> TradeSignal | None:
         result = self.analyze(candles, context)
