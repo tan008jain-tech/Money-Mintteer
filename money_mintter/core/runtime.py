@@ -72,10 +72,13 @@ class RuntimeSupervisor:
             component.name == "reconciliation" and component.status is HealthStatus.HEALTHY
             for component in reconciliation_snapshot
         )
-        health_ok = all(
-            component.status is HealthStatus.HEALTHY
-            for component in reconciliation_snapshot
-            if component.name != "reconciliation"
+        health_ok = (
+            action is WatchdogAction.RUN
+            and all(
+                component.status is HealthStatus.HEALTHY
+                for component in reconciliation_snapshot
+                if component.name != "reconciliation"
+            )
         )
         data_ok = any(
             component.name == "market_data" and component.status is HealthStatus.HEALTHY
