@@ -56,12 +56,15 @@ class TradeSignal:
     confidence: float
     timestamp: datetime
     reason: str
+    strategy_version: str = "lsr.v1"
 
     def __post_init__(self) -> None:
         if min(self.entry_price, self.stop_price, self.target_price) <= 0:
             raise ValueError("signal prices must be positive")
         if not 0 <= self.confidence <= 1:
             raise ValueError("confidence must be in [0, 1]")
+        if not self.strategy_version.strip():
+            raise ValueError("strategy version cannot be empty")
         if self.side is Side.BUY:
             if not self.stop_price < self.entry_price < self.target_price:
                 raise ValueError("long signal requires stop < entry < target")
