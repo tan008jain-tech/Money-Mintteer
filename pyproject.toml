@@ -11,6 +11,8 @@ dependencies = []
 
 [project.optional-dependencies]
 dev = ["pytest>=8,<10"]
+postgres = ["psycopg[binary]>=3.2,<4"]
+calendars = ["exchange-calendars>=4,<5"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
