@@ -132,7 +132,7 @@ class LiquiditySweepReversalStrategy:
         sweep_candidates: list[int] = []
 
         for index in range(sweep_start, len(bars)):
-            atr = atr_values[index]
+            atr = atr_values[index - 1] if index > 0 else atr_values[index]
             if atr is None:
                 continue
 
@@ -219,7 +219,7 @@ class LiquiditySweepReversalStrategy:
     ) -> SetupAnalysis:
         c = self.config
         sweep = bars[sweep_index]
-        atr = atr_values[sweep_index]
+        atr = atr_values[sweep_index - 1] if sweep_index > 0 else atr_values[sweep_index]
 
         if atr is None:
             return SetupAnalysis(
