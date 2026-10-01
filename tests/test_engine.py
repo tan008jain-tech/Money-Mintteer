@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 
 from money_mintter.brokers.paper import PaperBroker
+from money_mintter.core.analyzer import OpportunityAnalyzer
 from money_mintter.core.candidates import CandidateRanker
 from money_mintter.core.engine import MoneyMintterEngine
 from money_mintter.core.risk import RiskEngine
@@ -10,11 +11,13 @@ from money_mintter.domain import Candidate, Quote, Side, TradeSignal, WalletLedg
 
 
 def test_end_to_end_open_close_without_cooldown() -> None:
-    settings_capital = 10_000.0
-    broker = PaperBroker(settings_capital, slippage_bps=0.0, commission_bps=0.0)
-    wallet = WalletLedger(settings_capital, profit_reserve_pct=0.20)
+    capital = 10_000.0
+    broker = PaperBroker(capital, slippage_bps=0.0, commission_bps=0.0)
+    wallet = WalletLedger(capital, profit_reserve_pct=0.20)
     manager = TradeManager(broker, RiskEngine(0.005, 0.20, 0.02), wallet)
-    engine = MoneyMintterEngine(broker, manager, SessionEngine.default(), CandidateRanker(0.60, 5))
+    engine = MoneyMintterEngine(
+        broker, manager, SessionEngine.default(), CandidateRanker(0.60, 5)
+    )
 
     t0 = datetime(2026, 10, 1, 14, 0, tzinfo=timezone.utc)
     candidates = [Candidate("ABC", "NYSE", 0.95, 0.9, 0.9, 0.9, t0)]
@@ -38,7 +41,9 @@ def test_immediate_reentry_is_allowed_after_confirmed_exit() -> None:
     broker = PaperBroker(capital, slippage_bps=0.0, commission_bps=0.0)
     wallet = WalletLedger(capital, profit_reserve_pct=0.20)
     manager = TradeManager(broker, RiskEngine(0.005, 0.20, 0.02), wallet)
-    engine = MoneyMintterEngine(broker, manager, SessionEngine.default(), CandidateRanker(0.60, 5))
+    engine = MoneyMintterEngine(
+        broker, manager, SessionEngine.default(), CandidateRanker(0.60, 5)
+    )
 
     t0 = datetime(2026, 10, 1, 14, 0, tzinfo=timezone.utc)
     candidates = [Candidate("ABC", "NYSE", 0.95, 0.9, 0.9, 0.9, t0)]
@@ -60,3 +65,29 @@ def test_immediate_reentry_is_allowed_after_confirmed_exit() -> None:
     assert any(e.kind == "CLOSE" for e in result.trade_events)
     assert any(e.kind == "OPEN" for e in result.trade_events)
     assert "ABC" in manager.open_trades
+
+
+def test_engine_applies_opportunity_analyzer_before_deep_rank() -> None:
+    capital = 10_000.0
+    broker = PaperBroker(capital, slippage_bps=0.0, commission_bps=0.0)
+    wallet = WalletLedger(capital)
+    manager = TradeManager(broker, RiskEngine(), wallet)
+    engine = MoneyMintterEngine(
+        broker,
+        manager,
+        SessionEngine.default(),
+        CandidateRanker(0.60, 5),
+        analyzer=OpportunityAnalyzer(),
+    )
+
+    t0 = datetime(2026, 10, 1, 14, 0, tzinfo=timezone.utc)
+    candidates = [
+        Candidate("GOOD", "NYSE", 0.95, 0.70, 0.90, 0.90, t0),
+        Candidate("BAD", "NYSE", 0.40, 0.70, 0.90, 0.90, t0),
+    ]
+    quotes = {
+        "GOOD": Quote("GOOD", 99.99, 100.01, 100.0, t0),
+        "BAD": Quote("BAD", 99.99, 100.01, 100.0, t0),
+    }
+    result = engine.cycle(t0, candidates, quotes, [])
+    assert [item.candidate.symbol for item in result.deep_candidates] == ["GOOD"]
