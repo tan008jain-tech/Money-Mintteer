@@ -9,6 +9,9 @@ description = "Event-driven autonomous market analysis and paper-trading prototy
 requires-python = ">=3.12"
 dependencies = []
 
+[project.optional-dependencies]
+dev = ["pytest>=8,<10"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
