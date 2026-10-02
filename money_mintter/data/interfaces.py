@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Protocol
 
 from money_mintter.domain import Candidate, Quote
+from money_mintter.strategy import Candle
 
 
 class Screener(Protocol):
@@ -17,6 +18,20 @@ class MarketDataFeed(Protocol):
     """Streaming/polling market-data boundary for future live adapters."""
 
     def latest_quotes(self, symbols: list[str]) -> dict[str, Quote]:
+        ...
+
+
+class CandleDataSource(Protocol):
+    """Historical/intraday OHLCV boundary for research and provider adapters."""
+
+    def candles(
+        self,
+        symbol: str,
+        *,
+        start: date | None = None,
+        end: date | None = None,
+        timezone_name: str | None = None,
+    ) -> list[Candle]:
         ...
 
 

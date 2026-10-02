@@ -95,3 +95,14 @@ mm-backtest path/to/ohlcv.csv ABC --timezone America/New_York
 ## Hard live-trading boundary
 
 Money Mintter does not receive broker credentials from chat and does not assume a live account exists. The live adapter is provider-neutral and is fail-closed by default. A real broker gateway, account permissions, market-data provider, reconciliation process and explicit safety configuration are required before any live order could be sent.
+
+## Temporary FMP market-data integration
+
+For development before IBKR is available, Money Mintter includes a disposable FMP adapter:
+
+- `/most-actives` provides the coarse active universe.
+- `/biggest-gainers` and `/biggest-losers` can enrich discovery when the account exposes them.
+- `/historical-chart/1min` provides 1-minute OHLCV candles for intraday strategy/research validation.
+- All provider access is behind internal interfaces, so replacing FMP with IBKR later does not change strategy, risk, paper execution, persistence, or recovery.
+
+See `docs/TEMPORARY_DATA_SOURCES.md` for the integration boundary and credential handling.
