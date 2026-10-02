@@ -80,100 +80,55 @@ def build_snapshot(side: Side) -> MultiTimeframeSnapshot:
     ]
 
     if bullish:
-        entry[-8] = candle(
-            start + timedelta(minutes=110),
+        entry[-3] = candle(
+            start + timedelta(minutes=135),
             100.0,
             100.2,
             99.2,
             99.8,
             2200,
         )
-        entry[-7] = candle(
-            start + timedelta(minutes=115),
+        entry[-2] = candle(
+            start + timedelta(minutes=140),
             99.8,
             101.4,
             99.7,
             101.2,
             2500,
         )
-        entry[-6] = candle(
-            start + timedelta(minutes=120),
+        entry[-1] = candle(
+            start + timedelta(minutes=145),
             101.2,
             101.8,
             101.0,
             101.6,
             1800,
         )
-        entry[-5] = candle(
-            start + timedelta(minutes=125),
-            101.6,
-            101.9,
-            101.3,
-            101.7,
-            1200,
-        )
-        entry[-4] = candle(
-            start + timedelta(minutes=130),
-            101.7,
-            101.9,
-            101.4,
-            101.8,
-            1100,
-        )
+    else:
         entry[-3] = candle(
             start + timedelta(minutes=135),
-            101.8,
-            102.0,
-            101.5,
-            101.9,
-            1100,
-        )
-        entry[-2] = candle(
-            start + timedelta(minutes=140),
-            101.9,
-            102.0,
-            101.6,
-            101.9,
-            1100,
-        )
-        entry[-1] = candle(
-            start + timedelta(minutes=145),
-            101.9,
-            102.1,
-            101.7,
-            102.0,
-            1100,
-        )
-    else:
-        entry[-8] = candle(
-            start + timedelta(minutes=110),
             100.0,
             100.8,
             99.8,
             100.2,
             2200,
         )
-        entry[-7] = candle(
-            start + timedelta(minutes=115),
+        entry[-2] = candle(
+            start + timedelta(minutes=140),
             100.2,
             100.3,
             98.6,
             98.8,
             2500,
         )
-        entry[-6] = candle(
-            start + timedelta(minutes=120),
+        entry[-1] = candle(
+            start + timedelta(minutes=145),
             98.8,
             99.0,
             98.0,
             98.5,
             1800,
         )
-        entry[-5] = candle(start + timedelta(minutes=125), 98.5, 98.8, 98.2, 98.4, 1200)
-        entry[-4] = candle(start + timedelta(minutes=130), 98.4, 98.7, 98.1, 98.3, 1100)
-        entry[-3] = candle(start + timedelta(minutes=135), 98.3, 98.6, 98.0, 98.2, 1100)
-        entry[-2] = candle(start + timedelta(minutes=140), 98.2, 98.5, 97.9, 98.1, 1100)
-        entry[-1] = candle(start + timedelta(minutes=145), 98.1, 98.4, 97.8, 98.0, 1100)
 
     return MultiTimeframeSnapshot(
         as_of=start + timedelta(minutes=150),
