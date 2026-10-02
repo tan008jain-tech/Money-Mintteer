@@ -15,6 +15,7 @@ mm-fmp-check = "money_mintter.data.fmp_check:main"
 mm-hf-check = "money_mintter.data.hf_check:main"
 mm-hf-download = "money_mintter.data.hf_download:main"
 mm-hf-backtest = "money_mintter.research.hf_cli:main"
+mm-hf-diagnostics = "money_mintter.research.hf_diagnostics:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8,<10"]
