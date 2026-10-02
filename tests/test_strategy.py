@@ -84,7 +84,7 @@ def build_snapshot(side: Side) -> MultiTimeframeSnapshot:
             start + timedelta(minutes=135),
             100.0,
             100.2,
-            99.2,
+            99.4,
             99.8,
             2200,
         )
@@ -108,7 +108,7 @@ def build_snapshot(side: Side) -> MultiTimeframeSnapshot:
         entry[-3] = candle(
             start + timedelta(minutes=135),
             100.0,
-            100.8,
+            100.6,
             99.8,
             100.2,
             2200,
