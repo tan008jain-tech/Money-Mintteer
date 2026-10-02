@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta, timezone
 
-from money_mintter.strategy import Candle, MultiTimeframeSeries, Timeframe
+from money_mintter.strategy.candles import Candle
 
 
 def candle(index: int, price: float = 100.0) -> Candle:
