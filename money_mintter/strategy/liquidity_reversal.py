@@ -11,29 +11,29 @@ from money_mintter.strategy.timeframes import MultiTimeframeSnapshot, Timeframe
 @dataclass(frozen=True, slots=True)
 class StrategyConfig:
     entry_timeframe: Timeframe = Timeframe.FIVE_MIN
-    entry_lookback_bars: int = 30
-    one_hour_level_lookback: int = 24
-    fifteen_minute_level_lookback: int = 24
-    structure_bars: int = 4
-    sweep_search_bars: int = 8
-    max_bars_after_sweep: int = 3
-    max_bars_after_mss: int = 2
+    entry_lookback_bars: int = 120
+    one_hour_level_lookback: int = 30
+    fifteen_minute_level_lookback: int = 30
+    structure_bars: int = 8
+    sweep_search_bars: int = 30
+    max_bars_after_sweep: int = 8
+    max_bars_after_mss: int = 5
     atr_period: int = 14
     min_sweep_penetration_atr: float = 0.05
     min_sweep_penetration_pct: float = 0.0003
     max_sweep_depth_atr: float = 1.50
     min_rejection_wick_fraction: float = 0.25
     min_displacement_body_fraction: float = 0.50
-    min_relative_volume: float = 0.90
+    min_relative_volume: float = 1.00
     require_volume_confirmation: bool = True
     max_spread_bps: float = 20.0
     stop_buffer_atr: float = 0.05
-    max_stop_atr: float = 2.50
+    max_stop_atr: float = 2.00
     max_chase_atr: float = 0.75
     min_rr: float = 1.50
     preferred_rr: float = 2.50
     max_target_rr: float = 5.00
-    min_confidence: float = 0.58
+    min_confidence: float = 0.62
 
     def __post_init__(self) -> None:
         if self.entry_timeframe not in (Timeframe.THREE_MIN, Timeframe.FIVE_MIN):
@@ -87,7 +87,7 @@ class SetupAnalysis:
 
 
 class LiquiditySweepReversalStrategy:
-    VERSION = "lsr.mtf.v1"
+    VERSION = "lsr.mtf.v2"
 
     def __init__(self, config: StrategyConfig | None = None) -> None:
         self.config = config or StrategyConfig()
@@ -134,8 +134,7 @@ class LiquiditySweepReversalStrategy:
             )
 
         sweep_levels = _liquidity_levels(
-            snapshot.one_hour,
-            snapshot.fifteen_minute,
+            snapshot,
             side,
             one_hour_limit=c.one_hour_level_lookback,
             fifteen_limit=c.fifteen_minute_level_lookback,
@@ -257,7 +256,7 @@ class LiquiditySweepReversalStrategy:
             return SetupAnalysis(False, 0.0, "sweep did not produce local MSS", sweep_index=sweep_index, vetoes=("no_local_mss",), side=side)
 
         mss = entry[mss_index]
-        relative_volume = _relative_volume(entry, mss_index, 12)
+        relative_volume = _relative_volume(entry, mss_index, 20)
         displacement = (
             (side is Side.BUY and mss.bullish and mss.close > structure_level)
             or (side is Side.SELL and mss.bearish and mss.close < structure_level)
@@ -294,11 +293,11 @@ class LiquiditySweepReversalStrategy:
         if side is Side.BUY:
             stop_price = min(sweep.low, mss.low) - c.stop_buffer_atr * atr
             risk = entry_price - stop_price
-            opposing_levels = _liquidity_levels(snapshot.one_hour, snapshot.fifteen_minute, Side.SELL, one_hour_limit=c.one_hour_level_lookback, fifteen_limit=c.fifteen_minute_level_lookback)
+            opposing_levels = _liquidity_levels(snapshot, Side.SELL, one_hour_limit=c.one_hour_level_lookback, fifteen_limit=c.fifteen_minute_level_lookback)
         else:
             stop_price = max(sweep.high, mss.high) + c.stop_buffer_atr * atr
             risk = stop_price - entry_price
-            opposing_levels = _liquidity_levels(snapshot.one_hour, snapshot.fifteen_minute, Side.BUY, one_hour_limit=c.one_hour_level_lookback, fifteen_limit=c.fifteen_minute_level_lookback)
+            opposing_levels = _liquidity_levels(snapshot, Side.BUY, one_hour_limit=c.one_hour_level_lookback, fifteen_limit=c.fifteen_minute_level_lookback)
 
         if risk <= 0 or risk > c.max_stop_atr * atr:
             return SetupAnalysis(False, 0.0, "entry stop is too wide", sweep_index=sweep_index, mss_index=mss_index, trigger_index=trigger_index, vetoes=("stop_too_wide",), side=side)
@@ -399,24 +398,35 @@ def _swing_points(candles: tuple[Candle, ...], *, is_high: bool, span: int = 2) 
 
 
 def _liquidity_levels(
-    one_hour: tuple[Candle, ...],
-    fifteen_minute: tuple[Candle, ...],
+    snapshot: MultiTimeframeSnapshot,
     side: Side,
     *,
     one_hour_limit: int,
     fifteen_limit: int,
 ) -> list[tuple[float, str]]:
     levels: list[tuple[float, str]] = []
+    if snapshot.daily:
+        prior_daily = snapshot.daily[-1]
+        levels.append(
+            (
+                prior_daily.low if side is Side.BUY else prior_daily.high,
+                "prior-day",
+            )
+        )
+
     for source, candles in (
-        ("1H", one_hour[-one_hour_limit:]),
-        ("15M", fifteen_minute[-fifteen_limit:]),
+        ("1H", snapshot.one_hour[-one_hour_limit:]),
+        ("15M", snapshot.fifteen_minute[-fifteen_limit:]),
     ):
         for level in _swing_points(candles, is_high=side is Side.SELL):
             levels.append((level, source))
 
     result: list[tuple[float, str]] = []
     for level, source in levels:
-        if not any(abs(level - existing) <= max(level, existing) * 1e-6 for existing, _ in result):
+        if not any(
+            abs(level - existing) <= max(level, existing) * 1e-6
+            for existing, _ in result
+        ):
             result.append((level, source))
     return result
 
@@ -449,6 +459,28 @@ def _alignment_score(
         elif bias == -target:
             score -= weight
     return max(0.0, min(1.0, score))
+
+
+def _has_fvg(
+    candles: tuple[Candle, ...],
+    start: int,
+    end: int,
+    side: Side,
+) -> bool:
+    for index in range(max(2, start), min(len(candles), end + 1)):
+        if (
+            side is Side.BUY
+            and candles[index - 2].high < candles[index].low
+            and candles[index].bullish
+        ):
+            return True
+        if (
+            side is Side.SELL
+            and candles[index - 2].low > candles[index].high
+            and candles[index].bearish
+        ):
+            return True
+    return False
 
 
 def _relative_volume(candles: tuple[Candle, ...], index: int, window: int) -> float:
