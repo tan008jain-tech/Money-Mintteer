@@ -2,41 +2,36 @@
 
 Money Mintter is an event-driven market-analysis and paper-trading system designed to evolve toward autonomous multi-market trading.
 
-## Current decision stack
+## Current system
 
-- external coarse universe boundary;
-- hard market-quality verification;
-- maximum of five deep candidates;
-- two-sided intraday liquidity-sweep strategy, lsr.v4;
-- causal prior-session and intraday liquidity analysis;
-- local market-structure shift, displacement, volume and close confirmation;
-- ATR-based structural risk and reward-room checks;
-- explicit veto reasons and deterministic confidence scoring;
-- immediate re-entry allowed after a fresh confirmation.
+- FMP coarse universe during temporary development.
+- Maximum five deep candidates; existing positions managed separately.
+- Daily / 4H broad filters.
+- 1H primary intraday trend and liquidity.
+- 15M secondary structure and liquidity.
+- 5M or 3M entry analysis.
+- 1M execution and tracking only.
+- Long and short signals.
+- Causal multi-timeframe aggregation.
+- Structure-aware stops, reward-room checks and risk sizing.
+- Event-order-aware backtesting with session and time exits.
+- HF Data Library 1-minute historical adapter.
+- Chronological walk-forward validation boundary.
 
-## Research stack
+## Strategy status
 
-- event-order-aware long/short backtester;
-- spread, slippage and commission modelling;
-- next-bar execution;
-- pessimistic same-bar stop/target collision handling;
-- profit factor, expectancy-R, drawdown and consecutive-loss metrics;
-- chronological walk-forward validation;
-- HF Data Library 1-minute historical adapter;
-- causal session context and intraday liquidity calculation.
+lsr.mtf.v1 is the current research baseline. It is an implementation baseline, not a profitability claim.
 
-## Strategy warning
+Do not judge it from one symbol or one month. Run diagnostics first, then multi-symbol and multi-regime backtests, followed by out-of-sample validation.
 
-There is no verified profitability yet. Synthetic tests verify implementation behavior, not market edge. Real historical testing, realistic costs, multi-symbol coverage and out-of-sample validation are required before paper or live deployment.
+## Temporary data path
 
-## Temporary data stack
+FMP -> universe candidates
 
-FMP supplies the coarse universe during the temporary development period.
+HF Data Library 1M -> 4H / 1H / 15M / 5M or 3M -> strategy -> 1M execution-aware backtester
 
-HF Data Library supplies historical 1-minute research data.
+IBKR will later replace temporary market-data and execution providers behind normalized interfaces.
 
-IBKR can later replace the temporary provider layer without changing the strategy, risk or paper-trading interfaces.
+## Security
 
-## Live boundary
-
-Money Mintter is fail-closed by default. Live broker credentials are not accepted through chat and are not committed to the repository.
+API keys stay in local environment files or deployment secret stores and are never committed.

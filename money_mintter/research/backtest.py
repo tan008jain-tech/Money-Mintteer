@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable
+from datetime import date, time, timedelta
+from typing import Protocol
+from zoneinfo import ZoneInfo
 
 from money_mintter.domain import Side
-from money_mintter.strategy import Candle, LiquiditySweepReversalStrategy, StrategyInput
+from money_mintter.strategy import Candle, LiquiditySweepReversalStrategy, MultiTimeframeSeries
 
 
 @dataclass(frozen=True, slots=True)
@@ -15,7 +17,12 @@ class BacktestConfig:
     spread_bps: float = 5.0
     slippage_bps: float = 5.0
     commission_bps: float = 2.0
-    max_holding_bars: int = 60
+    max_holding_minutes: int = 120
+    session_start: time = time(9, 30)
+    session_end: time = time(16, 0)
+    evaluation_start: date | None = None
+    evaluation_end: date | None = None
+    timezone_name: str = "America/New_York"
 
     def __post_init__(self) -> None:
         if self.initial_capital <= 0:
@@ -26,8 +33,18 @@ class BacktestConfig:
             raise ValueError("max position must be in (0, 1]")
         if min(self.spread_bps, self.slippage_bps, self.commission_bps) < 0:
             raise ValueError("execution costs cannot be negative")
-        if self.max_holding_bars <= 0:
-            raise ValueError("max holding bars must be positive")
+        if self.max_holding_minutes <= 0:
+            raise ValueError("max holding time must be positive")
+        if self.session_start >= self.session_end:
+            raise ValueError("session start must precede session end")
+        if self.evaluation_start and self.evaluation_end and self.evaluation_start > self.evaluation_end:
+            raise ValueError("evaluation start must precede evaluation end")
+
+
+class StrategyLike(Protocol):
+    config: object
+
+    def signal(self, snapshot): ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,90 +102,88 @@ class _OpenTrade:
     risk_dollars: float
 
 
-ContextProvider = Callable[[int], StrategyInput | None]
-
-
 class StrategyBacktester:
-    """Event-order-aware two-sided long/short backtester."""
+    """Run MTF analysis on closed HTF/entry bars with 1-minute execution."""
 
     def __init__(
         self,
-        strategy: LiquiditySweepReversalStrategy,
+        strategy: StrategyLike | LiquiditySweepReversalStrategy,
         config: BacktestConfig | None = None,
     ) -> None:
         self.strategy = strategy
         self.config = config or BacktestConfig()
 
-    def run(
-        self,
-        candles: list[Candle],
-        context_provider: ContextProvider,
-    ) -> BacktestReport:
+    def run(self, candles: list[Candle]) -> BacktestReport:
         if not candles:
-            raise ValueError("backtest requires at least one candle")
+            raise ValueError("backtest requires 1-minute candles")
 
-        cfg = self.config
-        cash = cfg.initial_capital
+        ordered = sorted(candles, key=lambda candle: candle.timestamp)
+        entry_timeframe = getattr(self.strategy.config, "entry_timeframe", None)
+        if entry_timeframe is None:
+            raise ValueError("strategy must expose an entry_timeframe")
+
+        series = MultiTimeframeSeries.from_1m(
+            ordered,
+            entry_timeframe=entry_timeframe,
+            timezone_name=self.config.timezone_name,
+            spread_bps=self.config.spread_bps,
+        )
+        timezone = ZoneInfo(self.config.timezone_name)
+        penalty = self.config.spread_bps / 20_000 + self.config.slippage_bps / 10_000
+
+        signals_by_execution_time = {}
+        for entry_bar in series.entry.bars:
+            as_of = entry_bar.timestamp + timedelta(minutes=series.entry.timeframe.minutes)
+            if as_of > series.source_end:
+                continue
+            local = as_of.astimezone(timezone)
+            if not self._within_session(local.time()) or not self._within_evaluation_window(local.date()):
+                continue
+            signal = self.strategy.signal(series.snapshot_at(as_of, lookback_bars=96))
+            if signal is not None:
+                signals_by_execution_time[as_of] = signal
+
+        cash = self.config.initial_capital
         open_trade: _OpenTrade | None = None
-        pending_signal = None
         trades: list[BacktestTrade] = []
         equity_curve = [cash]
-        execution_penalty = cfg.spread_bps / 20_000 + cfg.slippage_bps / 10_000
 
-        for index, bar in enumerate(candles):
-            if pending_signal is not None and open_trade is None:
-                signal = pending_signal
-                pending_signal = None
+        for index, bar in enumerate(ordered):
+            local = bar.timestamp.astimezone(timezone)
+            local_time = local.time()
 
-                if signal.side is Side.BUY:
-                    entry_price = bar.open * (1 + execution_penalty)
-                    risk_per_share = entry_price - signal.stop_price
-                else:
-                    entry_price = bar.open * (1 - execution_penalty)
-                    risk_per_share = signal.stop_price - entry_price
-
-                if risk_per_share <= 0:
-                    continue
-
-                risk_budget = cash * cfg.risk_per_trade_pct
-                max_notional = cash * cfg.max_position_pct
-                quantity = min(
-                    risk_budget / risk_per_share,
-                    max_notional / entry_price,
-                )
-                if quantity <= 0:
-                    continue
-
-                entry_fee = entry_price * quantity * cfg.commission_bps / 10_000
-
-                if signal.side is Side.BUY:
-                    total_entry_cost = entry_price * quantity + entry_fee
-                    if total_entry_cost > cash:
-                        quantity = max(0.0, (cash - entry_fee) / entry_price)
-                        if quantity <= 0:
-                            continue
-                        entry_fee = entry_price * quantity * cfg.commission_bps / 10_000
-                        total_entry_cost = entry_price * quantity + entry_fee
-                    cash -= total_entry_cost
-                else:
-                    cash -= entry_fee
-
-                open_trade = _OpenTrade(
-                    symbol=signal.symbol,
-                    side=signal.side,
-                    entry_index=index,
-                    entry_time=bar.timestamp,
-                    quantity=quantity,
-                    entry_price=entry_price,
-                    stop_price=signal.stop_price,
-                    target_price=signal.target_price,
-                    entry_fee=entry_fee,
-                    risk_dollars=risk_per_share * quantity,
-                )
+            if (
+                open_trade is None
+                and self._within_session(local_time)
+                and self._within_evaluation_window(local.date())
+            ):
+                signal = signals_by_execution_time.get(bar.timestamp)
+                if signal is not None:
+                    opened = self._open_trade(signal, bar, cash, penalty, index)
+                    if opened is not None:
+                        open_trade = opened
+                        if signal.side is Side.BUY:
+                            cash -= open_trade.entry_price * open_trade.quantity + open_trade.entry_fee
+                        else:
+                            cash -= open_trade.entry_fee
 
             if open_trade is not None:
                 reason: str | None = None
                 raw_exit: float | None = None
+
+                session_close_bar = (
+                    local_time >= self.config.session_end
+                    or (
+                        local_time < self.config.session_end
+                        and bar.timestamp + timedelta(minutes=1)
+                        >= local.replace(
+                            hour=self.config.session_end.hour,
+                            minute=self.config.session_end.minute,
+                            second=0,
+                            microsecond=0,
+                        )
+                    )
+                )
 
                 if open_trade.side is Side.BUY:
                     if bar.open <= open_trade.stop_price:
@@ -181,8 +196,6 @@ class StrategyBacktester:
                         reason, raw_exit = "stop", open_trade.stop_price
                     elif bar.high >= open_trade.target_price:
                         reason, raw_exit = "target", open_trade.target_price
-                    elif index - open_trade.entry_index >= cfg.max_holding_bars:
-                        reason, raw_exit = "time_exit", bar.close
                 else:
                     if bar.open >= open_trade.stop_price:
                         reason, raw_exit = "stop_gap", bar.open
@@ -194,35 +207,32 @@ class StrategyBacktester:
                         reason, raw_exit = "stop", open_trade.stop_price
                     elif bar.low <= open_trade.target_price:
                         reason, raw_exit = "target", open_trade.target_price
-                    elif index - open_trade.entry_index >= cfg.max_holding_bars:
-                        reason, raw_exit = "time_exit", bar.close
 
-                if open_trade.side is Side.BUY:
-                    mark_value = cash + open_trade.quantity * bar.close
-                else:
-                    mark_value = cash + (
-                        open_trade.entry_price - bar.close
-                    ) * open_trade.quantity
+                holding_minutes = (
+                    bar.timestamp - ordered[open_trade.entry_index].timestamp
+                ).total_seconds() / 60
+                if raw_exit is None and holding_minutes >= self.config.max_holding_minutes:
+                    reason, raw_exit = "time_exit", bar.close
+                if raw_exit is None and session_close_bar:
+                    reason, raw_exit = "session_exit", bar.close
 
-                equity_curve.append(cash if raw_exit is not None else mark_value)
+                mark_value = (
+                    cash + open_trade.quantity * bar.close
+                    if open_trade.side is Side.BUY
+                    else cash + (open_trade.entry_price - bar.close) * open_trade.quantity
+                )
 
                 if raw_exit is not None:
-                    if open_trade.side is Side.BUY:
-                        exit_price = raw_exit * (1 - execution_penalty)
-                        pnl_before_fees = (
-                            exit_price - open_trade.entry_price
-                        ) * open_trade.quantity
-                    else:
-                        exit_price = raw_exit * (1 + execution_penalty)
-                        pnl_before_fees = (
-                            open_trade.entry_price - exit_price
-                        ) * open_trade.quantity
-
-                    exit_fee = (
-                        exit_price
-                        * open_trade.quantity
-                        * cfg.commission_bps
-                        / 10_000
+                    exit_price = (
+                        raw_exit * (1 - penalty)
+                        if open_trade.side is Side.BUY
+                        else raw_exit * (1 + penalty)
+                    )
+                    exit_fee = exit_price * open_trade.quantity * self.config.commission_bps / 10_000
+                    pnl_before_fees = (
+                        (exit_price - open_trade.entry_price) * open_trade.quantity
+                        if open_trade.side is Side.BUY
+                        else (open_trade.entry_price - exit_price) * open_trade.quantity
                     )
                     if open_trade.side is Side.BUY:
                         cash += exit_price * open_trade.quantity - exit_fee
@@ -230,91 +240,75 @@ class StrategyBacktester:
                         cash += pnl_before_fees - exit_fee
 
                     pnl = pnl_before_fees - open_trade.entry_fee - exit_fee
-                    r_multiple = (
-                        pnl / open_trade.risk_dollars
-                        if open_trade.risk_dollars > 0
-                        else 0.0
-                    )
+                    r_multiple = pnl / open_trade.risk_dollars if open_trade.risk_dollars else 0.0
                     trades.append(
                         BacktestTrade(
-                            symbol=open_trade.symbol,
-                            side=open_trade.side,
-                            entry_index=open_trade.entry_index,
-                            exit_index=index,
-                            entry_time=open_trade.entry_time,
-                            exit_time=bar.timestamp,
-                            quantity=open_trade.quantity,
-                            entry_price=open_trade.entry_price,
-                            exit_price=exit_price,
-                            stop_price=open_trade.stop_price,
-                            target_price=open_trade.target_price,
-                            pnl=pnl,
-                            r_multiple=r_multiple,
-                            exit_reason=reason or "unknown",
-                            entry_fee=open_trade.entry_fee,
-                            exit_fee=exit_fee,
+                            open_trade.symbol,
+                            open_trade.side,
+                            open_trade.entry_index,
+                            index,
+                            open_trade.entry_time,
+                            bar.timestamp,
+                            open_trade.quantity,
+                            open_trade.entry_price,
+                            exit_price,
+                            open_trade.stop_price,
+                            open_trade.target_price,
+                            pnl,
+                            r_multiple,
+                            reason or "unknown",
+                            open_trade.entry_fee,
+                            exit_fee,
                         )
                     )
                     open_trade = None
+                    equity_curve.append(cash)
+                else:
+                    equity_curve.append(mark_value)
             else:
                 equity_curve.append(cash)
 
-            if open_trade is None and index + 1 < len(candles):
-                context = context_provider(index)
-                if context is not None:
-                    pending_signal = self.strategy.signal(candles[: index + 1], context)
-
         if open_trade is not None:
-            final_bar = candles[-1]
-            if open_trade.side is Side.BUY:
-                exit_price = final_bar.close * (1 - execution_penalty)
-                pnl_before_fees = (
-                    exit_price - open_trade.entry_price
-                ) * open_trade.quantity
-            else:
-                exit_price = final_bar.close * (1 + execution_penalty)
-                pnl_before_fees = (
-                    open_trade.entry_price - exit_price
-                ) * open_trade.quantity
-
-            exit_fee = (
-                exit_price * open_trade.quantity * cfg.commission_bps / 10_000
+            final_bar = ordered[-1]
+            exit_price = (
+                final_bar.close * (1 - penalty)
+                if open_trade.side is Side.BUY
+                else final_bar.close * (1 + penalty)
             )
+            pnl_before_fees = (
+                (exit_price - open_trade.entry_price) * open_trade.quantity
+                if open_trade.side is Side.BUY
+                else (open_trade.entry_price - exit_price) * open_trade.quantity
+            )
+            exit_fee = exit_price * open_trade.quantity * self.config.commission_bps / 10_000
             if open_trade.side is Side.BUY:
                 cash += exit_price * open_trade.quantity - exit_fee
             else:
                 cash += pnl_before_fees - exit_fee
-
             pnl = pnl_before_fees - open_trade.entry_fee - exit_fee
-            r_multiple = (
-                pnl / open_trade.risk_dollars
-                if open_trade.risk_dollars > 0
-                else 0.0
-            )
             trades.append(
                 BacktestTrade(
-                    symbol=open_trade.symbol,
-                    side=open_trade.side,
-                    entry_index=open_trade.entry_index,
-                    exit_index=len(candles) - 1,
-                    entry_time=open_trade.entry_time,
-                    exit_time=final_bar.timestamp,
-                    quantity=open_trade.quantity,
-                    entry_price=open_trade.entry_price,
-                    exit_price=exit_price,
-                    stop_price=open_trade.stop_price,
-                    target_price=open_trade.target_price,
-                    pnl=pnl,
-                    r_multiple=r_multiple,
-                    exit_reason="end_of_data",
-                    entry_fee=open_trade.entry_fee,
-                    exit_fee=exit_fee,
+                    open_trade.symbol,
+                    open_trade.side,
+                    open_trade.entry_index,
+                    len(ordered) - 1,
+                    open_trade.entry_time,
+                    final_bar.timestamp,
+                    open_trade.quantity,
+                    open_trade.entry_price,
+                    exit_price,
+                    open_trade.stop_price,
+                    open_trade.target_price,
+                    pnl,
+                    pnl / open_trade.risk_dollars if open_trade.risk_dollars else 0.0,
+                    "end_of_data",
+                    open_trade.entry_fee,
+                    exit_fee,
                 )
             )
 
-        ending_capital = cash
-        wins = sum(1 for trade in trades if trade.pnl > 0)
-        losses = sum(1 for trade in trades if trade.pnl < 0)
+        wins = sum(trade.pnl > 0 for trade in trades)
+        losses = sum(trade.pnl < 0 for trade in trades)
         gross_profit = sum(trade.pnl for trade in trades if trade.pnl > 0)
         gross_loss = -sum(trade.pnl for trade in trades if trade.pnl < 0)
         r_values = [trade.r_multiple for trade in trades]
@@ -326,34 +320,81 @@ class StrategyBacktester:
             if peak > 0:
                 max_drawdown = max(max_drawdown, (peak - equity) / peak)
 
-        max_consecutive_losses = 0
-        current_losses = 0
+        streak = 0
+        max_streak = 0
         for trade in trades:
             if trade.pnl < 0:
-                current_losses += 1
-                max_consecutive_losses = max(max_consecutive_losses, current_losses)
+                streak += 1
+                max_streak = max(max_streak, streak)
             else:
-                current_losses = 0
+                streak = 0
 
         win_rs = [trade.r_multiple for trade in trades if trade.pnl > 0]
         loss_rs = [trade.r_multiple for trade in trades if trade.pnl < 0]
 
         return BacktestReport(
-            initial_capital=cfg.initial_capital,
-            ending_capital=ending_capital,
-            net_pnl=ending_capital - cfg.initial_capital,
-            return_pct=(ending_capital / cfg.initial_capital - 1) * 100,
-            trade_count=len(trades),
-            wins=wins,
-            losses=losses,
-            win_rate=wins / len(trades) if trades else 0.0,
-            gross_profit=gross_profit,
-            gross_loss=gross_loss,
-            profit_factor=gross_profit / gross_loss if gross_loss > 0 else float("inf"),
-            expectancy_r=sum(r_values) / len(r_values) if r_values else 0.0,
-            average_win_r=sum(win_rs) / len(win_rs) if win_rs else 0.0,
-            average_loss_r=sum(loss_rs) / len(loss_rs) if loss_rs else 0.0,
-            max_drawdown_pct=max_drawdown * 100,
-            max_consecutive_losses=max_consecutive_losses,
-            trades=tuple(trades),
+            self.config.initial_capital,
+            cash,
+            cash - self.config.initial_capital,
+            (cash / self.config.initial_capital - 1) * 100,
+            len(trades),
+            wins,
+            losses,
+            wins / len(trades) if trades else 0.0,
+            gross_profit,
+            gross_loss,
+            gross_profit / gross_loss if gross_loss > 0 else float("inf"),
+            sum(r_values) / len(r_values) if r_values else 0.0,
+            sum(win_rs) / len(win_rs) if win_rs else 0.0,
+            sum(loss_rs) / len(loss_rs) if loss_rs else 0.0,
+            max_drawdown * 100,
+            max_streak,
+            tuple(trades),
+        )
+
+    def _open_trade(self, signal, bar: Candle, cash: float, penalty: float, entry_index: int) -> _OpenTrade | None:
+        if signal.side is Side.BUY:
+            entry_price = bar.open * (1 + penalty)
+            risk_per_share = entry_price - signal.stop_price
+        else:
+            entry_price = bar.open * (1 - penalty)
+            risk_per_share = signal.stop_price - entry_price
+        if risk_per_share <= 0:
+            return None
+
+        risk_budget = cash * self.config.risk_per_trade_pct
+        max_notional = cash * self.config.max_position_pct
+        quantity = min(risk_budget / risk_per_share, max_notional / entry_price)
+        if quantity <= 0:
+            return None
+
+        entry_fee = entry_price * quantity * self.config.commission_bps / 10_000
+        if signal.side is Side.BUY and entry_price * quantity + entry_fee > cash:
+            quantity = max(0.0, (cash - entry_fee) / entry_price)
+            entry_fee = entry_price * quantity * self.config.commission_bps / 10_000
+        if signal.side is Side.SELL and entry_fee > cash:
+            return None
+        if quantity <= 0:
+            return None
+
+        return _OpenTrade(
+            signal.symbol,
+            signal.side,
+            entry_index,
+            bar.timestamp,
+            quantity,
+            entry_price,
+            signal.stop_price,
+            signal.target_price,
+            entry_fee,
+            risk_per_share * quantity,
+        )
+
+    def _within_session(self, local_time: time) -> bool:
+        return self.config.session_start <= local_time < self.config.session_end
+
+    def _within_evaluation_window(self, local_date: date) -> bool:
+        return (
+            (self.config.evaluation_start is None or local_date >= self.config.evaluation_start)
+            and (self.config.evaluation_end is None or local_date <= self.config.evaluation_end)
         )

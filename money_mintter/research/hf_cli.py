@@ -1,43 +1,40 @@
 from __future__ import annotations
 
 import argparse
-from datetime import date
+from datetime import date, timedelta
 
 from money_mintter.data.hf import HfCandleLoader, HfDataError
 from money_mintter.research.backtest import BacktestConfig, StrategyBacktester
-from money_mintter.research.context import PreviousSessionContext
-from money_mintter.strategy import LiquiditySweepReversalStrategy
+from money_mintter.strategy import LiquiditySweepReversalStrategy, StrategyConfig, Timeframe
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(
-        description="Run the Money Mintter strategy on an HF 1-minute CSV."
-    )
+    parser = argparse.ArgumentParser(description="Run the Money Mintter multi-timeframe intraday backtest.")
     parser.add_argument("csv_path")
     parser.add_argument("symbol")
     parser.add_argument("--start", required=True, help="YYYY-MM-DD")
     parser.add_argument("--end", required=True, help="YYYY-MM-DD")
     parser.add_argument("--timezone", default="America/New_York")
+    parser.add_argument("--entry-minutes", type=int, choices=(3, 5), default=5)
+    parser.add_argument("--warmup-days", type=int, default=10)
     parser.add_argument("--spread-bps", type=float, default=5.0)
     parser.add_argument("--slippage-bps", type=float, default=5.0)
     parser.add_argument("--commission-bps", type=float, default=2.0)
-    parser.add_argument("--max-holding-bars", type=int, default=60)
+    parser.add_argument("--max-holding-minutes", type=int, default=120)
     args = parser.parse_args()
 
-    try:
-        start = date.fromisoformat(args.start)
-        end = date.fromisoformat(args.end)
-    except ValueError as exc:
-        parser.error(f"dates must use YYYY-MM-DD: {exc}")
-
+    start = date.fromisoformat(args.start)
+    end = date.fromisoformat(args.end)
     if start > end:
         parser.error("--start cannot be after --end")
+    if args.warmup_days < 0:
+        parser.error("--warmup-days cannot be negative")
 
     try:
         candles = HfCandleLoader().load(
             args.csv_path,
             args.symbol,
-            start=start,
+            start=start - timedelta(days=args.warmup_days),
             end=end,
             timezone_name=args.timezone,
         )
@@ -45,24 +42,29 @@ def main() -> int:
         print(f"HF backtest data error: {exc}")
         return 1
 
-    context = PreviousSessionContext(
-        candles,
-        timezone_name=args.timezone,
-        spread_bps=args.spread_bps,
-    )
+    entry_tf = Timeframe.THREE_MIN if args.entry_minutes == 3 else Timeframe.FIVE_MIN
+    strategy = LiquiditySweepReversalStrategy(StrategyConfig(entry_timeframe=entry_tf))
     report = StrategyBacktester(
-        LiquiditySweepReversalStrategy(),
+        strategy,
         BacktestConfig(
             spread_bps=args.spread_bps,
             slippage_bps=args.slippage_bps,
             commission_bps=args.commission_bps,
-            max_holding_bars=args.max_holding_bars,
+            max_holding_minutes=args.max_holding_minutes,
+            evaluation_start=start,
+            evaluation_end=end,
+            timezone_name=args.timezone,
         ),
-    ).run(candles, lambda index: context(index, candles))
+    ).run(candles)
 
     print(f"Symbol: {args.symbol.upper()}")
-    print(f"Period: {start} to {end}")
-    print(f"Candles: {len(candles)}")
+    print(f"Evaluation period: {start} to {end}")
+    print(
+        "Architecture: 4H/daily filters -> 1H context -> 15M structure -> "
+        f"{args.entry_minutes}M entry -> 1M execution/tracking"
+    )
+    print(f"Warmup: {args.warmup_days} days")
+    print(f"Raw candles loaded: {len(candles)}")
     print(f"Trades: {report.trade_count}")
     print(f"Wins / losses: {report.wins} / {report.losses}")
     print(f"Win rate: {report.win_rate:.2%}")

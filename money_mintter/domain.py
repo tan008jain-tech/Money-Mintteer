@@ -36,7 +36,12 @@ class Candidate:
     timestamp: datetime
 
     def __post_init__(self) -> None:
-        scores = (self.liquidity_score, self.volatility_score, self.activity_score, self.signal_quality_score)
+        scores = (
+            self.liquidity_score,
+            self.volatility_score,
+            self.activity_score,
+            self.signal_quality_score,
+        )
         if any(not 0 <= score <= 1 for score in scores):
             raise ValueError("candidate scores must be in [0, 1]")
 
@@ -51,7 +56,7 @@ class TradeSignal:
     confidence: float
     timestamp: datetime
     reason: str
-    strategy_version: str = "lsr.v4"
+    strategy_version: str = "lsr.mtf.v1"
 
     def __post_init__(self) -> None:
         if min(self.entry_price, self.stop_price, self.target_price) <= 0:

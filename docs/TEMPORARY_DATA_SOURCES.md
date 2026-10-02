@@ -1,34 +1,13 @@
-# Temporary Market-Data Stack
+# Temporary Data Sources
 
-Money Mintter keeps temporary providers behind provider-neutral boundaries so they can be replaced by IBKR later.
+## FMP
 
-## Temporary universe source
+Used only for coarse universe discovery while IBKR is unavailable.
 
-FMP is currently used only for coarse universe discovery:
+## HF Data Library
 
-- most-actives is the required discovery endpoint;
-- biggest-gainers and biggest-losers are optional enrichments;
-- FMP values are normalized into Candidate objects;
-- the deep strategy does not treat provider movement scores as trade signals.
+Used for temporary 1-minute historical research. Money Mintter performs the multi-timeframe aggregation itself so the same timeframe hierarchy can be tested locally.
 
-## Temporary historical research source
+## Future IBKR replacement
 
-HF Data Library supplies the 1-minute OHLCV research dataset.
-
-The current research path is:
-
-HF 1-minute candles
--> PreviousSessionContext
--> lsr.v4
--> StrategyBacktester
--> WalkForwardValidator
-
-Intraday liquidity is derived from candles inside the strategy and is never accepted as a provider-supplied future-aware signal.
-
-## Credentials
-
-API keys stay in the local environment or deployment secret store and are never committed.
-
-## Replacement path
-
-When IBKR is available, implement the provider-specific data interfaces behind the existing boundaries. Strategy, risk, paper execution, persistence and recovery should not require provider-specific changes.
+IBKR can later replace temporary market-data and execution providers behind the existing normalized interfaces.

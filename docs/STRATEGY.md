@@ -1,45 +1,48 @@
-# Money Mintter Strategy Baseline
+# Money Mintter Strategy
 
-Money Mintter's current research strategy is lsr.v4.
+Current strategy version: lsr.mtf.v1
 
-## Intent
+## Timeframe hierarchy
 
-The strategy is intended to find shorter-duration intraday opportunities while remaining selective about execution quality.
+Daily / 4H
+  -> broad filter only
+1H
+  -> primary intraday trend and important liquidity
+15M
+  -> secondary structure and liquidity
+5M or 3M
+  -> actual entry analysis
+1M
+  -> execution and tracking only
 
-## Flow
+## Rules
 
-prior-session or causal intraday liquidity
--> sweep + reclaim
--> local MSS
--> displacement
--> close-confirmed trigger
--> risk / room / quality
--> long or short
+### Daily and 4H
+These do not create entries. They provide a broad directional filter and can block a trade when both higher-timeframe structures oppose it.
 
-## Long path
+### 1H
+Primary intraday context. Important swing highs/lows and the main intraday trend live here.
 
-Sell-side liquidity is swept and reclaimed. Price then breaks recent local structure to the upside with displacement and closes through the confirmation level.
+### 15M
+Secondary context. It supplies nearer liquidity and refines the 1H structure.
 
-## Short path
+### 5M / 3M
+The entry engine looks for:
 
-Buy-side liquidity is swept and reclaimed. Price then breaks recent local structure to the downside with displacement and closes through the confirmation level.
+1. sweep of 1H or 15M liquidity;
+2. reclaim;
+3. local market-structure shift;
+4. displacement and volume confirmation;
+5. break-and-close confirmation;
+6. structure-aware stop and opposing-liquidity reward room.
 
-## Causal liquidity model
+The latest entry candle must be the confirmation candle before a signal can be emitted.
 
-Prior-session high/low comes from PreviousSessionContext.
+### 1M
+Raw 1-minute candles are not used to create the setup. They are used for next-bar execution, stop/target monitoring, session exits and position tracking.
 
-Intraday liquidity is derived inside the strategy, separately for each candidate sweep, using only candles strictly before that sweep. Confirmed local swing highs/lows and a historical rolling extreme are used. This avoids using a level that did not exist yet at the time of the sweep.
+## Research boundary
 
-## Why this version exists
+Signal frequency is not proof of edge. Validate across multiple symbols, multiple regimes, realistic costs, chronological walk-forward windows and out-of-sample periods.
 
-The earlier baseline was too dependent on prior-session extremes and a broad pre-sweep structure window. That produced a sparse opportunity set for intraday use.
-
-lsr.v4 broadens the measurable intraday opportunity set while explicitly removing the look-ahead path found during the code audit.
-
-This is a research hypothesis, not a profitability claim.
-
-## Validation boundary
-
-Signal frequency is not proof of edge. Validation must use multiple symbols, multiple regimes and months, realistic costs, chronological walk-forward tests and out-of-sample evaluation.
-
-Every TradeSignal carries the strategy version for auditability.
+Every signal carries the strategy version.

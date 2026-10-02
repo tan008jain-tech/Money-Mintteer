@@ -1,123 +1,158 @@
 from datetime import datetime, timedelta, timezone
 
 from money_mintter.domain import Side
-from money_mintter.strategy import Candle, LiquiditySweepReversalStrategy, StrategyInput
+from money_mintter.strategy import (
+    Candle,
+    LiquiditySweepReversalStrategy,
+    MultiTimeframeSnapshot,
+    StrategyConfig,
+    Timeframe,
+)
 
 
-def candle(symbol, index, open_price, high, low, close, volume=1000.0):
+def make_candle(timestamp, close, *, high_pad=0.5, low_pad=0.5, volume=1000):
     return Candle(
-        symbol,
-        datetime(2026, 10, 1, 14, 0, tzinfo=timezone.utc) + timedelta(minutes=index),
-        open_price, high, low, close, volume,
+        "ABC",
+        timestamp,
+        close,
+        close + high_pad,
+        close - low_pad,
+        close,
+        volume,
     )
 
 
-def build_long_setup():
-    bars = [candle("ABC", i, 99.2, 99.35, 99.0, 99.2) for i in range(30)]
-    bars.extend([
-        candle("ABC", 30, 99.05, 99.25, 98.92, 99.12, 2200),
-        candle("ABC", 31, 99.12, 99.45, 99.05, 99.40, 2500),
-        candle("ABC", 32, 99.40, 99.60, 99.30, 99.50, 1800),
-    ])
-    return bars
+def build_snapshot(side: Side) -> MultiTimeframeSnapshot:
+    start = datetime(2026, 10, 1, 9, 30, tzinfo=timezone.utc)
+    direction = 1 if side is Side.BUY else -1
 
-
-def build_short_setup():
-    bars = [candle("ABC", i, 100.8, 101.0, 100.65, 100.8) for i in range(30)]
-    bars.extend([
-        candle("ABC", 30, 100.95, 101.08, 100.85, 100.88, 2200),
-        candle("ABC", 31, 100.88, 101.0, 100.50, 100.55, 2500),
-        candle("ABC", 32, 100.55, 100.70, 100.25, 100.40, 1800),
-    ])
-    return bars
-
-
-def test_detects_long_setup():
-    result = LiquiditySweepReversalStrategy().analyze(
-        build_long_setup(), StrategyInput(99.0, 102.0, 5)
+    daily = tuple(
+        make_candle(start - timedelta(days=8 - i), 100 + direction * i)
+        for i in range(8)
     )
+    four_hour = tuple(
+        make_candle(start - timedelta(hours=32 - i * 4), 100 + direction * i * 0.5)
+        for i in range(8)
+    )
+    one_hour = tuple(
+        make_candle(
+            start - timedelta(hours=12 - i),
+            100 + direction * i * 0.7,
+            high_pad=0.25,
+            low_pad=0.25,
+        )
+        for i in range(12)
+    )
+    fifteen = tuple(
+        make_candle(
+            start - timedelta(minutes=180 - i * 15),
+            100 + direction * i * 0.25,
+            high_pad=0.15,
+            low_pad=0.15,
+        )
+        for i in range(12)
+    )
+
+    entry = [
+        make_candle(start + timedelta(minutes=5 * i), 100.0, volume=1000)
+        for i in range(30)
+    ]
+
+    if side is Side.BUY:
+        entry[-8] = Candle(
+            "ABC",
+            start + timedelta(minutes=5 * 22),
+            100.0,
+            100.2,
+            99.0,
+            99.8,
+            2200,
+        )
+        entry[-7] = Candle(
+            "ABC",
+            start + timedelta(minutes=5 * 23),
+            99.8,
+            101.4,
+            99.7,
+            101.2,
+            2500,
+        )
+        entry[-6] = Candle(
+            "ABC",
+            start + timedelta(minutes=5 * 24),
+            101.2,
+            101.8,
+            101.0,
+            101.6,
+            1800,
+        )
+    else:
+        entry[-8] = Candle(
+            "ABC",
+            start + timedelta(minutes=5 * 22),
+            100.0,
+            101.0,
+            100.8,
+            100.2,
+            2200,
+        )
+        entry[-7] = Candle(
+            "ABC",
+            start + timedelta(minutes=5 * 23),
+            100.2,
+            100.3,
+            98.6,
+            98.8,
+            2500,
+        )
+        entry[-6] = Candle(
+            "ABC",
+            start + timedelta(minutes=5 * 24),
+            98.8,
+            99.0,
+            98.0,
+            98.5,
+            1800,
+        )
+
+    return MultiTimeframeSnapshot(
+        as_of=start + timedelta(minutes=150),
+        daily=daily,
+        four_hour=four_hour,
+        one_hour=one_hour,
+        fifteen_minute=fifteen,
+        entry=tuple(entry),
+        entry_timeframe=Timeframe.FIVE_MIN,
+        spread_bps=5,
+    )
+
+
+def test_long_entry_uses_1h_15m_context_and_5m_trigger():
+    result = LiquiditySweepReversalStrategy().analyze(build_snapshot(Side.BUY))
     assert result.passed, result
     assert result.side is Side.BUY
-    assert result.reward_risk is not None and result.reward_risk >= 1.5
+    assert result.trigger_index == len(build_snapshot(Side.BUY).entry) - 1
+    assert any("1H trend aligned" == item for item in result.confluences)
 
 
-def test_detects_short_setup():
-    result = LiquiditySweepReversalStrategy().analyze(
-        build_short_setup(), StrategyInput(97.0, 101.0, 5)
-    )
+def test_short_entry_is_supported():
+    result = LiquiditySweepReversalStrategy().analyze(build_snapshot(Side.SELL))
     assert result.passed, result
     assert result.side is Side.SELL
     assert result.target_price < result.entry_price < result.stop_price
 
 
-def test_detects_local_intraday_liquidity_without_prior_day_sweep():
-    bars = [candle("ABC", i, 100.0, 100.50, 99.50, 100.0) for i in range(30)]
-    bars.extend([
-        candle("ABC", 30, 100.0, 100.1, 99.20, 99.75, 2200),
-        candle("ABC", 31, 99.75, 101.00, 99.70, 100.85, 2500),
-        candle("ABC", 32, 100.85, 101.20, 100.70, 101.10, 1800),
-    ])
-    result = LiquiditySweepReversalStrategy().analyze(
-        bars,
-        StrategyInput(98.0, 105.0, 5),
+def test_daily_and_4h_can_block_countertrend():
+    snapshot = build_snapshot(Side.BUY)
+    result = LiquiditySweepReversalStrategy().analyze_side(snapshot, Side.SELL)
+    assert "broad_trend_conflict" in result.vetoes
+
+
+def test_wrong_entry_timeframe_is_rejected():
+    snapshot = build_snapshot(Side.BUY)
+    strategy = LiquiditySweepReversalStrategy(
+        StrategyConfig(entry_timeframe=Timeframe.THREE_MIN)
     )
-    assert result.passed, result
-    assert result.side is Side.BUY
-    assert "intraday liquidity" in result.confluences
-
-
-def test_intraday_liquidity_levels_are_causal():
-    bars = [candle("ABC", i, 100.0, 100.50, 99.50, 100.0) for i in range(35)]
-    levels_at_30 = LiquiditySweepReversalStrategy()._intraday_liquidity_levels(
-        bars, 30, Side.SELL
-    )
-    assert max(levels_at_30) <= 100.50
-
-
-def test_signals_both_sides():
-    long_signal = LiquiditySweepReversalStrategy().signal(
-        build_long_setup(), StrategyInput(99.0, 102.0, 5)
-    )
-    short_signal = LiquiditySweepReversalStrategy().signal(
-        build_short_setup(), StrategyInput(97.0, 101.0, 5)
-    )
-    assert long_signal is not None and long_signal.side is Side.BUY
-    assert short_signal is not None and short_signal.side is Side.SELL
-    assert long_signal.strategy_version == "lsr.v4"
-    assert short_signal.strategy_version == "lsr.v4"
-
-
-def test_rejects_wide_spread():
-    result = LiquiditySweepReversalStrategy().analyze(
-        build_long_setup(), StrategyInput(99.0, 102.0, 30)
-    )
+    result = strategy.analyze(snapshot)
     assert not result.passed
-    assert "spread" in result.vetoes
-
-
-def test_short_path_reports_missing_sweep():
-    result = LiquiditySweepReversalStrategy().analyze_side(
-        build_long_setup(), StrategyInput(99.0, 102.0, 5), Side.SELL
-    )
-    assert not result.passed
-    assert "no_short_sweep" in result.vetoes
-
-
-def test_does_not_reemit_old_trigger():
-    bars = build_long_setup()
-    bars.append(candle("ABC", 33, 99.5, 99.55, 99.2, 99.4, 1600))
-    result = LiquiditySweepReversalStrategy().analyze(
-        bars, StrategyInput(99.0, 102.0, 5)
-    )
-    assert not result.passed
-    assert "stale_trigger" in result.vetoes
-
-
-def test_invalid_strategy_liquidity_config_is_rejected():
-    try:
-        from money_mintter.strategy.liquidity_reversal import StrategyConfig
-        StrategyConfig(intraday_liquidity_lookback_bars=5)
-    except ValueError as exc:
-        assert "lookback" in str(exc)
-    else:
-        raise AssertionError("invalid liquidity lookback should fail")
+    assert "entry_timeframe" in result.vetoes
