@@ -155,7 +155,9 @@ def test_long_entry_uses_1h_15m_context_and_5m_trigger():
 
 def test_short_entry_is_supported():
     snapshot = build_snapshot(Side.SELL)
-    result = LiquiditySweepReversalStrategy().analyze(snapshot)
+    result = LiquiditySweepReversalStrategy(
+        StrategyConfig(max_stop_atr=2.5)
+    ).analyze(snapshot)
     assert result.passed, result
     assert result.side is Side.SELL
     assert result.target_price < result.entry_price < result.stop_price
