@@ -1,20 +1,71 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import os
+from dataclasses import dataclass, field
+
+from dotenv import load_dotenv
+
+# Load local development secrets/configuration when present. .env is ignored
+# by Git, so this never requires credentials to be committed.
+load_dotenv()
+
+
+def _env_text(name: str, default: str) -> str:
+    return os.getenv(name, default)
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return float(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be numeric") from exc
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer") from exc
+
+
+def _env_percent(name: str, default: float) -> float:
+    return _env_float(name, default * 100.0) / 100.0
 
 
 @dataclass(frozen=True, slots=True)
 class Settings:
-    initial_capital: float = 10_000.0
-    base_currency: str = "USD"
-    profit_reserve_pct: float = 0.20
-    max_deep_candidates: int = 5
-    min_candidate_score: float = 0.60
-    risk_per_trade_pct: float = 0.005
-    max_position_pct: float = 0.20
-    max_portfolio_risk_pct: float = 0.02
-    paper_slippage_bps: float = 5.0
-    paper_commission_bps: float = 2.0
+    initial_capital: float = field(default_factory=lambda: _env_float("INITIAL_CAPITAL", 10_000.0))
+    base_currency: str = field(default_factory=lambda: _env_text("BASE_CURRENCY", "USD"))
+    profit_reserve_pct: float = field(
+        default_factory=lambda: _env_percent("PROFIT_RESERVE_PCT", 0.20)
+    )
+    max_deep_candidates: int = field(
+        default_factory=lambda: _env_int("MAX_DEEP_CANDIDATES", 5)
+    )
+    min_candidate_score: float = field(
+        default_factory=lambda: _env_float("MIN_CANDIDATE_SCORE", 0.60)
+    )
+    risk_per_trade_pct: float = field(
+        default_factory=lambda: _env_percent("RISK_PER_TRADE_PCT", 0.005)
+    )
+    max_position_pct: float = field(
+        default_factory=lambda: _env_percent("MAX_POSITION_PCT", 0.20)
+    )
+    max_portfolio_risk_pct: float = field(
+        default_factory=lambda: _env_percent("MAX_PORTFOLIO_RISK_PCT", 0.02)
+    )
+    paper_slippage_bps: float = field(
+        default_factory=lambda: _env_float("PAPER_SLIPPAGE_BPS", 5.0)
+    )
+    paper_commission_bps: float = field(
+        default_factory=lambda: _env_float("PAPER_COMMISSION_BPS", 2.0)
+    )
 
     def __post_init__(self) -> None:
         if self.initial_capital <= 0:
