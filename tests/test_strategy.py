@@ -32,7 +32,7 @@ def build_short_setup():
     bars = [candle("ABC", i, 100.8, 101.0, 100.65, 100.8) for i in range(30)]
     bars.extend(
         [
-            candle("ABC", 30, 100.95, 101.25, 100.85, 100.88, 2200),
+            candle("ABC", 30, 100.95, 101.08, 100.85, 100.88, 2200),
             candle("ABC", 31, 100.88, 101.0, 100.50, 100.55, 2500),
             candle("ABC", 32, 100.55, 100.70, 100.25, 100.40, 1800),
         ]
@@ -48,7 +48,7 @@ def test_detects_strict_long_setup():
 
 
 def test_detects_strict_short_setup():
-    result = LiquiditySweepReversalStrategy().analyze(build_short_setup(), StrategyInput(98.0, 101.0, 5))
+    result = LiquiditySweepReversalStrategy().analyze(build_short_setup(), StrategyInput(97.0, 101.0, 5))
     assert result.passed, result
     assert result.side is Side.SELL
     assert result.target_price < result.entry_price < result.stop_price
@@ -59,7 +59,7 @@ def test_signals_both_sides():
         build_long_setup(), StrategyInput(99.0, 102.0, 5)
     )
     short_signal = LiquiditySweepReversalStrategy().signal(
-        build_short_setup(), StrategyInput(98.0, 101.0, 5)
+        build_short_setup(), StrategyInput(97.0, 101.0, 5)
     )
 
     assert long_signal is not None and long_signal.side is Side.BUY

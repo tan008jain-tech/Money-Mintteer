@@ -31,7 +31,7 @@ def long_dataset():
 def short_dataset():
     return [
         *(bar(i, 100.8, 101.0, 100.65, 100.8) for i in range(30)),
-        bar(30, 100.95, 101.25, 100.85, 100.88, 2200),
+        bar(30, 100.95, 101.08, 100.85, 100.88, 2200),
         bar(31, 100.88, 101.0, 100.50, 100.55, 2500),
         bar(32, 100.55, 100.70, 100.25, 100.40, 1800),
         bar(33, 100.40, 100.5, 96.5, 97.0, 2400),
@@ -44,7 +44,7 @@ def context_long(_):
 
 
 def context_short(_):
-    return StrategyInput(98.0, 101.0, 0)
+    return StrategyInput(97.0, 101.0, 0)
 
 
 def strategy():

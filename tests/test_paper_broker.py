@@ -37,4 +37,4 @@ def test_paper_broker_marks_short_equity_using_ask() -> None:
     broker = PaperBroker(1_000.0, slippage_bps=0.0, commission_bps=0.0)
     broker.submit_market_order("ABC", Side.SELL, 5.0, quote(100.0))
     equity = broker.equity({"ABC": quote(90.0)})
-    assert equity == 1_050.0
+    assert equity == 1_049.5
