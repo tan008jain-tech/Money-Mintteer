@@ -33,6 +33,7 @@ class BacktestConfig:
 @dataclass(frozen=True, slots=True)
 class BacktestTrade:
     symbol: str
+    side: Side
     entry_index: int
     exit_index: int
     entry_time: object
@@ -73,6 +74,7 @@ class BacktestReport:
 @dataclass(slots=True)
 class _OpenTrade:
     symbol: str
+    side: Side
     entry_index: int
     entry_time: object
     quantity: float
@@ -87,13 +89,7 @@ ContextProvider = Callable[[int], StrategyInput | None]
 
 
 class StrategyBacktester:
-    """Event-order-aware long-only backtester for the current strategy.
-
-    The strategy may signal only after a candle closes. The backtester therefore
-    executes that signal on the following candle's open, with spread/slippage and
-    commission. Stop/target collisions inside one bar are resolved pessimistically
-    by assuming the stop was hit first.
-    """
+    """Event-order-aware two-sided long/short backtester."""
 
     def __init__(
         self,
@@ -117,18 +113,20 @@ class StrategyBacktester:
         pending_signal = None
         trades: list[BacktestTrade] = []
         equity_curve = [cash]
+        execution_penalty = cfg.spread_bps / 20_000 + cfg.slippage_bps / 10_000
 
         for index, bar in enumerate(candles):
             if pending_signal is not None and open_trade is None:
                 signal = pending_signal
                 pending_signal = None
-                if signal.side is not Side.BUY:
-                    continue
 
-                raw_entry = bar.open
-                execution_penalty = cfg.spread_bps / 20_000 + cfg.slippage_bps / 10_000
-                entry_price = raw_entry * (1 + execution_penalty)
-                risk_per_share = entry_price - signal.stop_price
+                if signal.side is Side.BUY:
+                    entry_price = bar.open * (1 + execution_penalty)
+                    risk_per_share = entry_price - signal.stop_price
+                else:
+                    entry_price = bar.open * (1 - execution_penalty)
+                    risk_per_share = signal.stop_price - entry_price
+
                 if risk_per_share <= 0:
                     continue
 
@@ -142,17 +140,22 @@ class StrategyBacktester:
                     continue
 
                 entry_fee = entry_price * quantity * cfg.commission_bps / 10_000
-                total_entry_cost = entry_price * quantity + entry_fee
-                if total_entry_cost > cash:
-                    quantity = max(0.0, (cash - entry_fee) / entry_price)
-                    if quantity <= 0:
-                        continue
-                    entry_fee = entry_price * quantity * cfg.commission_bps / 10_000
-                    total_entry_cost = entry_price * quantity + entry_fee
 
-                cash -= total_entry_cost
+                if signal.side is Side.BUY:
+                    total_entry_cost = entry_price * quantity + entry_fee
+                    if total_entry_cost > cash:
+                        quantity = max(0.0, (cash - entry_fee) / entry_price)
+                        if quantity <= 0:
+                            continue
+                        entry_fee = entry_price * quantity * cfg.commission_bps / 10_000
+                        total_entry_cost = entry_price * quantity + entry_fee
+                    cash -= total_entry_cost
+                else:
+                    cash -= entry_fee
+
                 open_trade = _OpenTrade(
                     symbol=signal.symbol,
+                    side=signal.side,
                     entry_index=index,
                     entry_time=bar.timestamp,
                     quantity=quantity,
@@ -167,32 +170,66 @@ class StrategyBacktester:
                 reason: str | None = None
                 raw_exit: float | None = None
 
-                # Gap checks use the bar open first.
-                if bar.open <= open_trade.stop_price:
-                    reason, raw_exit = "stop_gap", bar.open
-                elif bar.open >= open_trade.target_price:
-                    reason, raw_exit = "target_gap", bar.open
-                # Inside the bar, stop is deliberately evaluated before target.
-                elif bar.low <= open_trade.stop_price and bar.high >= open_trade.target_price:
-                    reason, raw_exit = "stop_and_target_same_bar", open_trade.stop_price
-                elif bar.low <= open_trade.stop_price:
-                    reason, raw_exit = "stop", open_trade.stop_price
-                elif bar.high >= open_trade.target_price:
-                    reason, raw_exit = "target", open_trade.target_price
-                elif index - open_trade.entry_index >= cfg.max_holding_bars:
-                    reason, raw_exit = "time_exit", bar.close
+                if open_trade.side is Side.BUY:
+                    if bar.open <= open_trade.stop_price:
+                        reason, raw_exit = "stop_gap", bar.open
+                    elif bar.open >= open_trade.target_price:
+                        reason, raw_exit = "target_gap", bar.open
+                    elif bar.low <= open_trade.stop_price and bar.high >= open_trade.target_price:
+                        reason, raw_exit = "stop_and_target_same_bar", open_trade.stop_price
+                    elif bar.low <= open_trade.stop_price:
+                        reason, raw_exit = "stop", open_trade.stop_price
+                    elif bar.high >= open_trade.target_price:
+                        reason, raw_exit = "target", open_trade.target_price
+                    elif index - open_trade.entry_index >= cfg.max_holding_bars:
+                        reason, raw_exit = "time_exit", bar.close
+                else:
+                    if bar.open >= open_trade.stop_price:
+                        reason, raw_exit = "stop_gap", bar.open
+                    elif bar.open <= open_trade.target_price:
+                        reason, raw_exit = "target_gap", bar.open
+                    elif bar.high >= open_trade.stop_price and bar.low <= open_trade.target_price:
+                        reason, raw_exit = "stop_and_target_same_bar", open_trade.stop_price
+                    elif bar.high >= open_trade.stop_price:
+                        reason, raw_exit = "stop", open_trade.stop_price
+                    elif bar.low <= open_trade.target_price:
+                        reason, raw_exit = "target", open_trade.target_price
+                    elif index - open_trade.entry_index >= cfg.max_holding_bars:
+                        reason, raw_exit = "time_exit", bar.close
+
+                if open_trade.side is Side.BUY:
+                    mark_value = cash + open_trade.quantity * bar.close
+                else:
+                    mark_value = cash + (
+                        open_trade.entry_price - bar.close
+                    ) * open_trade.quantity
+
+                equity_curve.append(cash if raw_exit is not None else mark_value)
 
                 if raw_exit is not None:
-                    exit_price = raw_exit * (1 - execution_penalty)
-                    exit_fee = exit_price * open_trade.quantity * cfg.commission_bps / 10_000
-                    proceeds = exit_price * open_trade.quantity - exit_fee
-                    cash += proceeds
+                    if open_trade.side is Side.BUY:
+                        exit_price = raw_exit * (1 - execution_penalty)
+                        pnl_before_fees = (
+                            exit_price - open_trade.entry_price
+                        ) * open_trade.quantity
+                    else:
+                        exit_price = raw_exit * (1 + execution_penalty)
+                        pnl_before_fees = (
+                            open_trade.entry_price - exit_price
+                        ) * open_trade.quantity
 
-                    pnl = (
-                        (exit_price - open_trade.entry_price) * open_trade.quantity
-                        - open_trade.entry_fee
-                        - exit_fee
+                    exit_fee = (
+                        exit_price
+                        * open_trade.quantity
+                        * cfg.commission_bps
+                        / 10_000
                     )
+                    if open_trade.side is Side.BUY:
+                        cash += exit_price * open_trade.quantity - exit_fee
+                    else:
+                        cash += pnl_before_fees - exit_fee
+
+                    pnl = pnl_before_fees - open_trade.entry_fee - exit_fee
                     r_multiple = (
                         pnl / open_trade.risk_dollars
                         if open_trade.risk_dollars > 0
@@ -201,6 +238,7 @@ class StrategyBacktester:
                     trades.append(
                         BacktestTrade(
                             symbol=open_trade.symbol,
+                            side=open_trade.side,
                             entry_index=open_trade.entry_index,
                             exit_index=index,
                             entry_time=open_trade.entry_time,
@@ -212,17 +250,14 @@ class StrategyBacktester:
                             target_price=open_trade.target_price,
                             pnl=pnl,
                             r_multiple=r_multiple,
-                            exit_reason=reason,
+                            exit_reason=reason or "unknown",
                             entry_fee=open_trade.entry_fee,
                             exit_fee=exit_fee,
                         )
                     )
                     open_trade = None
-
-            mark_value = cash
-            if open_trade is not None:
-                mark_value += open_trade.quantity * bar.close
-            equity_curve.append(mark_value)
+            else:
+                equity_curve.append(cash)
 
             if open_trade is None and index + 1 < len(candles):
                 context = context_provider(index)
@@ -231,19 +266,35 @@ class StrategyBacktester:
 
         if open_trade is not None:
             final_bar = candles[-1]
-            execution_penalty = cfg.spread_bps / 20_000 + cfg.slippage_bps / 10_000
-            exit_price = final_bar.close * (1 - execution_penalty)
-            exit_fee = exit_price * open_trade.quantity * cfg.commission_bps / 10_000
-            cash += exit_price * open_trade.quantity - exit_fee
-            pnl = (
-                (exit_price - open_trade.entry_price) * open_trade.quantity
-                - open_trade.entry_fee
-                - exit_fee
+            if open_trade.side is Side.BUY:
+                exit_price = final_bar.close * (1 - execution_penalty)
+                pnl_before_fees = (
+                    exit_price - open_trade.entry_price
+                ) * open_trade.quantity
+            else:
+                exit_price = final_bar.close * (1 + execution_penalty)
+                pnl_before_fees = (
+                    open_trade.entry_price - exit_price
+                ) * open_trade.quantity
+
+            exit_fee = (
+                exit_price * open_trade.quantity * cfg.commission_bps / 10_000
             )
-            r_multiple = pnl / open_trade.risk_dollars if open_trade.risk_dollars > 0 else 0.0
+            if open_trade.side is Side.BUY:
+                cash += exit_price * open_trade.quantity - exit_fee
+            else:
+                cash += pnl_before_fees - exit_fee
+
+            pnl = pnl_before_fees - open_trade.entry_fee - exit_fee
+            r_multiple = (
+                pnl / open_trade.risk_dollars
+                if open_trade.risk_dollars > 0
+                else 0.0
+            )
             trades.append(
                 BacktestTrade(
                     symbol=open_trade.symbol,
+                    side=open_trade.side,
                     entry_index=open_trade.entry_index,
                     exit_index=len(candles) - 1,
                     entry_time=open_trade.entry_time,
@@ -298,9 +349,7 @@ class StrategyBacktester:
             win_rate=wins / len(trades) if trades else 0.0,
             gross_profit=gross_profit,
             gross_loss=gross_loss,
-            profit_factor=(
-                gross_profit / gross_loss if gross_loss > 0 else float("inf")
-            ),
+            profit_factor=gross_profit / gross_loss if gross_loss > 0 else float("inf"),
             expectancy_r=sum(r_values) / len(r_values) if r_values else 0.0,
             average_win_r=sum(win_rs) / len(win_rs) if win_rs else 0.0,
             average_loss_r=sum(loss_rs) / len(loss_rs) if loss_rs else 0.0,

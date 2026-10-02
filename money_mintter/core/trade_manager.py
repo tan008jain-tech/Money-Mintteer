@@ -28,25 +28,31 @@ class TradeManager:
         for trade in self.open_trades.values():
             if trade.side is Side.BUY:
                 total += max(0.0, trade.entry_price - trade.stop_price) * trade.quantity
+            else:
+                total += max(0.0, trade.stop_price - trade.entry_price) * trade.quantity
         return total
 
     def open_trade(self, signal: TradeSignal, quote: Quote) -> TradeEvent:
-        if signal.side is not Side.BUY:
-            return TradeEvent("REJECT", signal.symbol, "short signals are disabled in the first vertical slice")
         if signal.symbol in self.open_trades:
             return TradeEvent("REJECT", signal.symbol, "trade already open")
 
-        decision = self.risk.size_long(
-            available_capital=min(self.wallet.trading_wallet, self.broker.available_cash),
-            entry=quote.ask,
-            stop=signal.stop_price,
-            open_risk=self.open_risk,
-        )
+        available_capital = min(self.wallet.trading_wallet, self.broker.available_cash)
+        if signal.side is Side.BUY:
+            decision = self.risk.size_long(
+                available_capital, quote.ask, signal.stop_price, self.open_risk
+            )
+        else:
+            decision = self.risk.size_short(
+                available_capital, quote.bid, signal.stop_price, self.open_risk
+            )
+
         if not decision.approved:
             return TradeEvent("REJECT", signal.symbol, decision.reason)
 
         try:
-            fill = self.broker.submit_market_order(signal.symbol, Side.BUY, decision.quantity, quote)
+            fill = self.broker.submit_market_order(
+                signal.symbol, signal.side, decision.quantity, quote
+            )
         except BrokerError as exc:
             return TradeEvent("REJECT", signal.symbol, str(exc))
 
@@ -67,17 +73,24 @@ class TradeManager:
         if trade is None:
             return None
 
-        reason: str | None = None
-        if quote.last <= trade.stop_price:
-            reason = "stop"
-        elif quote.last >= trade.target_price:
-            reason = "target"
-        if reason is None:
-            return None
+        if trade.side is Side.BUY:
+            if quote.last <= trade.stop_price:
+                reason, exit_side = "stop", Side.SELL
+            elif quote.last >= trade.target_price:
+                reason, exit_side = "target", Side.SELL
+            else:
+                return None
+        else:
+            if quote.last >= trade.stop_price:
+                reason, exit_side = "stop", Side.BUY
+            elif quote.last <= trade.target_price:
+                reason, exit_side = "target", Side.BUY
+            else:
+                return None
 
         try:
             fill = self.broker.submit_market_order(
-                trade.symbol, Side.SELL, trade.quantity, quote
+                trade.symbol, exit_side, trade.quantity, quote
             )
         except BrokerError as exc:
             return TradeEvent("ERROR", quote.symbol, str(exc))

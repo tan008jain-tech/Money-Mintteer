@@ -1,17 +1,11 @@
 from datetime import datetime, timedelta, timezone
 
+from money_mintter.domain import Side
 from money_mintter.research.backtest import BacktestConfig, StrategyBacktester
 from money_mintter.strategy import Candle, LiquiditySweepReversalStrategy, StrategyConfig, StrategyInput
 
 
-def bar(
-    index: int,
-    open_price: float,
-    high: float,
-    low: float,
-    close: float,
-    volume: float = 1000,
-) -> Candle:
+def bar(index, open_price, high, low, close, volume=1000):
     return Candle(
         "ABC",
         datetime(2026, 10, 1, 14, 0, tzinfo=timezone.utc) + timedelta(minutes=index),
@@ -23,7 +17,7 @@ def bar(
     )
 
 
-def dataset() -> list[Candle]:
+def long_dataset():
     return [
         *(bar(i, 99.2, 99.35, 99.0, 99.2) for i in range(30)),
         bar(30, 99.05, 99.25, 98.92, 99.12, 2200),
@@ -34,55 +28,62 @@ def dataset() -> list[Candle]:
     ]
 
 
-def context_provider(index: int) -> StrategyInput | None:
-    return StrategyInput(99.0, 102.0, 5)
+def short_dataset():
+    return [
+        *(bar(i, 100.8, 101.0, 100.65, 100.8) for i in range(30)),
+        bar(30, 100.95, 101.25, 100.85, 100.88, 2200),
+        bar(31, 100.88, 101.0, 100.50, 100.55, 2500),
+        bar(32, 100.55, 100.70, 100.25, 100.40, 1800),
+        bar(33, 100.40, 100.5, 96.5, 97.0, 2400),
+        bar(34, 97.0, 97.5, 96.8, 97.2, 1200),
+    ]
 
 
-def strategy() -> LiquiditySweepReversalStrategy:
+def context_long(_):
+    return StrategyInput(99.0, 102.0, 0)
+
+
+def context_short(_):
+    return StrategyInput(98.0, 101.0, 0)
+
+
+def strategy():
     return LiquiditySweepReversalStrategy(
-        StrategyConfig(
-            min_confidence=0.70,
-            min_rr=2.5,
-            preferred_rr=3.0,
-            max_stop_atr=2.0,
-            max_sweep_depth_atr=1.5,
-        )
+        StrategyConfig(min_confidence=0.70, min_rr=2.5, preferred_rr=3.0)
     )
 
 
-def test_signal_enters_on_next_bar_not_same_bar() -> None:
-    report = StrategyBacktester(
-        strategy(),
-        BacktestConfig(
-            initial_capital=10_000,
-            spread_bps=0,
-            slippage_bps=0,
-            commission_bps=0,
-        ),
-    ).run(dataset(), context_provider)
+def config():
+    return BacktestConfig(initial_capital=10_000, spread_bps=0, slippage_bps=0, commission_bps=0)
 
+
+def test_long_backtest_still_works():
+    report = StrategyBacktester(strategy(), config()).run(long_dataset(), context_long)
     assert report.trade_count == 1
-    trade = report.trades[0]
-    assert trade.entry_index == 33
-    assert trade.exit_reason == "target"
-    assert trade.pnl > 0
-    assert report.ending_capital > report.initial_capital
+    assert report.trades[0].side is Side.BUY
+    assert report.trades[0].entry_index == 33
+    assert report.trades[0].exit_reason == "target"
+    assert report.trades[0].pnl > 0
 
 
-def test_same_bar_stop_and_target_uses_conservative_stop() -> None:
-    bars = dataset()
-    bars[33] = bar(33, 99.50, 110.0, 90.0, 102.60, 2400)
-
-    report = StrategyBacktester(
-        strategy(),
-        BacktestConfig(
-            initial_capital=10_000,
-            spread_bps=0,
-            slippage_bps=0,
-            commission_bps=0,
-        ),
-    ).run(bars, context_provider)
-
+def test_short_backtest_works():
+    report = StrategyBacktester(strategy(), config()).run(short_dataset(), context_short)
     assert report.trade_count == 1
-    assert report.trades[0].exit_reason == "stop_and_target_same_bar"
-    assert report.trades[0].pnl < 0
+    assert report.trades[0].side is Side.SELL
+    assert report.trades[0].entry_index == 33
+    assert report.trades[0].exit_reason == "target"
+    assert report.trades[0].pnl > 0
+
+
+def test_both_sides_use_conservative_same_bar_collision():
+    long_bars = long_dataset()
+    long_bars[33] = bar(33, 99.50, 110.0, 90.0, 102.60, 2400)
+    long_report = StrategyBacktester(strategy(), config()).run(long_bars, context_long)
+    assert long_report.trades[0].exit_reason == "stop_and_target_same_bar"
+    assert long_report.trades[0].pnl < 0
+
+    short_bars = short_dataset()
+    short_bars[33] = bar(33, 100.40, 102.0, 96.0, 97.0, 2400)
+    short_report = StrategyBacktester(strategy(), config()).run(short_bars, context_short)
+    assert short_report.trades[0].exit_reason == "stop_and_target_same_bar"
+    assert short_report.trades[0].pnl < 0

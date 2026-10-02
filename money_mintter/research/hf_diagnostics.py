@@ -5,12 +5,13 @@ from collections import Counter
 from datetime import date
 
 from money_mintter.data.hf import HfCandleLoader
+from money_mintter.domain import Side
 from money_mintter.research.context import PreviousSessionContext
 from money_mintter.strategy import LiquiditySweepReversalStrategy
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Diagnose LSR strategy vetoes on HF candles.")
+    parser = argparse.ArgumentParser(description="Diagnose both sides of LSR on HF candles.")
     parser.add_argument("csv_path")
     parser.add_argument("symbol")
     parser.add_argument("--start", required=True)
@@ -18,50 +19,46 @@ def main() -> int:
     parser.add_argument("--timezone", default="America/New_York")
     args = parser.parse_args()
 
-    start = date.fromisoformat(args.start)
-    end = date.fromisoformat(args.end)
-
     candles = HfCandleLoader().load(
         args.csv_path,
         args.symbol,
-        start=start,
-        end=end,
+        start=date.fromisoformat(args.start),
+        end=date.fromisoformat(args.end),
         timezone_name=args.timezone,
     )
     context = PreviousSessionContext(candles, timezone_name=args.timezone)
     strategy = LiquiditySweepReversalStrategy()
 
-    reasons: Counter[str] = Counter()
-    vetoes: Counter[str] = Counter()
-    passed = 0
-    evaluations = 0
+    for side, label in ((Side.BUY, "LONG"), (Side.SELL, "SHORT")):
+        reasons: Counter[str] = Counter()
+        vetoes: Counter[str] = Counter()
+        passed = 0
+        evaluations = 0
 
-    for index in range(1, len(candles)):
-        context_input = context(index, candles)
-        if context_input is None:
-            continue
+        for index in range(1, len(candles)):
+            strategy_input = context(index, candles)
+            if strategy_input is None:
+                continue
 
-        evaluations += 1
-        result = strategy.analyze(candles[: index + 1], context_input)
-        reasons[result.reason] += 1
-        vetoes.update(result.vetoes)
-        if result.passed:
-            passed += 1
+            evaluations += 1
+            result = strategy.analyze_side(candles[: index + 1], strategy_input, side)
+            reasons[result.reason] += 1
+            vetoes.update(result.vetoes)
+            if result.passed:
+                passed += 1
 
-    print(f"Symbol: {args.symbol.upper()}")
-    print(f"Period: {start} to {end}")
-    print(f"Candles: {len(candles)}")
-    print(f"Strategy evaluations: {evaluations}")
-    print(f"Passed setups: {passed}")
-    print("Top reasons:")
-    for reason, count in reasons.most_common(15):
-        print(f"  {count:6d}  {reason}")
-    print("Veto counts:")
-    for veto, count in vetoes.most_common(15):
-        print(f"  {count:6d}  {veto}")
+        print(f"{label}:")
+        print(f"  Strategy evaluations: {evaluations}")
+        print(f"  Passed setups: {passed}")
+        print("  Top reasons:")
+        for reason, count in reasons.most_common(10):
+            print(f"    {count:6d}  {reason}")
+        print("  Veto counts:")
+        for veto, count in vetoes.most_common(10):
+            print(f"    {count:6d}  {veto}")
 
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main)
