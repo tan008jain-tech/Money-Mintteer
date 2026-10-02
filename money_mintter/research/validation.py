@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import date
 from typing import Callable, Iterable
 
 from money_mintter.research.backtest import BacktestConfig, BacktestReport, StrategyBacktester
@@ -23,11 +24,12 @@ class ValidationResult:
 
 
 class WalkForwardValidator:
-    """Run fixed strategy variants over chronological train/test windows.
+    """Run chronological train/test measurements without shuffling.
 
-    The validator never shuffles time series and does not select parameters from
-    the test segment. A caller supplies the already-selected strategy factory for
-    each run, keeping model selection outside the test measurement.
+    The current MTF backtester derives all higher-timeframe context directly
+    from 1-minute history. Each evaluation segment therefore receives the full
+    history available up to that segment's end, while evaluation_start/end
+    controls which dates contribute to the measured report.
     """
 
     def __init__(self, backtest_config: BacktestConfig | None = None) -> None:
@@ -67,27 +69,61 @@ class WalkForwardValidator:
         *,
         windows: Iterable[WalkForwardWindow],
         strategy_factory: Callable[[], LiquiditySweepReversalStrategy],
-        context_provider: Callable[[int], object],
     ) -> tuple[ValidationResult, ...]:
+        if not candles:
+            raise ValueError("walk-forward evaluation requires candles")
+
+        ordered = sorted(candles, key=lambda candle: candle.timestamp)
+        timezone_name = self.backtest_config.timezone_name
         results: list[ValidationResult] = []
+
         for window in windows:
-            train = candles[window.train_start:window.train_end]
-            test = candles[window.test_start:window.test_end]
+            if not 0 <= window.train_start < window.train_end <= window.test_start < window.test_end <= len(ordered):
+                raise ValueError("walk-forward window is outside candle bounds")
 
-            def train_context(index: int):
-                return context_provider(window.train_start + index)
+            train_slice = ordered[:window.train_end]
+            test_slice = ordered[:window.test_end]
 
-            def test_context(index: int):
-                return context_provider(window.test_start + index)
+            train_start_date = train_slice[window.train_start].timestamp.astimezone(
+                __import__("zoneinfo").ZoneInfo(timezone_name)
+            ).date()
+            train_end_date = train_slice[window.train_end - 1].timestamp.astimezone(
+                __import__("zoneinfo").ZoneInfo(timezone_name)
+            ).date()
+            test_start_date = ordered[window.test_start].timestamp.astimezone(
+                __import__("zoneinfo").ZoneInfo(timezone_name)
+            ).date()
+            test_end_date = ordered[window.test_end - 1].timestamp.astimezone(
+                __import__("zoneinfo").ZoneInfo(timezone_name)
+            ).date()
+
+            train_config = replace(
+                self.backtest_config,
+                evaluation_start=train_start_date,
+                evaluation_end=train_end_date,
+            )
+            test_config = replace(
+                self.backtest_config,
+                evaluation_start=test_start_date,
+                evaluation_end=test_end_date,
+            )
 
             train_report = StrategyBacktester(
                 strategy_factory(),
-                self.backtest_config,
-            ).run(train, train_context)
+                train_config,
+            ).run(train_slice)
+
             test_report = StrategyBacktester(
                 strategy_factory(),
-                self.backtest_config,
-            ).run(test, test_context)
+                test_config,
+            ).run(test_slice)
 
-            results.append(ValidationResult(window, train_report, test_report))
+            results.append(
+                ValidationResult(
+                    window=window,
+                    train_report=train_report,
+                    test_report=test_report,
+                )
+            )
+
         return tuple(results)
