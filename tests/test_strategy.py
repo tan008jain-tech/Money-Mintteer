@@ -58,7 +58,7 @@ def test_detects_local_intraday_liquidity_without_prior_day_sweep():
         candle("ABC", 32, 100.85, 101.20, 100.70, 101.10, 1800),
     ])
     context = StrategyInput(
-        98.0, 105.0, 5, liquidity_lows=(99.50,), liquidity_highs=(101.50,)
+        98.0, 105.0, 5, liquidity_lows=(99.50,)
     )
     result = LiquiditySweepReversalStrategy().analyze(bars, context)
     assert result.passed, result
