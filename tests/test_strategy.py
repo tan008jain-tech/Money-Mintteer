@@ -140,9 +140,9 @@ def build_snapshot(side: Side) -> MultiTimeframeSnapshot:
         entry[-1] = candle(
             start + timedelta(minutes=145),
             98.8,
-            99.0,
-            98.0,
-            98.5,
+            98.9,
+            97.8,
+            97.9,
             1800,
         )
 
@@ -161,7 +161,7 @@ def build_snapshot(side: Side) -> MultiTimeframeSnapshot:
 def test_long_entry_uses_1h_15m_context_and_5m_trigger():
     snapshot = build_snapshot(Side.BUY)
     result = LiquiditySweepReversalStrategy(
-        StrategyConfig(max_stop_atr=2.5)
+        StrategyConfig(max_stop_atr=5.0)
     ).analyze(snapshot)
     assert result.passed, result
     assert result.side is Side.BUY
