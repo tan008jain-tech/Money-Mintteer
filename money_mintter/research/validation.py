@@ -84,7 +84,7 @@ class WalkForwardValidator:
             train_slice = ordered[:window.train_end]
             test_slice = ordered[:window.test_end]
 
-                    market_tz = ZoneInfo(timezone_name)
+            market_tz = ZoneInfo(timezone_name)
             train_start_date = train_slice[window.train_start].timestamp.astimezone(market_tz).date()
             train_end_date = train_slice[window.train_end - 1].timestamp.astimezone(market_tz).date()
             test_start_date = ordered[window.test_start].timestamp.astimezone(market_tz).date()
