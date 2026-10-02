@@ -12,6 +12,7 @@ dependencies = ["python-dotenv>=1,<2"]
 [project.scripts]
 mm-backtest = "money_mintter.research.cli:main"
 mm-fmp-check = "money_mintter.data.fmp_check:main"
+mm-hf-check = "money_mintter.data.hf_check:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8,<10"]
