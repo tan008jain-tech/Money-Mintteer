@@ -33,6 +33,9 @@ def main() -> int:
         reasons: Counter[str] = Counter()
         vetoes: Counter[str] = Counter()
         passed = 0
+        sweep_observations = 0
+        mss_observations = 0
+        trigger_observations = 0
         evaluations = 0
 
         for index in range(1, len(candles)):
@@ -44,11 +47,21 @@ def main() -> int:
             result = strategy.analyze_side(candles[: index + 1], strategy_input, side)
             reasons[result.reason] += 1
             vetoes.update(result.vetoes)
+
+            if result.sweep_index is not None:
+                sweep_observations += 1
+            if result.mss_index is not None:
+                mss_observations += 1
+            if result.trigger_index is not None:
+                trigger_observations += 1
             if result.passed:
                 passed += 1
 
         print(f"{label}:")
         print(f"  Strategy evaluations: {evaluations}")
+        print(f"  Sweep observations: {sweep_observations}")
+        print(f"  MSS observations: {mss_observations}")
+        print(f"  Trigger observations: {trigger_observations}")
         print(f"  Passed setups: {passed}")
         print("  Top reasons:")
         for reason, count in reasons.most_common(10):

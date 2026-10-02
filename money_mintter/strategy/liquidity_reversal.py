@@ -9,38 +9,34 @@ from money_mintter.strategy.candles import Candle
 
 @dataclass(frozen=True, slots=True)
 class StrategyConfig:
-    """Symmetric long/short baseline for liquidity-sweep reversals."""
+    """Intraday two-sided liquidity-sweep reversal configuration."""
 
     lookback_bars: int = 120
-    structure_lookback_bars: int = 24
-    sweep_search_bars: int = 18
-    max_bars_after_sweep: int = 12
-    max_bars_after_mss: int = 6
+    structure_lookback_bars: int = 8
+    sweep_search_bars: int = 30
+    max_bars_after_sweep: int = 8
+    max_bars_after_mss: int = 5
     atr_period: int = 14
-
-    min_sweep_penetration_atr: float = 0.08
-    min_sweep_penetration_pct: float = 0.0005
+    min_sweep_penetration_atr: float = 0.05
+    min_sweep_penetration_pct: float = 0.0003
     max_sweep_depth_atr: float = 1.50
-    min_rejection_wick_fraction: float = 0.35
-
-    min_displacement_body_fraction: float = 0.60
-    min_relative_volume: float = 1.10
+    min_rejection_wick_fraction: float = 0.25
+    min_displacement_body_fraction: float = 0.50
+    min_relative_volume: float = 1.00
     require_volume_confirmation: bool = True
-
     max_spread_bps: float = 20.0
     stop_buffer_atr: float = 0.05
     max_stop_atr: float = 2.0
     max_chase_atr: float = 0.75
-
-    min_rr: float = 2.5
-    preferred_rr: float = 4.0
-    max_target_rr: float = 6.0
-    min_confidence: float = 0.74
+    min_rr: float = 1.50
+    preferred_rr: float = 2.50
+    max_target_rr: float = 5.00
+    min_confidence: float = 0.62
 
     def __post_init__(self) -> None:
         if self.lookback_bars <= 0 or self.structure_lookback_bars < 3:
             raise ValueError("invalid lookback configuration")
-        if self.atr_period < 2 or self.sweep_search_bars <= 0:
+        if self.atr_period < 2 or self.sweep_search_bars < 3:
             raise ValueError("invalid ATR/search configuration")
         if not 0 < self.min_sweep_penetration_atr <= self.max_sweep_depth_atr:
             raise ValueError("invalid sweep depth configuration")
@@ -64,13 +60,19 @@ class StrategyConfig:
 
 @dataclass(frozen=True, slots=True)
 class StrategyInput:
+    """Point-in-time session and intraday liquidity context."""
+
     prior_day_low: float
     prior_day_high: float
     spread_bps: float = 0.0
+    liquidity_lows: tuple[float, ...] = ()
+    liquidity_highs: tuple[float, ...] = ()
 
     def __post_init__(self) -> None:
         if self.prior_day_low <= 0 or self.prior_day_high <= self.prior_day_low:
             raise ValueError("invalid prior-day levels")
+        if any(level <= 0 for level in self.liquidity_lows + self.liquidity_highs):
+            raise ValueError("liquidity levels must be positive")
         if self.spread_bps < 0:
             raise ValueError("spread cannot be negative")
 
@@ -94,7 +96,9 @@ class SetupAnalysis:
 
 
 class LiquiditySweepReversalStrategy:
-    VERSION = "lsr.v2"
+    """Causal intraday liquidity-sweep reversal strategy, both directions."""
+
+    VERSION = "lsr.v3"
 
     def __init__(self, config: StrategyConfig | None = None) -> None:
         self.config = config or StrategyConfig()
@@ -112,9 +116,13 @@ class LiquiditySweepReversalStrategy:
         )
         if long_result.reason == short_result.reason:
             return best
+
         return replace(
             best,
-            reason=f"no actionable setup: long={long_result.reason}; short={short_result.reason}",
+            reason=(
+                "no actionable setup: "
+                f"long={long_result.reason}; short={short_result.reason}"
+            ),
             vetoes=tuple(sorted(set(long_result.vetoes + short_result.vetoes))),
         )
 
@@ -131,44 +139,51 @@ class LiquiditySweepReversalStrategy:
         if context.spread_bps > c.max_spread_bps:
             return SetupAnalysis(False, 0.0, "spread too wide", vetoes=("spread",), side=side)
 
-        bars = candles[-c.lookback_bars :]
+        bars = candles[-c.lookback_bars:]
         atr_values = self._atr_series(bars, c.atr_period)
         sweep_start = max(
             1,
-            len(bars) - c.sweep_search_bars - c.max_bars_after_sweep - c.max_bars_after_mss,
+            len(bars)
+            - c.sweep_search_bars
+            - c.max_bars_after_sweep
+            - c.max_bars_after_mss,
         )
-        sweep_candidates: list[int] = []
 
+        levels = (
+            self._unique_levels((context.prior_day_low,) + context.liquidity_lows)
+            if side is Side.BUY
+            else self._unique_levels((context.prior_day_high,) + context.liquidity_highs)
+        )
+
+        sweep_candidates: list[tuple[int, float]] = []
         for index in range(sweep_start, len(bars)):
             atr = atr_values[index - 1] if index > 0 else atr_values[index]
             if atr is None:
                 continue
-            candle = bars[index]
-            if side is Side.BUY:
-                penetration = context.prior_day_low - candle.low
-                threshold = max(
-                    atr * c.min_sweep_penetration_atr,
-                    context.prior_day_low * c.min_sweep_penetration_pct,
-                )
-                reclaimed = candle.close > context.prior_day_low
-                wick_fraction = candle.lower_wick / candle.range if candle.range > 0 else 0.0
-            else:
-                penetration = candle.high - context.prior_day_high
-                threshold = max(
-                    atr * c.min_sweep_penetration_atr,
-                    context.prior_day_high * c.min_sweep_penetration_pct,
-                )
-                reclaimed = candle.close < context.prior_day_high
-                wick_fraction = candle.upper_wick / candle.range if candle.range > 0 else 0.0
 
-            if (
-                penetration < threshold
-                or penetration > atr * c.max_sweep_depth_atr
-                or not reclaimed
-                or wick_fraction < c.min_rejection_wick_fraction
-            ):
-                continue
-            sweep_candidates.append(index)
+            candle = bars[index]
+            wick_fraction = (
+                candle.lower_wick / candle.range
+                if side is Side.BUY and candle.range > 0
+                else candle.upper_wick / candle.range
+                if side is Side.SELL and candle.range > 0
+                else 0.0
+            )
+
+            for level in levels:
+                penetration = level - candle.low if side is Side.BUY else candle.high - level
+                reclaimed = candle.close > level if side is Side.BUY else candle.close < level
+                threshold = max(
+                    atr * c.min_sweep_penetration_atr,
+                    level * c.min_sweep_penetration_pct,
+                )
+                if (
+                    penetration >= threshold
+                    and penetration <= atr * c.max_sweep_depth_atr
+                    and reclaimed
+                    and wick_fraction >= c.min_rejection_wick_fraction
+                ):
+                    sweep_candidates.append((index, level))
 
         if not sweep_candidates:
             return SetupAnalysis(
@@ -182,9 +197,11 @@ class LiquiditySweepReversalStrategy:
             )
 
         newest_failure: SetupAnalysis | None = None
-        for sweep_index in reversed(sweep_candidates):
+        for sweep_index, swept_level in reversed(sweep_candidates):
             result = replace(
-                self._evaluate_sweep(bars, atr_values, context, sweep_index, side),
+                self._evaluate_sweep(
+                    bars, atr_values, context, sweep_index, swept_level, side
+                ),
                 side=side,
             )
             if result.passed:
@@ -230,6 +247,7 @@ class LiquiditySweepReversalStrategy:
         atr_values: list[float | None],
         context: StrategyInput,
         sweep_index: int,
+        swept_level: float,
         side: Side,
     ) -> SetupAnalysis:
         c = self.config
@@ -242,10 +260,11 @@ class LiquiditySweepReversalStrategy:
         if sweep_index - pre_start < 3:
             return SetupAnalysis(False, 0.0, "insufficient pre-sweep structure", sweep_index=sweep_index)
 
-        if side is Side.BUY:
-            structure_level = max(bar.high for bar in bars[pre_start:sweep_index])
-        else:
-            structure_level = min(bar.low for bar in bars[pre_start:sweep_index])
+        structure_level = (
+            max(bar.high for bar in bars[pre_start:sweep_index])
+            if side is Side.BUY
+            else min(bar.low for bar in bars[pre_start:sweep_index])
+        )
 
         mss_end = min(len(bars) - 1, sweep_index + c.max_bars_after_sweep)
         mss_index: int | None = None
@@ -355,9 +374,15 @@ class LiquiditySweepReversalStrategy:
         if side is Side.BUY:
             stop = min(sweep.low, mss.low) - c.stop_buffer_atr * atr
             risk = entry - stop
+            next_liquidity = self._next_liquidity(
+                entry, context.prior_day_high, context.liquidity_highs, side
+            )
         else:
             stop = max(sweep.high, mss.high) + c.stop_buffer_atr * atr
             risk = stop - entry
+            next_liquidity = self._next_liquidity(
+                entry, context.prior_day_low, context.liquidity_lows, side
+            )
 
         if risk <= 0 or risk > c.max_stop_atr * atr:
             return SetupAnalysis(
@@ -370,46 +395,29 @@ class LiquiditySweepReversalStrategy:
                 vetoes=("stop_too_wide",),
             )
 
-        next_liquidity = self._next_liquidity(
-            bars,
-            entry,
-            context.prior_day_high if side is Side.BUY else context.prior_day_low,
-            trigger_index,
-            side,
-        )
-        if next_liquidity is not None:
-            available_rr = (
+        available_rr = (
+            (
                 (next_liquidity - entry) / risk
                 if side is Side.BUY
                 else (entry - next_liquidity) / risk
             )
-            if available_rr < c.min_rr:
-                return SetupAnalysis(
-                    False,
-                    0.0,
-                    "nearby liquidity leaves insufficient reward room",
-                    sweep_index=sweep_index,
-                    mss_index=mss_index,
-                    trigger_index=trigger_index,
-                    vetoes=("insufficient_room",),
-                )
-        else:
-            available_rr = c.preferred_rr
+            if next_liquidity is not None
+            else c.preferred_rr
+        )
+        if available_rr < c.min_rr:
+            return SetupAnalysis(
+                False,
+                0.0,
+                "nearby liquidity leaves insufficient reward room",
+                sweep_index=sweep_index,
+                mss_index=mss_index,
+                trigger_index=trigger_index,
+                vetoes=("insufficient_room",),
+            )
 
         target_rr = min(c.max_target_rr, max(c.preferred_rr, available_rr))
         target = entry + target_rr * risk if side is Side.BUY else entry - target_rr * risk
         reward_risk = abs(target - entry) / risk
-
-        if reward_risk < c.min_rr:
-            return SetupAnalysis(
-                False,
-                0.0,
-                "reward-to-risk below minimum",
-                sweep_index=sweep_index,
-                mss_index=mss_index,
-                trigger_index=trigger_index,
-                vetoes=("rr",),
-            )
 
         fvg = self._has_fvg(
             bars,
@@ -423,12 +431,10 @@ class LiquiditySweepReversalStrategy:
             else sweep.upper_wick / max(sweep.range, 1e-9)
         )
         rejection_score = min(
-            1.0,
-            wick_fraction / max(c.min_rejection_wick_fraction, 1e-9),
+            1.0, wick_fraction / max(c.min_rejection_wick_fraction, 1e-9)
         )
         body_score = min(
-            1.0,
-            mss.body_fraction / max(c.min_displacement_body_fraction, 1e-9),
+            1.0, mss.body_fraction / max(c.min_displacement_body_fraction, 1e-9)
         )
         volume_score = (
             min(1.0, relative_volume / max(c.min_relative_volume, 1e-9))
@@ -442,19 +448,23 @@ class LiquiditySweepReversalStrategy:
             "bullish MSS" if side is Side.BUY else "bearish MSS",
             "bullish displacement" if side is Side.BUY else "bearish displacement",
             "close-confirmed breakout" if side is Side.BUY else "close-confirmed breakdown",
+            "prior-session liquidity"
+            if swept_level in (context.prior_day_low, context.prior_day_high)
+            else "intraday liquidity",
         ]
         if fvg:
-            confluences.append("bullish imbalance" if side is Side.BUY else "bearish imbalance")
+            confluences.append(
+                "bullish imbalance" if side is Side.BUY else "bearish imbalance"
+            )
 
         score = min(
             0.99,
             0.22 * rejection_score
-            + 0.28 * body_score
-            + 0.18 * volume_score
-            + 0.20 * rr_score
+            + 0.26 * body_score
+            + 0.16 * volume_score
+            + 0.24 * rr_score
             + 0.12 * (1.0 if fvg else 0.65),
         )
-
         if score < c.min_confidence:
             return SetupAnalysis(
                 False,
@@ -474,11 +484,12 @@ class LiquiditySweepReversalStrategy:
         return SetupAnalysis(
             True,
             score,
-            f"{direction} liquidity-sweep reversal: prior-day "
-            f"{'low' if side is Side.BUY else 'high'} swept, "
-            f"{'bullish' if side is Side.BUY else 'bearish'} MSS, displacement, "
-            f"close-confirmed {'breakout' if side is Side.BUY else 'breakdown'}; "
-            f"RR={reward_risk:.2f}; score={score:.2f}",
+            (
+                f"{direction} intraday liquidity-sweep reversal: "
+                f"MSS, displacement, close-confirmed "
+                f"{'breakout' if side is Side.BUY else 'breakdown'}; "
+                f"RR={reward_risk:.2f}; score={score:.2f}"
+            ),
             sweep_index,
             mss_index,
             trigger_index,
@@ -492,6 +503,31 @@ class LiquiditySweepReversalStrategy:
         )
 
     @staticmethod
+    def _unique_levels(levels: tuple[float, ...]) -> tuple[float, ...]:
+        result: list[float] = []
+        for level in levels:
+            if not any(
+                abs(level - existing) <= max(level, existing) * 1e-6
+                for existing in result
+            ):
+                result.append(level)
+        return tuple(result)
+
+    @staticmethod
+    def _next_liquidity(
+        entry: float,
+        session_level: float,
+        intraday_levels: tuple[float, ...],
+        side: Side,
+    ) -> float | None:
+        levels = (session_level,) + intraday_levels
+        if side is Side.BUY:
+            above = [level for level in levels if level > entry]
+            return min(above) if above else None
+        below = [level for level in levels if level < entry]
+        return max(below) if below else None
+
+    @staticmethod
     def _relative_volume(bars: list[Candle], index: int, window: int) -> float:
         start = max(0, index - window)
         baseline = [bar.volume for bar in bars[start:index] if bar.volume > 0]
@@ -501,45 +537,24 @@ class LiquiditySweepReversalStrategy:
         return bars[index].volume / average_volume if average_volume else 0.0
 
     @staticmethod
-    def _next_liquidity(
+    def _has_fvg(
         bars: list[Candle],
-        entry: float,
-        session_level: float,
-        from_index: int,
+        start: int,
+        end: int,
         side: Side,
-    ) -> float | None:
-        lookback_start = max(0, from_index - 40)
-        if side is Side.BUY:
-            levels = [session_level]
-            levels.extend(
-                bar.high
-                for bar in bars[lookback_start:from_index]
-                if bar.high > entry
-            )
-            above = [level for level in levels if level > entry]
-            return min(above) if above else None
-
-        levels = [session_level]
-        levels.extend(
-            bar.low
-            for bar in bars[lookback_start:from_index]
-            if bar.low < entry
-        )
-        below = [level for level in levels if level < entry]
-        return max(below) if below else None
-
-    @staticmethod
-    def _has_fvg(bars: list[Candle], start: int, end: int, side: Side) -> bool:
+    ) -> bool:
         for index in range(max(2, start), min(len(bars), end + 1)):
-            if side is Side.BUY:
-                if bars[index - 2].high < bars[index].low and bars[index].bullish:
-                    return True
-            elif bars[index - 2].low > bars[index].high and bars[index].bearish:
+            if side is Side.BUY and bars[index - 2].high < bars[index].low and bars[index].bullish:
+                return True
+            if side is Side.SELL and bars[index - 2].low > bars[index].high and bars[index].bearish:
                 return True
         return False
 
     @staticmethod
-    def _atr_series(bars: list[Candle], period: int) -> list[float | None]:
+    def _atr_series(
+        bars: list[Candle],
+        period: int,
+    ) -> list[float | None]:
         values: list[float | None] = [None] * len(bars)
         true_ranges: list[float] = []
         for index, bar in enumerate(bars):

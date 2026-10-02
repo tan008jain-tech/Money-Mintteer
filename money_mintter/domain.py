@@ -36,12 +36,7 @@ class Candidate:
     timestamp: datetime
 
     def __post_init__(self) -> None:
-        scores = (
-            self.liquidity_score,
-            self.volatility_score,
-            self.activity_score,
-            self.signal_quality_score,
-        )
+        scores = (self.liquidity_score, self.volatility_score, self.activity_score, self.signal_quality_score)
         if any(not 0 <= score <= 1 for score in scores):
             raise ValueError("candidate scores must be in [0, 1]")
 
@@ -56,7 +51,7 @@ class TradeSignal:
     confidence: float
     timestamp: datetime
     reason: str
-    strategy_version: str = "lsr.v2"
+    strategy_version: str = "lsr.v3"
 
     def __post_init__(self) -> None:
         if min(self.entry_price, self.stop_price, self.target_price) <= 0:
@@ -65,12 +60,10 @@ class TradeSignal:
             raise ValueError("confidence must be in [0, 1]")
         if not self.strategy_version.strip():
             raise ValueError("strategy version cannot be empty")
-        if self.side is Side.BUY:
-            if not self.stop_price < self.entry_price < self.target_price:
-                raise ValueError("long signal requires stop < entry < target")
-        else:
-            if not self.target_price < self.entry_price < self.stop_price:
-                raise ValueError("short signal requires target < entry < stop")
+        if self.side is Side.BUY and not self.stop_price < self.entry_price < self.target_price:
+            raise ValueError("long signal requires stop < entry < target")
+        if self.side is Side.SELL and not self.target_price < self.entry_price < self.stop_price:
+            raise ValueError("short signal requires target < entry < stop")
 
 
 @dataclass(slots=True)
@@ -135,7 +128,6 @@ class WalletLedger:
             self.profit_reserve += reserve
             self.realized_profit += pnl
             return reinvested, reserve
-
         if pnl < 0:
             self.trading_wallet += pnl
             self.realized_loss += -pnl
