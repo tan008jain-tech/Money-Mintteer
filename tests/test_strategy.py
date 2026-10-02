@@ -163,10 +163,10 @@ def test_short_entry_is_supported():
     assert result.target_price < result.entry_price < result.stop_price
 
 
-def test_daily_and_4h_can_block_countertrend():
+def test_daily_and_4h_are_context_not_hard_directional_veto():
     snapshot = build_snapshot(Side.BUY)
     result = LiquiditySweepReversalStrategy().analyze_side(snapshot, Side.SELL)
-    assert "broad_trend_conflict" in result.vetoes
+    assert "broad_trend_conflict" not in result.vetoes
 
 
 def test_wrong_entry_timeframe_is_rejected():
@@ -177,3 +177,27 @@ def test_wrong_entry_timeframe_is_rejected():
     result = strategy.analyze(snapshot)
     assert not result.passed
     assert "entry_timeframe" in result.vetoes
+
+
+def test_valid_setup_reports_percentage_target_and_risk():
+    snapshot = build_snapshot(Side.BUY)
+    result = LiquiditySweepReversalStrategy(
+        StrategyConfig(max_stop_atr=2.5)
+    ).analyze(snapshot)
+    assert result.passed, result
+    assert result.target_percent is not None and result.target_percent > 0
+    assert result.risk_percent is not None and result.risk_percent > 0
+    assert result.reward_risk is not None and result.reward_risk > 0
+
+
+def test_liquidity_confluence_is_explicit():
+    snapshot = build_snapshot(Side.BUY)
+    result = LiquiditySweepReversalStrategy(
+        StrategyConfig(max_stop_atr=2.5)
+    ).analyze(snapshot)
+    assert result.passed, result
+    assert any("liquidity sweep" in item for item in result.confluences)
+    assert any(
+        "15M + 1H liquidity confluence" in item
+        for item in result.confluences
+    )
