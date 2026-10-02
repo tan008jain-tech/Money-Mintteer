@@ -6,29 +6,45 @@ Money Mintter is an event-driven market-analysis and paper-trading system design
 
 - FMP coarse universe during temporary development.
 - Maximum five deep candidates; existing positions managed separately.
-- Daily / 4H broad filters.
-- 1H primary intraday trend and liquidity.
-- 15M secondary structure and liquidity.
-- 5M or 3M entry analysis.
+- Daily / 4H broad context and larger-liquidity awareness.
+- 1H primary intraday liquidity map.
+- 15M secondary liquidity map.
+- 5M or 3M entry confirmation.
 - 1M execution and tracking only.
 - Long and short signals.
-- Causal multi-timeframe aggregation.
-- Structure-aware stops, reward-room checks and risk sizing.
+- Liquidity-zone confluence across timeframes.
+- Structure-aware stops and opposing-liquidity destinations.
+- Percentage target/risk measurements with R:R retained only as a research metric.
 - Event-order-aware backtesting with session and time exits.
 - HF Data Library 1-minute historical adapter.
 - Chronological walk-forward validation boundary.
 
-## Strategy status
+## Locked strategy
 
-lsr.mtf.v1 is the current research baseline. It is an implementation baseline, not a profitability claim.
+The authoritative strategy definition is in `docs/STRATEGY_LOCK.md`.
 
-Do not judge it from one symbol or one month. Run diagnostics first, then multi-symbol and multi-regime backtests, followed by out-of-sample validation.
+The current implementation baseline is `lsr.mtf.v3`.
+
+The lock file is a research contract. Ordinary bug fixes must not silently change the market model described there.
+
+## Research path
+
+HF Data Library 1M
+-> 4H / Daily broad context
+-> 1H liquidity
+-> 15M liquidity
+-> 5M / 3M entry
+-> 1M execution
+-> backtest
+-> walk-forward / out-of-sample validation
+
+The presence of a trade signal is not evidence of profitability. Validate across symbols, months, regimes and realistic execution costs.
 
 ## Temporary data path
 
 FMP -> universe candidates
 
-HF Data Library 1M -> 4H / 1H / 15M / 5M or 3M -> strategy -> 1M execution-aware backtester
+HF Data Library 1M -> multi-timeframe strategy -> 1M execution-aware backtester
 
 IBKR will later replace temporary market-data and execution providers behind normalized interfaces.
 
