@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from datetime import date
 from typing import Callable, Iterable
+from zoneinfo import ZoneInfo
 
 from money_mintter.research.backtest import BacktestConfig, BacktestReport, StrategyBacktester
 from money_mintter.strategy import Candle, LiquiditySweepReversalStrategy
@@ -84,18 +84,11 @@ class WalkForwardValidator:
             train_slice = ordered[:window.train_end]
             test_slice = ordered[:window.test_end]
 
-            train_start_date = train_slice[window.train_start].timestamp.astimezone(
-                __import__("zoneinfo").ZoneInfo(timezone_name)
-            ).date()
-            train_end_date = train_slice[window.train_end - 1].timestamp.astimezone(
-                __import__("zoneinfo").ZoneInfo(timezone_name)
-            ).date()
-            test_start_date = ordered[window.test_start].timestamp.astimezone(
-                __import__("zoneinfo").ZoneInfo(timezone_name)
-            ).date()
-            test_end_date = ordered[window.test_end - 1].timestamp.astimezone(
-                __import__("zoneinfo").ZoneInfo(timezone_name)
-            ).date()
+                    market_tz = ZoneInfo(timezone_name)
+            train_start_date = train_slice[window.train_start].timestamp.astimezone(market_tz).date()
+            train_end_date = train_slice[window.train_end - 1].timestamp.astimezone(market_tz).date()
+            test_start_date = ordered[window.test_start].timestamp.astimezone(market_tz).date()
+            test_end_date = ordered[window.test_end - 1].timestamp.astimezone(market_tz).date()
 
             train_config = replace(
                 self.backtest_config,
