@@ -3,6 +3,7 @@
 from money_mintter.strategy.candles import Candle
 from money_mintter.strategy.liquidity_reversal import (
     LiquiditySweepReversalStrategy,
+    LiquidityZone,
     SetupAnalysis,
     StrategyConfig,
 )
@@ -15,6 +16,7 @@ from money_mintter.strategy.timeframes import (
 __all__ = [
     "Candle",
     "LiquiditySweepReversalStrategy",
+    "LiquidityZone",
     "MultiTimeframeSeries",
     "MultiTimeframeSnapshot",
     "SetupAnalysis",
