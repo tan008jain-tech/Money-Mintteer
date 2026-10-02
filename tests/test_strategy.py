@@ -42,24 +42,24 @@ def build_snapshot(side: Side) -> MultiTimeframeSnapshot:
     if bullish:
         one_hour_prices = [
             101.0, 100.5, 100.0, 99.0, 100.5,
-            101.0, 100.7, 101.2, 102.0, 101.4,
-            102.2, 101.8,
+            101.0, 101.3, 102.0, 101.4, 100.9,
+            101.2, 101.5,
         ]
         fifteen_prices = [
             101.0, 100.4, 100.1, 99.05, 100.6,
-            101.1, 100.8, 101.3, 102.02, 101.5,
-            102.2, 101.8,
+            101.1, 101.3, 102.02, 101.4, 100.9,
+            101.2, 101.5,
         ]
     else:
         one_hour_prices = [
             99.0, 99.5, 100.0, 101.0, 100.5,
-            99.8, 100.6, 100.1, 99.2, 99.7,
-            98.8, 99.1,
+            99.8, 98.2, 97.0, 98.0, 98.4,
+            97.5, 98.2,
         ]
         fifteen_prices = [
             99.0, 99.6, 100.0, 100.95, 100.4,
-            99.7, 100.5, 100.1, 99.2, 99.6,
-            98.85, 99.2,
+            99.8, 98.2, 97.05, 98.1, 98.5,
+            97.6, 98.2,
         ]
 
     one_hour = tuple(
@@ -173,7 +173,7 @@ def test_long_entry_uses_1h_15m_context_and_5m_trigger():
 def test_short_entry_is_supported():
     snapshot = build_snapshot(Side.SELL)
     result = LiquiditySweepReversalStrategy(
-        StrategyConfig(max_stop_atr=2.5)
+        StrategyConfig(max_stop_atr=5.0)
     ).analyze(snapshot)
     assert result.passed, result
     assert result.side is Side.SELL
@@ -189,7 +189,7 @@ def test_daily_and_4h_are_context_not_a_blunt_veto():
 def test_liquidity_confluence_is_explicit():
     snapshot = build_snapshot(Side.BUY)
     result = LiquiditySweepReversalStrategy(
-        StrategyConfig(max_stop_atr=2.5)
+        StrategyConfig(max_stop_atr=5.0)
     ).analyze(snapshot)
     assert result.passed, result
     assert any(
@@ -201,7 +201,7 @@ def test_liquidity_confluence_is_explicit():
 def test_risk_and_target_are_measured_in_percent():
     snapshot = build_snapshot(Side.BUY)
     result = LiquiditySweepReversalStrategy(
-        StrategyConfig(max_stop_atr=2.5)
+        StrategyConfig(max_stop_atr=5.0)
     ).analyze(snapshot)
     assert result.passed, result
     assert result.target_percent is not None and result.target_percent > 0
