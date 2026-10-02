@@ -153,16 +153,23 @@ class HfCandleLoader:
             raise ValueError(f"invalid market timezone: {timezone_name}") from exc
 
         candles: list[Candle] = []
-        with Path(path).open("r", newline="", encoding="utf-8") as handle:
+        with Path(path).open("r", newline="", encoding="utf-8-sig") as handle:
             reader = csv.DictReader(handle)
-            if reader.fieldnames is None or any(
-                field not in reader.fieldnames for field in self.EXPECTED
-            ):
+            if reader.fieldnames is None:
                 raise HfDataError(
                     f"HF CSV must contain {', '.join(self.EXPECTED)}"
                 )
 
+            normalized_fields = [field.strip().lower() for field in reader.fieldnames]
+            if any(field not in normalized_fields for field in self.EXPECTED):
+                raise HfDataError(
+                    f"HF CSV must contain {', '.join(self.EXPECTED)}; "
+                    f"found {reader.fieldnames}"
+                )
+            rename = dict(zip(reader.fieldnames, normalized_fields))
+
             for row_number, row in enumerate(reader, start=2):
+                row = {rename.get(key, key): value for key, value in row.items()}
                 try:
                     timestamp = self._parse_timestamp(row["datetime"], market_tz)
                     local_date = timestamp.astimezone(market_tz).date()

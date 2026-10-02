@@ -97,3 +97,16 @@ def test_hf_client_surfaces_auth_failures(monkeypatch: pytest.MonkeyPatch) -> No
 
     with pytest.raises(HfDataError, match="HTTP 403"):
         HfDataClient("secret").request_download_url("AAPL")
+
+
+def test_hf_loader_handles_bom_headers(tmp_path: Path) -> None:
+    path = tmp_path / "AAPL.csv"
+    path.write_text(
+        "datetime,open,high,low,close,volume,source\n"
+        "2024-01-02 09:30:00,100,101,99,100.5,10,pitrading\n",
+        encoding="utf-8-sig",
+    )
+
+    candles = HfCandleLoader().load(path, "AAPL")
+    assert len(candles) == 1
+    assert candles[0].close == 100.5
