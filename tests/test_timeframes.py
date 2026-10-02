@@ -41,7 +41,7 @@ def test_snapshot_excludes_unclosed_entry_bar():
     snapshots = series.snapshots()
     assert len(snapshots) == 1
     assert snapshots[0].entry[-1].close == candles[4].close
-    assert snapshots[0].as_of == candles[4].timestamp + timedelta(minutes=5)
+    assert snapshots[0].as_of == series.entry.bars[0].timestamp + timedelta(minutes=5)
 
 
 def test_three_minute_entry_is_supported():
