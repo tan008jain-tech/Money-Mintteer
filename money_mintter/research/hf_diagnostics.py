@@ -52,17 +52,28 @@ def main() -> int:
         StrategyConfig(entry_timeframe=entry_tf)
     )
 
+    session_dates = {
+        candle.timestamp.astimezone(candles[0].timestamp.tzinfo).date()
+        for candle in candles
+    }
     print(
         "Architecture: 4H/daily filters -> 1H context -> 15M structure -> "
         f"{entry_tf.value} entry -> 1M execution"
     )
     print(f"Evaluation period: {start} to {end}")
     print(f"Warmup: {args.warmup_days} days")
+    print(f"1M candles loaded: {len(candles)}")
+    print(f"Trading dates in loaded data: {len(session_dates)}")
+    print(f"First timestamp: {candles[0].timestamp.isoformat()}")
+    print(f"Last timestamp: {candles[-1].timestamp.isoformat()}")
+    print(f"1H bars built: {len(series.one_hour.bars)}")
+    print(f"15M bars built: {len(series.fifteen_minute.bars)}")
+    print(f"{entry_tf.value} bars built: {len(series.entry.bars)}")
 
     for side, label in ((Side.BUY, "LONG"), (Side.SELL, "SHORT")):
         reasons: Counter[str] = Counter()
         vetoes: Counter[str] = Counter()
-        sweeps = mss = confirmations = passed = evaluations = 0
+        sweeps = mss = trigger_observations = confirmed = passed = evaluations = 0
 
         for snapshot in series.snapshots(lookback_bars=96):
             local_date = snapshot.as_of.astimezone(
@@ -77,14 +88,20 @@ def main() -> int:
             vetoes.update(result.vetoes)
             sweeps += int(result.sweep_index is not None)
             mss += int(result.mss_index is not None)
-            confirmations += int(result.trigger_index is not None)
+            trigger_observations += int(result.trigger_index is not None)
+            confirmed += int(
+                result.trigger_index is not None
+                and "weak_confirmation" not in result.vetoes
+                and "no_confirmation" not in result.vetoes
+            )
             passed += int(result.passed)
 
         print(f"{label}:")
         print(f"  Evaluations: {evaluations}")
         print(f"  Sweep observations: {sweeps}")
         print(f"  MSS observations: {mss}")
-        print(f"  Confirmation observations: {confirmations}")
+        print(f"  Trigger observations: {trigger_observations}")
+        print(f"  Close-confirmed triggers: {confirmed}")
         print(f"  Passed setups: {passed}")
         print("  Top reasons:")
         for reason, count in reasons.most_common(12):
