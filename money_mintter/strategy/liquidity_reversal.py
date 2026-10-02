@@ -8,12 +8,22 @@ from money_mintter.strategy.candles import Candle
 from money_mintter.strategy.timeframes import MultiTimeframeSnapshot, Timeframe
 
 
+_SOURCE_WEIGHT = {
+    "15M": 1.0,
+    "1H": 2.0,
+    "4H": 3.0,
+    "prior-day": 4.0,
+    "daily": 4.0,
+}
+
+
 @dataclass(frozen=True, slots=True)
 class StrategyConfig:
     entry_timeframe: Timeframe = Timeframe.FIVE_MIN
     entry_lookback_bars: int = 120
     one_hour_level_lookback: int = 30
     fifteen_minute_level_lookback: int = 30
+    four_hour_level_lookback: int = 12
     structure_bars: int = 8
     sweep_search_bars: int = 30
     max_bars_after_sweep: int = 8
@@ -24,24 +34,27 @@ class StrategyConfig:
     max_sweep_depth_atr: float = 1.50
     min_rejection_wick_fraction: float = 0.25
     min_displacement_body_fraction: float = 0.50
+    relative_volume_window: int = 20
     min_relative_volume: float = 1.00
-    require_volume_confirmation: bool = True
+    require_volume_confirmation: bool = False
     max_spread_bps: float = 20.0
     stop_buffer_atr: float = 0.05
     max_stop_atr: float = 2.00
     max_chase_atr: float = 0.75
-    min_rr: float = 1.50
-    preferred_rr: float = 2.50
-    max_target_rr: float = 5.00
-    min_confidence: float = 0.62
+    liquidity_zone_merge_pct: float = 0.0015
+    min_liquidity_strength: float = 1.0
 
     def __post_init__(self) -> None:
         if self.entry_timeframe not in (Timeframe.THREE_MIN, Timeframe.FIVE_MIN):
             raise ValueError("entry timeframe must be 3m or 5m")
         if self.entry_lookback_bars < self.sweep_search_bars:
             raise ValueError("entry lookback must cover sweep search")
-        if self.one_hour_level_lookback < 6 or self.fifteen_minute_level_lookback < 6:
-            raise ValueError("higher-timeframe level lookback is too short")
+        if min(
+            self.one_hour_level_lookback,
+            self.fifteen_minute_level_lookback,
+            self.four_hour_level_lookback,
+        ) < 6:
+            raise ValueError("higher-timeframe level lookbacks are too short")
         if self.structure_bars < 3 or self.atr_period < 2:
             raise ValueError("invalid structure/ATR configuration")
         if self.sweep_search_bars < 3 or self.max_bars_after_sweep < 1:
@@ -54,18 +67,35 @@ class StrategyConfig:
             raise ValueError("invalid rejection-wick threshold")
         if not 0 < self.min_displacement_body_fraction <= 1:
             raise ValueError("invalid displacement threshold")
-        if self.min_relative_volume <= 0:
-            raise ValueError("relative-volume threshold must be positive")
+        if self.relative_volume_window < 2 or self.min_relative_volume <= 0:
+            raise ValueError("invalid relative-volume configuration")
         if self.max_spread_bps <= 0 or self.stop_buffer_atr < 0:
             raise ValueError("invalid spread/stop-buffer configuration")
         if self.max_stop_atr <= 0 or self.max_chase_atr <= 0:
             raise ValueError("invalid stop/chase configuration")
-        if self.min_rr <= 0 or self.preferred_rr < self.min_rr:
-            raise ValueError("preferred RR must be >= minimum RR")
-        if self.max_target_rr < self.preferred_rr:
-            raise ValueError("maximum target RR must be >= preferred RR")
-        if not 0 < self.min_confidence <= 1:
-            raise ValueError("minimum confidence must be in (0, 1]")
+        if not 0 < self.liquidity_zone_merge_pct < 0.05:
+            raise ValueError("liquidity-zone merge tolerance is invalid")
+        if self.min_liquidity_strength <= 0:
+            raise ValueError("minimum liquidity strength must be positive")
+
+
+@dataclass(frozen=True, slots=True)
+class LiquidityZone:
+    price: float
+    sources: tuple[str, ...]
+    strength: float
+
+    @property
+    def has_15m(self) -> bool:
+        return "15M" in self.sources
+
+    @property
+    def has_1h(self) -> bool:
+        return "1H" in self.sources
+
+    @property
+    def higher_timeframe_confluence(self) -> bool:
+        return any(source in self.sources for source in ("1H", "4H", "prior-day", "daily"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,13 +111,18 @@ class SetupAnalysis:
     target_price: float | None = None
     risk_per_share: float | None = None
     reward_risk: float | None = None
+    target_percent: float | None = None
+    risk_percent: float | None = None
+    liquidity_strength: float | None = None
     confluences: tuple[str, ...] = ()
     vetoes: tuple[str, ...] = ()
     side: Side | None = None
 
 
 class LiquiditySweepReversalStrategy:
-    VERSION = "lsr.mtf.v2"
+    """Multi-timeframe liquidity sweep/reversal strategy for short intraday trades."""
+
+    VERSION = "lsr.mtf.v3"
 
     def __init__(self, config: StrategyConfig | None = None) -> None:
         self.config = config or StrategyConfig()
@@ -124,32 +159,19 @@ class LiquiditySweepReversalStrategy:
         one_hour_bias = _trend_bias(snapshot.one_hour)
         fifteen_bias = _trend_bias(snapshot.fifteen_minute)
 
-        if _is_opposite(daily_bias, side) and _is_opposite(four_hour_bias, side):
-            return SetupAnalysis(
-                False,
-                0.0,
-                "4H and daily filters oppose trade direction",
-                vetoes=("broad_trend_conflict",),
-                side=side,
-            )
-
-        sweep_levels = _liquidity_levels(
-            snapshot,
-            side,
-            one_hour_limit=c.one_hour_level_lookback,
-            fifteen_limit=c.fifteen_minute_level_lookback,
-        )
-        if not sweep_levels:
-            return SetupAnalysis(False, 0.0, "no 1H/15M liquidity levels available", vetoes=("no_context_liquidity",), side=side)
+        zones = _liquidity_zones(snapshot, side, c)
+        if not zones:
+            return SetupAnalysis(False, 0.0, "no actionable 1H/15M liquidity zones", vetoes=("no_context_liquidity",), side=side)
 
         atr_values = _atr_series(entry, c.atr_period)
         sweep_start = max(1, len(entry) - c.sweep_search_bars)
-        candidates: list[tuple[int, float, str]] = []
+        candidates: list[tuple[int, LiquidityZone]] = []
 
         for index in range(sweep_start, len(entry)):
             atr = atr_values[index - 1] if index > 0 else atr_values[index]
             if atr is None:
                 continue
+
             candle = entry[index]
             wick_fraction = (
                 candle.lower_wick / candle.range
@@ -158,25 +180,31 @@ class LiquiditySweepReversalStrategy:
                 if side is Side.SELL and candle.range > 0
                 else 0.0
             )
-            for level, source in sweep_levels:
-                penetration = level - candle.low if side is Side.BUY else candle.high - level
-                threshold = max(atr * c.min_sweep_penetration_atr, level * c.min_sweep_penetration_pct)
-                reclaimed = candle.close > level if side is Side.BUY else candle.close < level
-                if penetration >= threshold and penetration <= atr * c.max_sweep_depth_atr and reclaimed and wick_fraction >= c.min_rejection_wick_fraction:
-                    candidates.append((index, level, source))
+
+            for zone in zones:
+                penetration = zone.price - candle.low if side is Side.BUY else candle.high - zone.price
+                threshold = max(atr * c.min_sweep_penetration_atr, zone.price * c.min_sweep_penetration_pct)
+                reclaimed = candle.close > zone.price if side is Side.BUY else candle.close < zone.price
+                if (
+                    zone.strength >= c.min_liquidity_strength
+                    and penetration >= threshold
+                    and penetration <= atr * c.max_sweep_depth_atr
+                    and reclaimed
+                    and wick_fraction >= c.min_rejection_wick_fraction
+                ):
+                    candidates.append((index, zone))
 
         if not candidates:
-            return SetupAnalysis(False, 0.0, "no entry-timeframe sweep of 1H/15M liquidity", vetoes=("no_entry_sweep",), side=side)
+            return SetupAnalysis(False, 0.0, "no entry-timeframe sweep of mapped liquidity", vetoes=("no_entry_sweep",), side=side)
 
         newest_failure: SetupAnalysis | None = None
-        for sweep_index, swept_level, source in reversed(candidates):
+        for sweep_index, zone in reversed(candidates):
             result = self._evaluate_candidate(
                 snapshot,
                 entry,
                 atr_values,
                 sweep_index,
-                swept_level,
-                source,
+                zone,
                 side,
                 one_hour_bias,
                 fifteen_bias,
@@ -224,8 +252,7 @@ class LiquiditySweepReversalStrategy:
         entry: tuple[Candle, ...],
         atr_values: list[float | None],
         sweep_index: int,
-        swept_level: float,
-        source: str,
+        zone: LiquidityZone,
         side: Side,
         one_hour_bias: int,
         fifteen_bias: int,
@@ -244,7 +271,7 @@ class LiquiditySweepReversalStrategy:
 
         structure_level = max(bar.high for bar in structure) if side is Side.BUY else min(bar.low for bar in structure)
         mss_end = min(len(entry) - 1, sweep_index + c.max_bars_after_sweep)
-        mss_index = None
+        mss_index: int | None = None
         for index in range(sweep_index + 1, mss_end + 1):
             if side is Side.BUY and entry[index].close > structure_level:
                 mss_index = index
@@ -252,20 +279,27 @@ class LiquiditySweepReversalStrategy:
             if side is Side.SELL and entry[index].close < structure_level:
                 mss_index = index
                 break
+
         if mss_index is None:
             return SetupAnalysis(False, 0.0, "sweep did not produce local MSS", sweep_index=sweep_index, vetoes=("no_local_mss",), side=side)
 
         mss = entry[mss_index]
-        relative_volume = _relative_volume(entry, mss_index, 20)
+        relative_volume = _relative_volume(entry, mss_index, c.relative_volume_window)
         displacement = (
             (side is Side.BUY and mss.bullish and mss.close > structure_level)
             or (side is Side.SELL and mss.bearish and mss.close < structure_level)
-        ) and mss.body_fraction >= c.min_displacement_body_fraction and (not c.require_volume_confirmation or relative_volume >= c.min_relative_volume)
+        ) and (
+            mss.body_fraction >= c.min_displacement_body_fraction
+            and (
+                not c.require_volume_confirmation
+                or relative_volume >= c.min_relative_volume
+            )
+        )
         if not displacement:
-            return SetupAnalysis(False, 0.0, "MSS lacked displacement", sweep_index=sweep_index, mss_index=mss_index, vetoes=("no_displacement",), side=side)
+            return SetupAnalysis(False, 0.0, "MSS lacked entry-timeframe displacement", sweep_index=sweep_index, mss_index=mss_index, vetoes=("no_displacement",), side=side)
 
         trigger_end = min(len(entry) - 1, mss_index + c.max_bars_after_mss)
-        trigger_index = None
+        trigger_index: int | None = None
         for index in range(mss_index + 1, trigger_end + 1):
             if side is Side.BUY and entry[index].high > mss.high:
                 trigger_index = index
@@ -273,8 +307,9 @@ class LiquiditySweepReversalStrategy:
             if side is Side.SELL and entry[index].low < mss.low:
                 trigger_index = index
                 break
+
         if trigger_index is None:
-            return SetupAnalysis(False, 0.0, "entry confirmation trigger was not broken", sweep_index=sweep_index, mss_index=mss_index, vetoes=("no_confirmation",), side=side)
+            return SetupAnalysis(False, 0.0, "confirmation trigger was not broken", sweep_index=sweep_index, mss_index=mss_index, vetoes=("no_confirmation",), side=side)
 
         trigger = entry[trigger_index]
         confirmed = (
@@ -292,151 +327,235 @@ class LiquiditySweepReversalStrategy:
         entry_price = trigger.close
         if side is Side.BUY:
             stop_price = min(sweep.low, mss.low) - c.stop_buffer_atr * atr
-            risk = entry_price - stop_price
-            opposing_levels = _liquidity_levels(snapshot, Side.SELL, one_hour_limit=c.one_hour_level_lookback, fifteen_limit=c.fifteen_minute_level_lookback)
+            target_zones = _liquidity_zones(snapshot, Side.SELL, c)
         else:
             stop_price = max(sweep.high, mss.high) + c.stop_buffer_atr * atr
-            risk = stop_price - entry_price
-            opposing_levels = _liquidity_levels(snapshot, Side.BUY, one_hour_limit=c.one_hour_level_lookback, fifteen_limit=c.fifteen_minute_level_lookback)
+            target_zones = _liquidity_zones(snapshot, Side.BUY, c)
 
+        risk = entry_price - stop_price if side is Side.BUY else stop_price - entry_price
         if risk <= 0 or risk > c.max_stop_atr * atr:
             return SetupAnalysis(False, 0.0, "entry stop is too wide", sweep_index=sweep_index, mss_index=mss_index, trigger_index=trigger_index, vetoes=("stop_too_wide",), side=side)
 
-        target_level = _nearest_opposing_level(entry_price, opposing_levels, side)
-        available_rr = abs(target_level - entry_price) / risk if target_level is not None else c.preferred_rr
-        if target_level is not None and available_rr < c.min_rr:
-            return SetupAnalysis(False, 0.0, "nearest opposing liquidity leaves insufficient room", sweep_index=sweep_index, mss_index=mss_index, trigger_index=trigger_index, vetoes=("insufficient_room",), side=side)
+        target_zone = _nearest_opposing_zone(entry_price, target_zones, side)
+        if target_zone is None:
+            return SetupAnalysis(False, 0.0, "no meaningful opposing liquidity destination", sweep_index=sweep_index, mss_index=mss_index, trigger_index=trigger_index, vetoes=("no_target_liquidity",), side=side)
 
-        target_rr = min(c.max_target_rr, max(c.preferred_rr, available_rr))
-        target_price = entry_price + target_rr * risk if side is Side.BUY else entry_price - target_rr * risk
+        target_price = target_zone.price
+        target_percent = abs(target_price - entry_price) / entry_price * 100.0
+        risk_percent = risk / entry_price * 100.0
         reward_risk = abs(target_price - entry_price) / risk
 
         alignment = _alignment_score(side, daily_bias, four_hour_bias, one_hour_bias, fifteen_bias)
-        rejection_score = min(1.0, (sweep.lower_wick if side is Side.BUY else sweep.upper_wick) / max(sweep.range, 1e-9) / c.min_rejection_wick_fraction)
+        rejection_score = min(
+            1.0,
+            (sweep.lower_wick if side is Side.BUY else sweep.upper_wick)
+            / max(sweep.range, 1e-9)
+            / c.min_rejection_wick_fraction,
+        )
         displacement_score = min(1.0, mss.body_fraction / c.min_displacement_body_fraction)
         volume_score = min(1.0, relative_volume / c.min_relative_volume)
-        rr_score = min(1.0, reward_risk / c.max_target_rr)
+        liquidity_score = min(1.0, zone.strength / 6.0)
+        destination_score = min(1.0, target_zone.strength / 6.0)
 
         confluences = [
-            f"{source} liquidity sweep",
-            "local MSS",
+            f"liquidity sweep: {', '.join(zone.sources)}",
+            f"{snapshot.entry_timeframe.value} local MSS",
             f"{snapshot.entry_timeframe.value} displacement",
             f"{snapshot.entry_timeframe.value} confirmation",
+            f"target liquidity: {', '.join(target_zone.sources)}",
         ]
+        if zone.has_15m and zone.has_1h:
+            confluences.append("15M + 1H liquidity confluence")
+        if zone.higher_timeframe_confluence:
+            confluences.append("higher-timeframe liquidity reinforced")
         if one_hour_bias == _side_value(side):
-            confluences.append("1H trend aligned")
+            confluences.append("1H tendency aligned")
         if fifteen_bias == _side_value(side):
-            confluences.append("15M structure aligned")
+            confluences.append("15M tendency aligned")
         if four_hour_bias == _side_value(side):
-            confluences.append("4H filter aligned")
+            confluences.append("4H context aligned")
         if daily_bias == _side_value(side):
-            confluences.append("daily filter aligned")
+            confluences.append("daily context aligned")
 
-        score = min(0.99, 0.18 * rejection_score + 0.27 * displacement_score + 0.15 * volume_score + 0.20 * rr_score + 0.20 * alignment)
-        if score < c.min_confidence:
-            return SetupAnalysis(False, score, "multi-timeframe setup quality below threshold", sweep_index=sweep_index, mss_index=mss_index, trigger_index=trigger_index, confluences=tuple(confluences), vetoes=("quality",), side=side)
-        if not all(isfinite(value) for value in (entry_price, stop_price, target_price, score)):
+        score = min(
+            0.99,
+            0.18 * rejection_score
+            + 0.24 * displacement_score
+            + 0.10 * volume_score
+            + 0.20 * liquidity_score
+            + 0.16 * destination_score
+            + 0.12 * alignment,
+        )
+
+        if not all(
+            isfinite(value)
+            for value in (
+                entry_price,
+                stop_price,
+                target_price,
+                score,
+                target_percent,
+                risk_percent,
+            )
+        ):
             return SetupAnalysis(False, 0.0, "non-finite strategy output", vetoes=("finite",), side=side)
 
         return SetupAnalysis(
             True,
             score,
-            f"{side.value} {snapshot.entry_timeframe.value} liquidity-sweep reversal with 1H/15M entry context",
-            sweep_index,
-            mss_index,
-            trigger_index,
-            entry_price,
-            stop_price,
-            target_price,
-            risk,
-            reward_risk,
-            tuple(confluences),
-            (),
-            side,
+            f"{side.value} {snapshot.entry_timeframe.value} liquidity-sweep reversal toward opposing liquidity ({target_percent:.2f}%)",
+            sweep_index=sweep_index,
+            mss_index=mss_index,
+            trigger_index=trigger_index,
+            entry_price=entry_price,
+            stop_price=stop_price,
+            target_price=target_price,
+            risk_per_share=risk,
+            reward_risk=reward_risk,
+            target_percent=target_percent,
+            risk_percent=risk_percent,
+            liquidity_strength=zone.strength,
+            confluences=tuple(confluences),
+            side=side,
         )
+
+
+def _liquidity_zones(
+    snapshot: MultiTimeframeSnapshot,
+    side: Side,
+    config: StrategyConfig,
+) -> tuple[LiquidityZone, ...]:
+    raw_levels: list[tuple[float, str]] = []
+
+    if snapshot.daily:
+        prior = snapshot.daily[-1]
+        raw_levels.append((prior.low if side is Side.BUY else prior.high, "prior-day"))
+
+    if snapshot.four_hour:
+        for level in _swing_points(
+            snapshot.four_hour[-config.four_hour_level_lookback:],
+            is_high=side is Side.SELL,
+        ):
+            raw_levels.append((level, "4H"))
+
+    for source, candles, limit in (
+        ("1H", snapshot.one_hour, config.one_hour_level_lookback),
+        ("15M", snapshot.fifteen_minute, config.fifteen_minute_level_lookback),
+    ):
+        for level in _swing_points(
+            candles[-limit:],
+            is_high=side is Side.SELL,
+        ):
+            raw_levels.append((level, source))
+
+    if not raw_levels:
+        return ()
+
+    raw_levels.sort(key=lambda item: item[0])
+    clusters: list[list[tuple[float, str]]] = []
+
+    for level, source in raw_levels:
+        if not clusters:
+            clusters.append([(level, source)])
+            continue
+
+        last_cluster = clusters[-1]
+        center = sum(value for value, _ in last_cluster) / len(last_cluster)
+        if abs(level - center) / center <= config.liquidity_zone_merge_pct:
+            last_cluster.append((level, source))
+        else:
+            clusters.append([(level, source)])
+
+    zones: list[LiquidityZone] = []
+    for cluster in clusters:
+        sources = tuple(
+            sorted(
+                set(source for _, source in cluster),
+                key=lambda source: _SOURCE_WEIGHT[source],
+            )
+        )
+
+        strength = sum(
+            _SOURCE_WEIGHT[source]
+            * min(sum(1 for _, item_source in cluster if item_source == source), 2)
+            for source in sources
+        )
+
+        # Daily/4H alone are broad context. An actionable entry zone must
+        # contain at least a 1H or 15M liquidity component.
+        if not any(source in sources for source in ("1H", "15M")):
+            continue
+
+        zones.append(
+            LiquidityZone(
+                price=sum(value for value, _ in cluster) / len(cluster),
+                sources=sources,
+                strength=strength,
+            )
+        )
+
+    return tuple(zones)
+
+
+def _nearest_opposing_zone(
+    entry_price: float,
+    zones: tuple[LiquidityZone, ...],
+    side: Side,
+) -> LiquidityZone | None:
+    if side is Side.BUY:
+        candidates = [zone for zone in zones if zone.price > entry_price]
+        return min(candidates, key=lambda zone: zone.price) if candidates else None
+
+    candidates = [zone for zone in zones if zone.price < entry_price]
+    return max(candidates, key=lambda zone: zone.price) if candidates else None
 
 
 def _side_value(side: Side) -> int:
     return 1 if side is Side.BUY else -1
 
 
-def _is_opposite(bias: int, side: Side) -> bool:
-    return bias != 0 and bias != _side_value(side)
-
-
 def _trend_bias(candles: tuple[Candle, ...]) -> int:
     if len(candles) < 6:
         return 0
+
     highs = _swing_points(candles, is_high=True)
     lows = _swing_points(candles, is_high=False)
+
     if len(highs) >= 2 and len(lows) >= 2:
         if highs[-1] > highs[-2] and lows[-1] > lows[-2]:
             return 1
         if highs[-1] < highs[-2] and lows[-1] < lows[-2]:
             return -1
+
     lookback = min(8, len(candles) - 1)
     change = candles[-1].close - candles[-1 - lookback].close
     return 1 if change > 0 else -1 if change < 0 else 0
 
 
-def _swing_points(candles: tuple[Candle, ...], *, is_high: bool, span: int = 2) -> list[float]:
+def _swing_points(
+    candles: tuple[Candle, ...],
+    *,
+    is_high: bool,
+    span: int = 2,
+) -> list[float]:
     points: list[float] = []
+
     for index in range(span, len(candles) - span):
         value = candles[index].high if is_high else candles[index].low
         neighbors = [
-            (bar.high if is_high else bar.low)
+            bar.high if is_high else bar.low
             for bar in candles[index - span:index]
         ] + [
-            (bar.high if is_high else bar.low)
+            bar.high if is_high else bar.low
             for bar in candles[index + 1:index + span + 1]
         ]
+
         if is_high and value > max(neighbors):
             points.append(value)
         if not is_high and value < min(neighbors):
             points.append(value)
+
     return points
-
-
-def _liquidity_levels(
-    snapshot: MultiTimeframeSnapshot,
-    side: Side,
-    *,
-    one_hour_limit: int,
-    fifteen_limit: int,
-) -> list[tuple[float, str]]:
-    levels: list[tuple[float, str]] = []
-    if snapshot.daily:
-        prior_daily = snapshot.daily[-1]
-        levels.append(
-            (
-                prior_daily.low if side is Side.BUY else prior_daily.high,
-                "prior-day",
-            )
-        )
-
-    for source, candles in (
-        ("1H", snapshot.one_hour[-one_hour_limit:]),
-        ("15M", snapshot.fifteen_minute[-fifteen_limit:]),
-    ):
-        for level in _swing_points(candles, is_high=side is Side.SELL):
-            levels.append((level, source))
-
-    result: list[tuple[float, str]] = []
-    for level, source in levels:
-        if not any(
-            abs(level - existing) <= max(level, existing) * 1e-6
-            for existing, _ in result
-        ):
-            result.append((level, source))
-    return result
-
-
-def _nearest_opposing_level(entry_price: float, levels: list[tuple[float, str]], side: Side) -> float | None:
-    if side is Side.BUY:
-        candidates = [level for level, _ in levels if level > entry_price]
-        return min(candidates) if candidates else None
-    candidates = [level for level, _ in levels if level < entry_price]
-    return max(candidates) if candidates else None
 
 
 def _alignment_score(
@@ -448,6 +567,7 @@ def _alignment_score(
 ) -> float:
     target = _side_value(side)
     score = 0.50
+
     for bias, weight in (
         (daily_bias, 0.10),
         (four_hour_bias, 0.15),
@@ -458,43 +578,36 @@ def _alignment_score(
             score += weight
         elif bias == -target:
             score -= weight
+
     return max(0.0, min(1.0, score))
 
 
-def _has_fvg(
+def _relative_volume(
     candles: tuple[Candle, ...],
-    start: int,
-    end: int,
-    side: Side,
-) -> bool:
-    for index in range(max(2, start), min(len(candles), end + 1)):
-        if (
-            side is Side.BUY
-            and candles[index - 2].high < candles[index].low
-            and candles[index].bullish
-        ):
-            return True
-        if (
-            side is Side.SELL
-            and candles[index - 2].low > candles[index].high
-            and candles[index].bearish
-        ):
-            return True
-    return False
-
-
-def _relative_volume(candles: tuple[Candle, ...], index: int, window: int) -> float:
+    index: int,
+    window: int,
+) -> float:
     start = max(0, index - window)
-    baseline = [candle.volume for candle in candles[start:index] if candle.volume > 0]
+    baseline = [
+        candle.volume
+        for candle in candles[start:index]
+        if candle.volume > 0
+    ]
+
     if not baseline or candles[index].volume <= 0:
         return 0.0
+
     average_volume = sum(baseline) / len(baseline)
     return candles[index].volume / average_volume if average_volume else 0.0
 
 
-def _atr_series(candles: tuple[Candle, ...], period: int) -> list[float | None]:
+def _atr_series(
+    candles: tuple[Candle, ...],
+    period: int,
+) -> list[float | None]:
     values: list[float | None] = [None] * len(candles)
     true_ranges: list[float] = []
+
     for index, candle in enumerate(candles):
         previous_close = candles[index - 1].close if index else candle.close
         true_range = max(
@@ -503,6 +616,9 @@ def _atr_series(candles: tuple[Candle, ...], period: int) -> list[float | None]:
             abs(candle.low - previous_close),
         )
         true_ranges.append(true_range)
+
         if index + 1 >= period:
-            values[index] = sum(true_ranges[index + 1 - period:index + 1]) / period
+            window = true_ranges[index + 1 - period:index + 1]
+            values[index] = sum(window) / period
+
     return values
