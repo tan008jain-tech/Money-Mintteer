@@ -5,19 +5,25 @@ from money_mintter.core.pipeline import DeepAnalysisPipeline
 from money_mintter.dashboard.app import DashboardSnapshot, render_dashboard_html
 from money_mintter.domain import Candidate
 from money_mintter.storage.state import PositionSnapshot, RuntimeSnapshot, TradeSnapshot
-from money_mintter.strategy import Candle, StrategyInput
+from money_mintter.strategy import MultiTimeframeSnapshot, Timeframe
 
 
 def test_pipeline_rejects_low_quality_candidate_before_strategy() -> None:
+    now = datetime(2026, 10, 1, 14, 0, tzinfo=timezone.utc)
     candidate = Candidate(
-        "ABC", "NYSE", 0.50, 0.70, 0.80, 0.80,
-        datetime(2026, 10, 1, 14, 0, tzinfo=timezone.utc),
+        "ABC", "NYSE", 0.50, 0.70, 0.80, 0.80, now
     )
-    result = DeepAnalysisPipeline().evaluate(
-        candidate,
-        [],
-        StrategyInput(99.0, 102.0, 5),
+    snapshot = MultiTimeframeSnapshot(
+        as_of=now,
+        daily=(),
+        four_hour=(),
+        one_hour=(),
+        fifteen_minute=(),
+        entry=(),
+        entry_timeframe=Timeframe.FIVE_MIN,
+        spread_bps=5,
     )
+    result = DeepAnalysisPipeline().evaluate(candidate, snapshot)
     assert not result.opportunity.eligible
     assert result.signal is None
 
