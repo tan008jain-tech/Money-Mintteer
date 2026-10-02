@@ -57,13 +57,21 @@ def test_detects_local_intraday_liquidity_without_prior_day_sweep():
         candle("ABC", 31, 99.75, 101.00, 99.70, 100.85, 2500),
         candle("ABC", 32, 100.85, 101.20, 100.70, 101.10, 1800),
     ])
-    context = StrategyInput(
-        98.0, 105.0, 5, liquidity_lows=(99.50,)
+    result = LiquiditySweepReversalStrategy().analyze(
+        bars,
+        StrategyInput(98.0, 105.0, 5),
     )
-    result = LiquiditySweepReversalStrategy().analyze(bars, context)
     assert result.passed, result
     assert result.side is Side.BUY
     assert "intraday liquidity" in result.confluences
+
+
+def test_intraday_liquidity_levels_are_causal():
+    bars = [candle("ABC", i, 100.0, 100.50, 99.50, 100.0) for i in range(35)]
+    levels_at_30 = LiquiditySweepReversalStrategy()._intraday_liquidity_levels(
+        bars, 30, Side.SELL
+    )
+    assert max(levels_at_30) <= 100.50
 
 
 def test_signals_both_sides():
@@ -75,8 +83,8 @@ def test_signals_both_sides():
     )
     assert long_signal is not None and long_signal.side is Side.BUY
     assert short_signal is not None and short_signal.side is Side.SELL
-    assert long_signal.strategy_version == "lsr.v3"
-    assert short_signal.strategy_version == "lsr.v3"
+    assert long_signal.strategy_version == "lsr.v4"
+    assert short_signal.strategy_version == "lsr.v4"
 
 
 def test_rejects_wide_spread():
@@ -105,10 +113,11 @@ def test_does_not_reemit_old_trigger():
     assert "stale_trigger" in result.vetoes
 
 
-def test_invalid_liquidity_level_is_rejected():
+def test_invalid_strategy_liquidity_config_is_rejected():
     try:
-        StrategyInput(99.0, 102.0, 5, liquidity_lows=(0.0,))
+        from money_mintter.strategy.liquidity_reversal import StrategyConfig
+        StrategyConfig(intraday_liquidity_lookback_bars=5)
     except ValueError as exc:
-        assert "positive" in str(exc)
+        assert "lookback" in str(exc)
     else:
-        raise AssertionError("invalid liquidity level should fail")
+        raise AssertionError("invalid liquidity lookback should fail")

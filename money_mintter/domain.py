@@ -51,7 +51,7 @@ class TradeSignal:
     confidence: float
     timestamp: datetime
     reason: str
-    strategy_version: str = "lsr.v3"
+    strategy_version: str = "lsr.v4"
 
     def __post_init__(self) -> None:
         if min(self.entry_price, self.stop_price, self.target_price) <= 0:

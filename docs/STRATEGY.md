@@ -1,14 +1,14 @@
 # Money Mintter Strategy Baseline
 
-Money Mintter's current research strategy is lsr.v3.
+Money Mintter's current research strategy is lsr.v4.
 
 ## Intent
 
-The system is intended to find shorter-duration intraday opportunities while remaining selective about execution quality. The strategy therefore uses local intraday liquidity as well as prior-session liquidity.
+The strategy is intended to find shorter-duration intraday opportunities while remaining selective about execution quality.
 
 ## Flow
 
-prior-session / confirmed intraday liquidity
+prior-session or causal intraday liquidity
 -> sweep + reclaim
 -> local MSS
 -> displacement
@@ -24,23 +24,22 @@ Sell-side liquidity is swept and reclaimed. Price then breaks recent local struc
 
 Buy-side liquidity is swept and reclaimed. Price then breaks recent local structure to the downside with displacement and closes through the confirmation level.
 
-## Liquidity model
+## Causal liquidity model
 
-The point-in-time context can contain:
-- previous-session high/low;
-- recently confirmed intraday swing highs/lows;
-- the recent rolling extreme as a historical fallback.
+Prior-session high/low comes from PreviousSessionContext.
 
-No current or future candle is included when constructing those levels.
+Intraday liquidity is derived inside the strategy, separately for each candidate sweep, using only candles strictly before that sweep. Confirmed local swing highs/lows and a historical rolling extreme are used. This avoids using a level that did not exist yet at the time of the sweep.
 
-## Why lsr.v3 exists
+## Why this version exists
 
-The previous baseline treated the previous session's extreme as the dominant sweep level and compared the sweep against a broad 24-bar pre-sweep range. That was much narrower than the intended short-duration intraday use case.
+The earlier baseline was too dependent on prior-session extremes and a broad pre-sweep structure window. That produced a sparse opportunity set for intraday use.
 
-lsr.v3 measures a broader opportunity set by using local intraday liquidity and shorter causal structure windows. This is a research hypothesis, not a profitability claim.
+lsr.v4 broadens the measurable intraday opportunity set while explicitly removing the look-ahead path found during the code audit.
+
+This is a research hypothesis, not a profitability claim.
 
 ## Validation boundary
 
-A signal count is not proof of edge. Validation must use multiple symbols, multiple market regimes, realistic spread/slippage/fees, event-order-aware execution, chronological walk-forward tests and out-of-sample evaluation.
+Signal frequency is not proof of edge. Validation must use multiple symbols, multiple regimes and months, realistic costs, chronological walk-forward tests and out-of-sample evaluation.
 
-The strategy version is embedded in every TradeSignal so results can be audited later.
+Every TradeSignal carries the strategy version for auditability.

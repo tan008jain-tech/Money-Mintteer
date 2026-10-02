@@ -30,29 +30,24 @@ def test_previous_session_context_uses_previous_available_day() -> None:
     assert result.prior_day_low == 98
 
 
-def test_intraday_levels_do_not_use_current_candle() -> None:
-    candles = [candle(1, i, 100 + i, 99 - i) for i in range(35)]
-    candles.append(candle(2, 0, 500, 1))
-
+def test_context_uses_only_previous_session_levels() -> None:
+    candles = [
+        candle(1, 0, 101, 99),
+        candle(1, 1, 102, 98),
+        candle(5, 0, 500, 1),
+    ]
     context = PreviousSessionContext(candles, timezone_name="UTC")
-    result = context(35, candles)
+    result = context(2, candles)
 
     assert result is not None
-    assert 500 not in result.liquidity_highs
-    assert 1 not in result.liquidity_lows
+    assert result.prior_day_high == 102
+    assert result.prior_day_low == 98
 
 
-def test_intraday_levels_are_bounded() -> None:
-    candles = [candle(1, i, 100 + (i % 5), 90 + (i % 5)) for i in range(50)]
-    candles.append(candle(2, 0, 101, 89))
-
-    context = PreviousSessionContext(
-        candles,
-        timezone_name="UTC",
-        max_intraday_levels=4,
-    )
-    result = context(50, candles)
-
-    assert result is not None
-    assert len(result.liquidity_highs) <= 5
-    assert len(result.liquidity_lows) <= 5
+def test_negative_spread_is_rejected() -> None:
+    try:
+        PreviousSessionContext([], spread_bps=-1)
+    except ValueError as exc:
+        assert "spread" in str(exc)
+    else:
+        raise AssertionError("negative spread should fail")

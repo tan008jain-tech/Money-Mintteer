@@ -9,7 +9,7 @@
 5. Fresh confirmation may re-enter immediately after a confirmed exit.
 6. Risk is derived from stop distance and hard budgets.
 7. Trading Wallet and Profit Reserve are internal accounting buckets.
-8. Time is timezone-aware and exchange-calendar capable.
+8. Time is timezone-aware.
 9. Restart recovery fails closed on unexplained broker/state mismatches.
 10. Live execution is gated by health, data freshness, reconciliation and watchdog state.
 
@@ -18,7 +18,7 @@
     External universe source
             |
             v
-    Session / candidate verification
+    Candidate verification
             |
             v
     Candidate ranker (max 5)
@@ -31,20 +31,19 @@
             |
             v
     Broker / trade manager
-            |
-            +--> PostgreSQL state + audit
-            +--> watchdog / recovery
-            +--> dashboard
 
 ## Research path
 
     Historical 1-minute candles
             |
             v
-    Point-in-time session + intraday liquidity context
+    Previous-session context
             |
             v
-    Strategy (lsr.v3)
+    Strategy derives causal intraday liquidity
+            |
+            v
+    Strategy (lsr.v4)
             |
             v
     Event-order-aware backtester
