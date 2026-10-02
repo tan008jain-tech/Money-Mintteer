@@ -1,48 +1,42 @@
 # Money Mintter Strategy
 
-Current strategy version: lsr.mtf.v1
+Current implementation: lsr.mtf.v3
 
-## Timeframe hierarchy
+The authoritative strategy definition is \`docs/STRATEGY_LOCK.md\`. This file summarizes the implementation shape only.
 
-Daily / 4H
-  -> broad filter only
-1H
-  -> primary intraday trend and important liquidity
-15M
-  -> secondary structure and liquidity
-5M or 3M
-  -> actual entry analysis
-1M
-  -> execution and tracking only
+## Runtime hierarchy
 
-## Rules
+Daily / 4H broad context
+-> 1H major intraday liquidity
+-> 15M secondary intraday liquidity
+-> 5M or 3M entry
+-> 1M execution/tracking
 
-### Daily and 4H
-These do not create entries. They provide a broad directional filter and can block a trade when both higher-timeframe structures oppose it.
+## Liquidity zones
 
-### 1H
-Primary intraday context. Important swing highs/lows and the main intraday trend live here.
+The implementation clusters nearby liquidity levels across timeframes into zones.
 
-### 15M
-Secondary context. It supplies nearer liquidity and refines the 1H structure.
+A zone records its contributing sources and a relative strength score. Higher-timeframe sources contribute more weight. A zone containing both 15M and 1H liquidity is explicitly recognized as confluence.
 
-### 5M / 3M
-The entry engine looks for:
+Daily/4H liquidity may reinforce a zone but do not independently create an entry.
 
-1. sweep of 1H or 15M liquidity;
-2. reclaim;
-3. local market-structure shift;
-4. displacement and volume confirmation;
-5. break-and-close confirmation;
-6. structure-aware stop and opposing-liquidity reward room.
+## Entry flow
 
-The latest entry candle must be the confirmation candle before a signal can be emitted.
+1. Identify a mapped intraday liquidity zone.
+2. Wait for the 5M/3M price to sweep the zone.
+3. Require reclaim/rejection.
+4. Require a local market-structure shift.
+5. Require displacement.
+6. Require confirmation through the MSS level.
+7. Use the sweep/MSS structure for the stop.
+8. Use the next meaningful opposing liquidity zone as the destination.
+9. Record percentage target distance and risk distance.
+10. Allow a new setup later when a new liquidity event forms.
 
-### 1M
-Raw 1-minute candles are not used to create the setup. They are used for next-bar execution, stop/target monitoring, session exits and position tracking.
+R:R remains a measurement for research reporting only. It is not the primary setup gate.
 
-## Research boundary
+The higher-timeframe directional tendency contributes to quality scoring but does not act as a blunt countertrend veto.
 
-Signal frequency is not proof of edge. Validate across multiple symbols, multiple regimes, realistic costs, chronological walk-forward windows and out-of-sample periods.
+Volume confirmation is optional and is not a hard requirement by default.
 
-Every signal carries the strategy version.
+Exact numerical thresholds remain implementation parameters and must be validated rather than tuned to manufacture trade counts.
