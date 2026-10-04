@@ -23,12 +23,12 @@ def candidate(
 
 def test_strict_candidate_gate_passes_good_candidate() -> None:
     assessment = OpportunityAnalyzer().assess(
-        candidate(0.90, 0.70, 0.80, 0.80),
+        candidate(0.95, 0.70, 0.90, 0.90),
         spread_bps=5,
     )
 
     assert assessment.eligible
-    assert assessment.score >= 0.74
+    assert assessment.score >= 0.85
     assert assessment.vetoes == ()
 
 

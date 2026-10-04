@@ -105,6 +105,7 @@ class ManagedTrade:
     closed_at: datetime | None = None
     realized_pnl: float | None = None
     close_reason: str | None = None
+    partial_taken: bool = False
 
 
 @dataclass(slots=True)
@@ -137,3 +138,22 @@ class WalletLedger:
             self.trading_wallet += pnl
             self.realized_loss += -pnl
         return pnl, 0.0
+
+    def deposit_investing(self, amount: float) -> None:
+        if amount <= 0:
+            raise ValueError("deposit amount must be positive")
+        self.trading_wallet += amount
+
+    def withdraw_investing(self, amount: float) -> None:
+        if amount <= 0:
+            raise ValueError("withdrawal amount must be positive")
+        if amount > self.trading_wallet:
+            raise ValueError("insufficient funds in investing wallet")
+        self.trading_wallet -= amount
+
+    def withdraw_profit(self, amount: float) -> None:
+        if amount <= 0:
+            raise ValueError("withdrawal amount must be positive")
+        if amount > self.profit_reserve:
+            raise ValueError("insufficient funds in profit wallet")
+        self.profit_reserve -= amount

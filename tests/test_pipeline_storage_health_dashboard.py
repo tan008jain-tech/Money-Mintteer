@@ -59,7 +59,7 @@ def test_degraded_component_pauses() -> None:
 
 
 def test_dashboard_renders_as_read_only_control_room() -> None:
-    snapshot = DashboardSnapshot("RUN", 9500, 500, 9000, (), ())
+    snapshot = DashboardSnapshot("RUN", 9500, 500, 9000, (), (), (), ())
     html = render_dashboard_html(snapshot)
     assert "Money Mintter Control Room" in html
-    assert "RUN" in html
+    assert snapshot.system_action in html

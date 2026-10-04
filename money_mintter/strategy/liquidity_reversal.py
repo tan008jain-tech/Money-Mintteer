@@ -24,25 +24,28 @@ class StrategyConfig:
     one_hour_level_lookback: int = 30
     fifteen_minute_level_lookback: int = 30
     four_hour_level_lookback: int = 12
-    structure_bars: int = 8
-    sweep_search_bars: int = 30
-    max_bars_after_sweep: int = 8
-    max_bars_after_mss: int = 5
+    structure_bars: int = 6
+    sweep_search_bars: int = 20
+    max_bars_after_sweep: int = 10
+    max_bars_after_mss: int = 8
     atr_period: int = 14
-    min_sweep_penetration_atr: float = 0.05
-    min_sweep_penetration_pct: float = 0.0003
-    max_sweep_depth_atr: float = 1.50
-    min_rejection_wick_fraction: float = 0.25
-    min_displacement_body_fraction: float = 0.50
+    min_sweep_penetration_atr: float = 0.02
+    min_sweep_penetration_pct: float = 0.0001
+    max_sweep_depth_atr: float = 2.00
+    min_rejection_wick_fraction: float = 0.35
+    min_displacement_body_fraction: float = 0.60
     relative_volume_window: int = 20
-    min_relative_volume: float = 1.00
+    min_relative_volume: float = 1.50
     require_volume_confirmation: bool = False
     max_spread_bps: float = 20.0
-    stop_buffer_atr: float = 0.05
+    stop_buffer_atr: float = 0.03
     max_stop_atr: float = 2.00
-    max_chase_atr: float = 0.75
+    max_chase_atr: float = 1.00
     liquidity_zone_merge_pct: float = 0.0015
-    min_liquidity_strength: float = 1.0
+    min_liquidity_strength: float = 4.0
+    min_target_pct: float = 0.5
+    max_stop_pct: float = 1.0
+    min_strategy_score: float = 0.90
 
     def __post_init__(self) -> None:
         if self.entry_timeframe not in (Timeframe.THREE_MIN, Timeframe.FIVE_MIN):
@@ -73,6 +76,8 @@ class StrategyConfig:
             raise ValueError("invalid spread/stop-buffer configuration")
         if self.max_stop_atr <= 0 or self.max_chase_atr <= 0:
             raise ValueError("invalid stop/chase configuration")
+        if self.min_target_pct <= 0 or self.max_stop_pct <= 0:
+            raise ValueError("target percentage and stop percentage must be positive")
         if not 0 < self.liquidity_zone_merge_pct < 0.05:
             raise ValueError("liquidity-zone merge tolerance is invalid")
         if self.min_liquidity_strength <= 0:
@@ -300,25 +305,28 @@ class LiquiditySweepReversalStrategy:
 
         trigger_end = min(len(entry) - 1, mss_index + c.max_bars_after_mss)
         trigger_index: int | None = None
+        first_trigger_index: int | None = None
         for index in range(mss_index + 1, trigger_end + 1):
-            if side is Side.BUY and entry[index].high > mss.high:
-                trigger_index = index
-                break
-            if side is Side.SELL and entry[index].low < mss.low:
+            bar = entry[index]
+            brokes = (side is Side.BUY and bar.high > mss.high) or (side is Side.SELL and bar.low < mss.low)
+            if brokes and first_trigger_index is None:
+                first_trigger_index = index
+            confirmed = (
+                side is Side.BUY and bar.bullish and bar.close > mss.high
+            ) or (
+                side is Side.SELL and bar.bearish and bar.close < mss.low
+            )
+            if confirmed:
                 trigger_index = index
                 break
 
-        if trigger_index is None:
+        if first_trigger_index is None:
             return SetupAnalysis(False, 0.0, "confirmation trigger was not broken", sweep_index=sweep_index, mss_index=mss_index, vetoes=("no_confirmation",), side=side)
 
+        if trigger_index is None:
+            return SetupAnalysis(False, 0.0, "confirmation candle did not close through trigger", sweep_index=sweep_index, mss_index=mss_index, trigger_index=first_trigger_index, vetoes=("weak_confirmation",), side=side)
+
         trigger = entry[trigger_index]
-        confirmed = (
-            side is Side.BUY and trigger.bullish and trigger.close > mss.high
-        ) or (
-            side is Side.SELL and trigger.bearish and trigger.close < mss.low
-        )
-        if not confirmed:
-            return SetupAnalysis(False, 0.0, "confirmation candle did not close through trigger", sweep_index=sweep_index, mss_index=mss_index, trigger_index=trigger_index, vetoes=("weak_confirmation",), side=side)
 
         chase = trigger.close - mss.high if side is Side.BUY else mss.low - trigger.close
         if chase > c.max_chase_atr * atr:
@@ -328,21 +336,29 @@ class LiquiditySweepReversalStrategy:
         if side is Side.BUY:
             stop_price = min(sweep.low, mss.low) - c.stop_buffer_atr * atr
             target_zones = _liquidity_zones(snapshot, Side.SELL, c)
+            candidates_zones = [z for z in target_zones if z.price > entry_price]
+            valid_targets = [z for z in candidates_zones if (z.price - entry_price) / entry_price * 100.0 >= c.min_target_pct]
+            target_zone = min(valid_targets, key=lambda z: z.price) if valid_targets else (max(candidates_zones, key=lambda z: z.price) if candidates_zones else None)
         else:
             stop_price = max(sweep.high, mss.high) + c.stop_buffer_atr * atr
             target_zones = _liquidity_zones(snapshot, Side.BUY, c)
+            candidates_zones = [z for z in target_zones if z.price < entry_price]
+            valid_targets = [z for z in candidates_zones if (entry_price - z.price) / entry_price * 100.0 >= c.min_target_pct]
+            target_zone = max(valid_targets, key=lambda z: z.price) if valid_targets else (min(candidates_zones, key=lambda z: z.price) if candidates_zones else None)
 
         risk = entry_price - stop_price if side is Side.BUY else stop_price - entry_price
-        if risk <= 0 or risk > c.max_stop_atr * atr:
+        risk_percent = risk / entry_price * 100.0
+        if risk_percent <= 0 or risk_percent > c.max_stop_pct or risk > c.max_stop_atr * atr:
             return SetupAnalysis(False, 0.0, "entry stop is too wide", sweep_index=sweep_index, mss_index=mss_index, trigger_index=trigger_index, vetoes=("stop_too_wide",), side=side)
 
-        target_zone = _nearest_opposing_zone(entry_price, target_zones, side)
         if target_zone is None:
             return SetupAnalysis(False, 0.0, "no meaningful opposing liquidity destination", sweep_index=sweep_index, mss_index=mss_index, trigger_index=trigger_index, vetoes=("no_target_liquidity",), side=side)
 
         target_price = target_zone.price
         target_percent = abs(target_price - entry_price) / entry_price * 100.0
-        risk_percent = risk / entry_price * 100.0
+        if target_percent < c.min_target_pct:
+            return SetupAnalysis(False, 0.0, "target profit potential is too small", sweep_index=sweep_index, mss_index=mss_index, trigger_index=trigger_index, vetoes=("target_too_small",), side=side)
+
         reward_risk = abs(target_price - entry_price) / risk
 
         alignment = _alignment_score(side, daily_bias, four_hour_bias, one_hour_bias, fifteen_bias)
@@ -386,6 +402,9 @@ class LiquiditySweepReversalStrategy:
             + 0.16 * destination_score
             + 0.12 * alignment,
         )
+
+        if score < c.min_strategy_score:
+            return SetupAnalysis(False, score, "setup score below >80% accuracy threshold", vetoes=("low_score",), side=side)
 
         if not all(
             isfinite(value)

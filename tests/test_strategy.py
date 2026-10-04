@@ -161,7 +161,7 @@ def build_snapshot(side: Side) -> MultiTimeframeSnapshot:
 def test_long_entry_uses_1h_15m_context_and_5m_trigger():
     snapshot = build_snapshot(Side.BUY)
     result = LiquiditySweepReversalStrategy(
-        StrategyConfig(max_stop_atr=5.0)
+        StrategyConfig(min_strategy_score=0.80, min_target_pct=0.2, min_liquidity_strength=2.0, max_stop_pct=5.0, max_stop_atr=5.0)
     ).analyze(snapshot)
     assert result.passed, result
     assert result.side is Side.BUY
@@ -173,7 +173,7 @@ def test_long_entry_uses_1h_15m_context_and_5m_trigger():
 def test_short_entry_is_supported():
     snapshot = build_snapshot(Side.SELL)
     result = LiquiditySweepReversalStrategy(
-        StrategyConfig(max_stop_atr=5.0)
+        StrategyConfig(min_strategy_score=0.80, min_target_pct=0.2, min_liquidity_strength=2.0, max_stop_pct=5.0, max_stop_atr=5.0)
     ).analyze(snapshot)
     assert result.passed, result
     assert result.side is Side.SELL
@@ -182,14 +182,16 @@ def test_short_entry_is_supported():
 
 def test_daily_and_4h_are_context_not_a_blunt_veto():
     snapshot = build_snapshot(Side.BUY)
-    result = LiquiditySweepReversalStrategy().analyze_side(snapshot, Side.BUY)
+    result = LiquiditySweepReversalStrategy(
+        StrategyConfig(min_strategy_score=0.80, min_target_pct=0.2, min_liquidity_strength=2.0, max_stop_pct=5.0)
+    ).analyze_side(snapshot, Side.BUY)
     assert "broad_trend_conflict" not in result.vetoes
 
 
 def test_liquidity_confluence_is_explicit():
     snapshot = build_snapshot(Side.BUY)
     result = LiquiditySweepReversalStrategy(
-        StrategyConfig(max_stop_atr=5.0)
+        StrategyConfig(min_strategy_score=0.80, min_target_pct=0.2, min_liquidity_strength=2.0, max_stop_pct=5.0, max_stop_atr=5.0)
     ).analyze(snapshot)
     assert result.passed, result
     assert any(
@@ -201,7 +203,7 @@ def test_liquidity_confluence_is_explicit():
 def test_risk_and_target_are_measured_in_percent():
     snapshot = build_snapshot(Side.BUY)
     result = LiquiditySweepReversalStrategy(
-        StrategyConfig(max_stop_atr=5.0)
+        StrategyConfig(min_strategy_score=0.80, min_target_pct=0.2, min_liquidity_strength=2.0, max_stop_pct=5.0, max_stop_atr=5.0)
     ).analyze(snapshot)
     assert result.passed, result
     assert result.target_percent is not None and result.target_percent > 0
@@ -217,3 +219,51 @@ def test_wrong_entry_timeframe_is_rejected():
     result = strategy.analyze(snapshot)
     assert not result.passed
     assert "entry_timeframe" in result.vetoes
+
+
+def test_confirmation_window_skips_failed_initial_breach():
+    from money_mintter.strategy.liquidity_reversal import LiquidityZone
+    config = StrategyConfig(
+        entry_timeframe=Timeframe.FIVE_MIN,
+        max_bars_after_sweep=8,
+        max_bars_after_mss=5,
+        min_displacement_body_fraction=0.1,
+        min_strategy_score=0.60,
+        min_target_pct=0.2,
+        min_liquidity_strength=2.0,
+        max_stop_pct=10.0,
+        max_stop_atr=10.0,
+    )
+    strategy = LiquiditySweepReversalStrategy(config)
+    now = datetime(2026, 10, 1, 10, 0, tzinfo=timezone.utc)
+    entry_candles = [candle(now - timedelta(minutes=5 * i), 100, 101, 99, 100, 1000) for i in range(50)]
+    entry_candles = list(reversed(entry_candles))
+
+    entry_candles[40] = candle(now, 96.5, 96.5, 94.0, 96.0, 2000)
+    for i in range(32, 40):
+        entry_candles[i] = candle(now, 97.0, 98.0, 97.0, 97.5, 1000)
+    entry_candles[41] = candle(now, 96.0, 98.5, 96.0, 98.5, 1500)
+    entry_candles[42] = candle(now, 98.5, 99.0, 97.5, 98.0, 1000)
+    entry_candles[43] = candle(now, 98.0, 99.5, 98.0, 99.5, 1200)
+
+    snapshot = MultiTimeframeSnapshot(
+        as_of=now,
+        daily=tuple([candle(now, 100, 101, 99, 100)] * 8),
+        four_hour=tuple([candle(now, 100, 101, 99, 100)] * 8),
+        one_hour=tuple([candle(now, 100, 100, 95, 100, 1000)] * 10),
+        fifteen_minute=tuple([candle(now, 100, 100, 95, 100, 1000)] * 10),
+        entry=tuple(entry_candles[:44]),
+        entry_timeframe=Timeframe.FIVE_MIN,
+        spread_bps=1.0,
+    )
+
+    import money_mintter.strategy.liquidity_reversal as lr
+    original_zones = lr._liquidity_zones
+    try:
+        lr._liquidity_zones = lambda *args, **kwargs: (LiquidityZone(95.0, ("1H",), 2.0), LiquidityZone(105.0, ("1H",), 2.0))
+        result = strategy.analyze(snapshot)
+        assert result.passed
+        assert result.trigger_index == 43
+    finally:
+        lr._liquidity_zones = original_zones
+

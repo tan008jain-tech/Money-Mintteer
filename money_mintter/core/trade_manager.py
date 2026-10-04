@@ -74,6 +74,24 @@ class TradeManager:
             return None
 
         if trade.side is Side.BUY:
+            initial_risk = trade.entry_price - trade.stop_price
+            target_1r = trade.entry_price + initial_risk
+            if not trade.partial_taken and quote.last >= target_1r and quote.last < trade.target_price and trade.quantity > 1:
+                partial_qty = round(trade.quantity / 2, 4)
+                if partial_qty > 0:
+                    try:
+                        fill = self.broker.submit_market_order(
+                            trade.symbol, Side.SELL, partial_qty, quote
+                        )
+                    except BrokerError as exc:
+                        return TradeEvent("ERROR", quote.symbol, str(exc))
+                    pnl = fill.realized_pnl or 0.0
+                    self.wallet.apply_realized_pnl(pnl)
+                    trade.quantity -= partial_qty
+                    trade.stop_price = trade.entry_price
+                    trade.partial_taken = True
+                    return TradeEvent("PARTIAL", quote.symbol, "50% partial profit taken at 1.0R, stop moved to breakeven", fill)
+
             if quote.last <= trade.stop_price:
                 reason, exit_side = "stop", Side.SELL
             elif quote.last >= trade.target_price:
@@ -81,6 +99,24 @@ class TradeManager:
             else:
                 return None
         else:
+            initial_risk = trade.stop_price - trade.entry_price
+            target_1r = trade.entry_price - initial_risk
+            if not trade.partial_taken and quote.last <= target_1r and quote.last > trade.target_price and trade.quantity > 1:
+                partial_qty = round(trade.quantity / 2, 4)
+                if partial_qty > 0:
+                    try:
+                        fill = self.broker.submit_market_order(
+                            trade.symbol, Side.BUY, partial_qty, quote
+                        )
+                    except BrokerError as exc:
+                        return TradeEvent("ERROR", quote.symbol, str(exc))
+                    pnl = fill.realized_pnl or 0.0
+                    self.wallet.apply_realized_pnl(pnl)
+                    trade.quantity -= partial_qty
+                    trade.stop_price = trade.entry_price
+                    trade.partial_taken = True
+                    return TradeEvent("PARTIAL", quote.symbol, "50% partial profit taken at 1.0R, stop moved to breakeven", fill)
+
             if quote.last >= trade.stop_price:
                 reason, exit_side = "stop", Side.BUY
             elif quote.last <= trade.target_price:
