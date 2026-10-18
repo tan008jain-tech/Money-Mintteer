@@ -19,7 +19,7 @@ def test_rejects_invalid_short_stop() -> None:
 
 
 def test_fractional_shares_and_leverage_market_open() -> None:
-    risk = RiskEngine(0.005, 0.20, 0.02)
+    risk = RiskEngine(0.005, 0.20, 0.02, leverage=4.0)
     # Market open: 4x leverage, fractional shares allowed.
     decision = risk.size_long(10_000, 150.0, 145.0, 0, active_candidates_count=5, market_open=True)
     assert decision.approved
@@ -30,7 +30,7 @@ def test_fractional_shares_and_leverage_market_open() -> None:
 
 
 def test_whole_shares_and_leverage_market_closed() -> None:
-    risk = RiskEngine(0.005, 0.20, 0.02)
+    risk = RiskEngine(0.005, 0.20, 0.02, leverage=4.0)
     # Market closed: 2x leverage, whole integer shares only.
     decision = risk.size_long(10_000, 150.0, 145.0, 0, active_candidates_count=5, market_open=False)
     assert decision.approved

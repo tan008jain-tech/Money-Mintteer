@@ -5,6 +5,7 @@ from typing import Any
 
 import pytest
 
+from alpaca.trading.enums import OrderSide
 from money_mintter.config import Settings
 from money_mintter.core.live_bot import LivePortfolioManager, MarketScanner
 from money_mintter.domain import Side, TradeSignal
@@ -76,7 +77,32 @@ def test_live_portfolio_manager_bracket_order_allocation(monkeypatch: pytest.Mon
     manager.submit_bracket_orders(top_new, set(), 100_000.0, settings)
 
     assert len(fake_client.submitted_orders) == 1
-    assert fake_client.submitted_orders[0].qty == 500
+    assert fake_client.submitted_orders[0].qty == 200
+
+
+def test_live_portfolio_manager_sell_bracket_order_allocation(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RISK_PER_TRADE_PCT", "0.5")
+    monkeypatch.setenv("MAX_POSITION_PCT", "20")
+    monkeypatch.setenv("MAX_PORTFOLIO_RISK_PCT", "2")
+    settings = Settings()
+
+    class FakeTradingClient:
+        def __init__(self) -> None:
+            self.submitted_orders: list[Any] = []
+
+        def submit_order(self, order_req: Any) -> Any:
+            self.submitted_orders.append(order_req)
+            return object()
+
+    fake_client = FakeTradingClient()
+    manager = LivePortfolioManager(fake_client, logging.getLogger("test"))
+
+    top_new = [("TEST", 0.9, Side.SELL, "r", 100.0, 101.0, 97.0)]
+    manager.submit_bracket_orders(top_new, set(), 100_000.0, settings)
+
+    assert len(fake_client.submitted_orders) == 1
+    assert fake_client.submitted_orders[0].qty == 200
+    assert fake_client.submitted_orders[0].side == OrderSide.SELL
 
 
 def test_fetch_account_and_positions_raises_on_failure() -> None:
@@ -87,6 +113,24 @@ def test_fetch_account_and_positions_raises_on_failure() -> None:
     client = FailingTradingClient()
     manager = LivePortfolioManager(client, logging.getLogger("test"))
     with pytest.raises(RuntimeError, match="API failure"):
+        manager.fetch_account_and_positions()
+
+
+def test_fetch_positions_raises_on_failure() -> None:
+    class FailingPositionsClient:
+        def get_account(self):
+            class Acc:
+                cash = "100000"
+                equity = "100000"
+                buying_power = "200000"
+            return Acc()
+
+        def get_all_positions(self):
+            raise RuntimeError("positions failure")
+
+    client = FailingPositionsClient()
+    manager = LivePortfolioManager(client, logging.getLogger("test"))
+    with pytest.raises(RuntimeError, match="positions failure"):
         manager.fetch_account_and_positions()
 
 

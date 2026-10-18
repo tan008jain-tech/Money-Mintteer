@@ -196,37 +196,34 @@ class LivePortfolioManager:
         open_positions = []
         dashboard_positions = []
         locked_symbols = set()
-        try:
-            positions_resp = self.trading_client.get_all_positions()
-            for p in positions_resp:
-                sym = p.symbol.upper().strip()
-                locked_symbols.add(sym)
-                qty = float(p.qty)
-                avg_entry = float(p.avg_entry_price)
-                curr_price = float(p.current_price) if hasattr(p, 'current_price') else avg_entry
-                unrealized_pnl = float(p.unrealized_pl) if hasattr(p, 'unrealized_pl') else 0.0
-                side_str = "BUY" if qty > 0 else "SELL"
-                sl_price = avg_entry * 0.98 if qty > 0 else avg_entry * 1.02
-                tp_price = avg_entry * 1.05 if qty > 0 else avg_entry * 0.95
+        positions_resp = self.trading_client.get_all_positions()
+        for p in positions_resp:
+            sym = p.symbol.upper().strip()
+            locked_symbols.add(sym)
+            qty = float(p.qty)
+            avg_entry = float(p.avg_entry_price)
+            curr_price = float(p.current_price) if hasattr(p, 'current_price') else avg_entry
+            unrealized_pnl = float(p.unrealized_pl) if hasattr(p, 'unrealized_pl') else 0.0
+            side_str = "BUY" if qty > 0 else "SELL"
+            sl_price = avg_entry * 0.98 if qty > 0 else avg_entry * 1.02
+            tp_price = avg_entry * 1.05 if qty > 0 else avg_entry * 0.95
 
-                open_positions.append({
-                    "symbol": sym,
-                    "side": side_str,
-                    "quantity": abs(qty),
-                    "entry_price": avg_entry,
-                    "current_price": curr_price,
-                    "unrealized_pnl": unrealized_pnl,
-                })
-                dashboard_positions.append({
-                    "symbol": sym,
-                    "side": side_str,
-                    "quantity": abs(qty),
-                    "entry_price": avg_entry,
-                    "stop_price": sl_price,
-                    "target_price": tp_price,
-                })
-        except Exception as e:
-            self.logger.error(f"Error querying open positions: {e}")
+            open_positions.append({
+                "symbol": sym,
+                "side": side_str,
+                "quantity": abs(qty),
+                "entry_price": avg_entry,
+                "current_price": curr_price,
+                "unrealized_pnl": unrealized_pnl,
+            })
+            dashboard_positions.append({
+                "symbol": sym,
+                "side": side_str,
+                "quantity": abs(qty),
+                "entry_price": avg_entry,
+                "stop_price": sl_price,
+                "target_price": tp_price,
+            })
 
         return account_cash, account_equity, buying_power, open_positions, dashboard_positions, locked_symbols
 
@@ -236,6 +233,7 @@ class LivePortfolioManager:
             risk_per_trade_pct=settings.risk_per_trade_pct,
             max_position_pct=settings.max_position_pct,
             max_portfolio_risk_pct=settings.max_portfolio_risk_pct,
+            leverage=1.0,
         )
         open_risk = len(locked_symbols) * settings.risk_per_trade_pct * account_equity
 
@@ -249,7 +247,7 @@ class LivePortfolioManager:
                             entry=curr_price,
                             stop=sl_price,
                             open_risk=open_risk,
-                            active_candidates_count=max(1, len(top_new)),
+                            active_candidates_count=5,
                             market_open=True,
                         )
                     else:
@@ -258,7 +256,7 @@ class LivePortfolioManager:
                             entry=curr_price,
                             stop=sl_price,
                             open_risk=open_risk,
-                            active_candidates_count=max(1, len(top_new)),
+                            active_candidates_count=5,
                             market_open=True,
                         )
 
@@ -288,6 +286,7 @@ class LivePortfolioManager:
                         stop_loss=StopLossRequest(stop_price=round(sl_price, 2))
                     )
                     submitted_order = self.trading_client.submit_order(order_req)
+                    open_risk += decision.capital_at_risk
                     self.logger.info(f">>> BRACKET ORDER SUBMITTED TO ALPACA: {alpaca_side.value} {qty} shares of {sym} @ ~${curr_price:.2f} (SL: ${sl_price:.2f}, TP: ${tp_price:.2f}, Score: {sc:.2f})")
                 except Exception as ord_err:
                     self.logger.error(f"Failed to submit bracket order for {sym}: {ord_err}")

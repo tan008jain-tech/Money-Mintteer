@@ -18,6 +18,7 @@ class RiskEngine:
         risk_per_trade_pct: float = 0.005,
         max_position_pct: float = 0.20,
         max_portfolio_risk_pct: float = 0.02,
+        leverage: float = 1.0,
     ) -> None:
         if not 0 < risk_per_trade_pct <= max_portfolio_risk_pct:
             raise ValueError("invalid risk-per-trade setting")
@@ -26,6 +27,7 @@ class RiskEngine:
         self.risk_per_trade_pct = risk_per_trade_pct
         self.max_position_pct = max_position_pct
         self.max_portfolio_risk_pct = max_portfolio_risk_pct
+        self.leverage = leverage
 
     def _size(self, available_capital: float, entry: float, stop: float, open_risk: float, *, side: str, active_candidates_count: int = 5, market_open: bool = True) -> RiskDecision:
         if available_capital <= 0:
@@ -47,7 +49,7 @@ class RiskEngine:
             1.0, self.max_position_pct * (5 / max(1, active_candidates_count))
         )
 
-        leverage = 4.0 if market_open else 2.0
+        leverage = self.leverage if market_open else min(self.leverage, 2.0)
         leveraged_capital = available_capital * leverage
 
         raw_qty = risk_budget / risk_per_share
