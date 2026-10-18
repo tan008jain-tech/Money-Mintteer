@@ -1,12 +1,13 @@
 import logging
 import os
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pytest
 
 from money_mintter.config import Settings
-from money_mintter.core.live_bot import LivePortfolioManager
-from money_mintter.domain import Side
+from money_mintter.core.live_bot import LivePortfolioManager, MarketScanner
+from money_mintter.domain import Side, TradeSignal
 
 
 def test_settings_keep_existing_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -74,3 +75,125 @@ def test_live_portfolio_manager_bracket_order_allocation(monkeypatch: pytest.Mon
 
     assert len(fake_client.submitted_orders) == 1
     assert fake_client.submitted_orders[0].qty == 200.0
+
+
+def test_market_scanner_with_fake_strategy_signal(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MAX_POSITION_PCT", "20")
+    settings = Settings()
+
+    class FakeBar:
+        def __init__(self, ts, o, h, l, c, v):
+            self.timestamp = ts
+            self.open = o
+            self.high = h
+            self.low = l
+            self.close = c
+            self.volume = v
+
+    class FakeBarsResponse:
+        def __init__(self, data):
+            self.data = data
+
+    class FakeStockClient:
+        def get_stock_bars(self, req):
+            now = datetime.now(timezone.utc)
+            bars = [FakeBar(now - timedelta(minutes=5 * i), 100, 101, 99, 100, 1000) for i in range(50, 0, -1)]
+            return FakeBarsResponse({req.symbol_or_symbols: bars})
+
+    class FakeStrategyWithSignal:
+        def analyze(self, snapshot):
+            class Analysis:
+                passed = True
+                reason = "ok"
+            return Analysis()
+
+        def signal(self, snapshot):
+            return TradeSignal(
+                symbol="AAPL",
+                side=Side.BUY,
+                entry_price=100.0,
+                stop_price=98.0,
+                target_price=101.0,
+                confidence=0.85,
+                timestamp=snapshot.as_of,
+                reason="test signal",
+            )
+
+    class FakeTradingClient:
+        def __init__(self) -> None:
+            self.submitted_orders: list[Any] = []
+
+        def submit_order(self, order_req: Any) -> Any:
+            self.submitted_orders.append(order_req)
+            return object()
+
+    monkeypatch.setattr(MarketScanner, "is_session_open", lambda self, sym, now: (True, "Open"))
+    scanner = MarketScanner(["AAPL"], FakeStockClient(), FakeStockClient(), logging.getLogger("test"))
+    now_utc = datetime.now(timezone.utc)
+    analyzed, _ = scanner.scan_universe(now_utc, set(), FakeStrategyWithSignal())
+
+    assert len(analyzed) == 1
+    assert analyzed[0][5] == 98.0  # stop_price
+    assert analyzed[0][6] == 101.0 # target_price
+
+    fake_client = FakeTradingClient()
+    portfolio_manager = LivePortfolioManager(fake_client, logging.getLogger("test"))
+    portfolio_manager.submit_bracket_orders(analyzed, set(), 100_000.0, settings)
+
+    assert len(fake_client.submitted_orders) == 1
+    assert fake_client.submitted_orders[0].stop_loss.stop_price == 98.0
+    assert fake_client.submitted_orders[0].take_profit.limit_price == 101.0
+
+
+def test_market_scanner_with_no_signal(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = Settings()
+
+    class FakeBar:
+        def __init__(self, ts, o, h, l, c, v):
+            self.timestamp = ts
+            self.open = o
+            self.high = h
+            self.low = l
+            self.close = c
+            self.volume = v
+
+    class FakeBarsResponse:
+        def __init__(self, data):
+            self.data = data
+
+    class FakeStockClient:
+        def get_stock_bars(self, req):
+            now = datetime.now(timezone.utc)
+            bars = [FakeBar(now - timedelta(minutes=5 * i), 100, 101, 99, 100, 1000) for i in range(50, 0, -1)]
+            return FakeBarsResponse({req.symbol_or_symbols: bars})
+
+    class FakeStrategyNoSignal:
+        def analyze(self, snapshot):
+            class Analysis:
+                passed = False
+                reason = "no setup"
+            return Analysis()
+
+        def signal(self, snapshot):
+            return None
+
+    class FakeTradingClient:
+        def __init__(self) -> None:
+            self.submitted_orders: list[Any] = []
+
+        def submit_order(self, order_req: Any) -> Any:
+            self.submitted_orders.append(order_req)
+            return object()
+
+    monkeypatch.setattr(MarketScanner, "is_session_open", lambda self, sym, now: (True, "Open"))
+    scanner = MarketScanner(["AAPL"], FakeStockClient(), FakeStockClient(), logging.getLogger("test"))
+    now_utc = datetime.now(timezone.utc)
+    analyzed, _ = scanner.scan_universe(now_utc, set(), FakeStrategyNoSignal())
+
+    assert len(analyzed) == 0
+
+    fake_client = FakeTradingClient()
+    portfolio_manager = LivePortfolioManager(fake_client, logging.getLogger("test"))
+    portfolio_manager.submit_bracket_orders(analyzed, set(), 100_000.0, settings)
+
+    assert len(fake_client.submitted_orders) == 0

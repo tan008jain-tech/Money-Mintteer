@@ -156,24 +156,20 @@ class MarketScanner:
                 self.logger.info(f"[{clean_symbol}] MTF Chart Analysis | {snapshot.candle_bias_summary} | 1H Levels: {snapshot.one_hour_levels} | 15M Levels: {snapshot.fifteen_minute_levels}")
 
                 analysis = strategy.analyze(snapshot)
-                score = analysis.score if analysis else 0.5
+                signal = strategy.signal(snapshot)
+                if signal is None:
+                    reason_msg = analysis.reason if analysis else "no signal"
+                    self.logger.info(f"[{clean_symbol}] No signal generated | Reason: {reason_msg}")
+                    continue
 
-                curr_p = latest_bar.close
-                if analysis and analysis.side is Side.BUY:
-                    sl_p = curr_p * 0.985
-                    tp_p = curr_p * 1.03
-                else:
-                    sl_p = curr_p * 1.015
-                    tp_p = curr_p * 0.97
+                self.logger.info(f"[{clean_symbol}] Signal | Score: {signal.confidence:.2f} | Side: {signal.side} | Entry: ${signal.entry_price:.2f} | SL: ${signal.stop_price:.2f} | TP: ${signal.target_price:.2f} | Reason: {signal.reason}")
 
-                self.logger.info(f"[{clean_symbol}] Score: {score:.2f} | Side: {analysis.side if analysis else 'None'} | SL: ${sl_p:.2f} | TP: ${tp_p:.2f} | Reason: {analysis.reason if analysis else 'N/A'}")
-
-                analyzed_candidates.append((clean_symbol, score, analysis.side if analysis else None, analysis.reason if analysis else "scanned", curr_p, sl_p, tp_p))
+                analyzed_candidates.append((clean_symbol, signal.confidence, signal.side, signal.reason, signal.entry_price, signal.stop_price, signal.target_price))
                 dashboard_stocks.append({
                     "symbol": clean_symbol,
                     "market": "Global/US/Crypto",
-                    "current_price": curr_p,
-                    "score": score,
+                    "current_price": signal.entry_price,
+                    "score": signal.confidence,
                 })
 
             except Exception as ex:
