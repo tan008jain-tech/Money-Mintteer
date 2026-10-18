@@ -34,6 +34,8 @@ class MoneyMintterEngine:
         self.sessions = sessions
         self.ranker = ranker
         self.analyzer = analyzer or OpportunityAnalyzer()
+        self.previous_deep_symbols: set[str] = set()
+        self.active_candidates: dict[str, Candidate] = {}
 
     def cycle(
         self,
@@ -45,6 +47,12 @@ class MoneyMintterEngine:
         open_markets = tuple(self.sessions.open_markets(now_utc))
         events: list[TradeEvent] = []
 
+        for c in candidates:
+            self.active_candidates[c.symbol] = c
+
+        symbol_to_candidate = {c.symbol: c for c in candidates}
+        symbol_to_candidate.update(self.active_candidates)
+
         # Manage existing risk first. There is deliberately no artificial re-entry cooldown.
         # A trade that closes during this cycle is allowed to re-enter later in the same cycle
         # if the fresh candidate/signal checks still pass.
@@ -55,6 +63,23 @@ class MoneyMintterEngine:
                 event = self.trade_manager.process_quote(quote)
                 if event is not None:
                     events.append(event)
+                    continue
+
+                if symbol in self.trade_manager.open_trades:
+                    cand = symbol_to_candidate.get(symbol)
+                    is_legit = False
+                    if cand is not None:
+                        spread_bps = None
+                        midpoint = (quote.bid + quote.ask) / 2
+                        if midpoint > 0:
+                            spread_bps = ((quote.ask - quote.bid) / midpoint) * 10_000
+                        assessment = self.analyzer.assess(cand, spread_bps)
+                        is_legit = assessment.eligible and assessment.score >= self.ranker.min_score
+
+                    if not is_legit:
+                        close_event = self.trade_manager.close_trade(symbol, quote, reason="analysis_invalidation")
+                        if close_event is not None:
+                            events.append(close_event)
 
         # Rank only symbols that are not currently active after management. This preserves
         # open positions while allowing immediate, confirmation-driven re-entry.
@@ -72,8 +97,23 @@ class MoneyMintterEngine:
             if assessment.eligible:
                 eligible_candidates.append(candidate)
 
-        deep = tuple(self.ranker.rank(eligible_candidates))
+        deep = tuple(self.ranker.rank(eligible_candidates, existing_symbols=self.previous_deep_symbols))
         deep_symbols = {item.candidate.symbol for item in deep}
+
+        # Ensure active open trades are always pinned in deep candidates for continuous monitoring
+        symbol_to_candidate = {c.symbol: c for c in candidates}
+        symbol_to_candidate.update(self.active_candidates)
+        deep_list = list(deep)
+        for sym in active_symbols:
+            if sym not in deep_symbols and sym in symbol_to_candidate:
+                cand = symbol_to_candidate[sym]
+                deep_list.insert(0, RankedCandidate(cand, score=1.0))
+                deep_symbols.add(sym)
+        deep = tuple(deep_list)
+        self.previous_deep_symbols = deep_symbols
+
+        symbol_to_market = {c.symbol: c.market for c in candidates}
+        active_count = max(1, len(deep))
 
         # Only act on signals for currently selected deep candidates.
         for signal in sorted(signals, key=lambda item: (-item.confidence, item.symbol)):
@@ -85,6 +125,8 @@ class MoneyMintterEngine:
                 continue
             if signal.confidence < self.ranker.min_score:
                 continue
-            events.append(self.trade_manager.open_trade(signal, quote))
+            market = symbol_to_market.get(signal.symbol, "NYSE")
+            market_open = self.sessions.is_market_open(market, now_utc)
+            events.append(self.trade_manager.open_trade(signal, quote, active_candidates_count=active_count, market_open=market_open))
 
         return CycleResult(open_markets, deep, tuple(events))

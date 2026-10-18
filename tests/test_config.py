@@ -9,7 +9,6 @@ def test_settings_keep_existing_defaults(monkeypatch: pytest.MonkeyPatch) -> Non
     for key in (
         "INITIAL_CAPITAL",
         "BASE_CURRENCY",
-        "PROFIT_RESERVE_PCT",
         "MAX_DEEP_CANDIDATES",
         "MIN_CANDIDATE_SCORE",
         "RISK_PER_TRADE_PCT",
@@ -22,21 +21,18 @@ def test_settings_keep_existing_defaults(monkeypatch: pytest.MonkeyPatch) -> Non
 
     settings = Settings()
     assert settings.initial_capital == 10_000.0
-    assert settings.profit_reserve_pct == 0.20
     assert settings.risk_per_trade_pct == 0.005
     assert settings.max_position_pct == 0.20
     assert settings.max_portfolio_risk_pct == 0.02
 
 
 def test_settings_read_percent_values_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("PROFIT_RESERVE_PCT", "15")
     monkeypatch.setenv("RISK_PER_TRADE_PCT", "0.4")
     monkeypatch.setenv("MAX_POSITION_PCT", "25")
     monkeypatch.setenv("MAX_PORTFOLIO_RISK_PCT", "3")
 
     settings = Settings()
 
-    assert settings.profit_reserve_pct == 0.15
     assert settings.risk_per_trade_pct == 0.004
     assert settings.max_position_pct == 0.25
     assert settings.max_portfolio_risk_pct == 0.03

@@ -1,0 +1,95 @@
+# ==============================================================================
+# MASTER ARCHITECTURAL BLUEPRINT & SYSTEM WORKFLOW SPECIFICATION
+# SYSTEM STATUS: PRODUCTION SPECIFICATION (BROKER-AGNOSTIC)
+# TARGET RUNTIME: PYTHON 3.10+ ASYNCHRONOUS SYSTEM ENVIRONMENT
+# ==============================================================================
+
+This file establishes the immutable master architecture, state constraints, data pipelines, 
+and risk execution boundaries for the fully autonomous intraday trading system. 
+
+All code blocks, background modules, interface scripts, and execution threads must strictly 
+comply with the rules specified in this document. Any generation or modification of code 
+that deviates from these constraints represents a severe logical regression and is forbidden.
+
+---
+
+## MODULE 1: THE DYNAMIC GLOBAL MARKET SCANNER
+
+1.1 EXECUTION FREQUENCY & CYCLIC LIFECYCLE
+* The Scanner Engine must operate within an isolated, non-blocking background loop that executes continuously on a strict 30-minute rotation cycle.
+
+1.2 UNIVERSAL DATA INGESTION PIPELINE
+* The scanner must interface with the broker-agnostic data connectivity layer to ingest the full global financial landscape. 
+* The input stream must encompass multi-asset classes globally, including international equity pairs, cross-border commodities, global indices, and 24/7 cryptocurrency markets.
+
+1.3 ACTIVE MARKET TIMEZONE FILTRATION
+* The scanner must process incoming data against a live UTC/EST timezone engine. 
+* The system must dynamically filter out and completely ignore any exchanges, countries, or specific asset contracts that are currently physically closed or experiencing illiquid, dead hours. 
+* Assets are only valid for scanning if their primary trading venue is currently open and trading at peak intraday volume.
+
+1.4 ROTATIONAL SELECTION & ASSET SIETING
+* Every 30 minutes, the scanner must execute a multi-layered screening calculation to select exactly five (5) active candidates. 
+* Selection criteria must prioritize institutional order flow, substantial volume velocity surges, and clean, high-probability intraday price volatility trends.
+
+1.5 DYNAMIC CANDIDATE EVICTION & REPLACEMENT RULES
+* At the conclusion of each 30-minute loop, the scanner must audit the 5 active candidate slots. 
+* If a monitored asset's volume velocity drops significantly, or if its market structure degrades such that a high-probability intraday trade setup is no longer expected within the next 30 minutes, that asset must be immediately evicted from its dashboard slot.
+* If a superior asset setup is discovered in the global pool, it must replace the evicted asset instantly.
+
+1.6 EMPTY SLOT CAPITAL EFFICIENCY MAXIMIZATION
+* If the scanner evicts a candidate asset but the active global market provides no alternative asset meeting the strict probability thresholds, the candidate slot must remain intentionally empty.
+* The system must log the empty state and dynamically recalculate the maximum available capital for the remaining empty slots, allowing future, un-opened candidate slots a larger potential allocation fraction.
+
+---
+
+## MODULE 2: THE PROFESSIONAL STRATEGY & DECISION ENGINE
+
+2.1 EMOTIONLESS INSTITUTIONAL Footprint TRACKING
+* The engine must evaluate the five active candidate slots like a cold, disciplined, hyper-profitable institutional intraday trader. 
+* It is completely isolated from psychological biases, FOMO, or emotional hesitation.
+* It must actively monitor price action relative to volume distribution, tracking large institutional buyers and sellers. This includes computing real-time volume velocity, structural support/resistance breakouts, and sharp spatial deviations from Volume-Weighted Average Price (VWAP).
+
+2.2 PROPORTIONAL RISK & MONEY MANAGEMENT
+* The absolute total number of simultaneously active candidate slots is structurally capped at five (5).
+* Available slot capital is calculated dynamically using the formula: 
+  Slot Capital Allocation = (Total System Investment Portfolio Value) / (Number of Active Candidate Slots)
+* If slots are left empty due to the scanner finding zero high-probability alternatives, the capital limit for any *future* setups scaling into the vacant slots is increased proportionally.
+
+2.3 THE STRUCTURAL ENTRY-CAPITAL LOCK
+* CRITICAL BOUNDARY CONDITION: The exact dollar value and position size allocated to a specific trade must be permanently locked at the precise millisecond of trade execution and order entry.
+* Once a trade is open, its allocated capital is entirely isolated. Under no circumstances can the capital allocation, share size, or contract depth of an *active, open trade* be dynamically modified, scaled, or altered by changes, evictions, or additions occurring in the broader candidate slots.
+
+---
+
+## MODULE 3: THE STATE-PERSISTENT TRADE MONITORING ENGINE
+
+3.1 INDEPENDENT HYPER-FAST TRACKING LOOPS
+* The exact millisecond an asset triggers an entry execution, it must be instantly offloaded into a dedicated, state-persistent position tracking array.
+* The position tracker must operate on an independent async loop running continuously every 2 seconds.
+
+3.2 CANDIDATE SLOT FREEZING CONSTRAINTS
+* As long as a position remains open, its associated candidate slot is completely frozen.
+* The 30-minute rotational Scanner Engine is strictly forbidden from evicting, replacing, or modifying this specific asset name or slot configuration until the position tracking engine logs an official, verified trade closure from the broker servers.
+
+3.3 MACRO ORDER FLOW OBSERVATION & ACTIVE EXIT LOGIC
+* While a position is active, the engine must continuously analyze live tick data and institutional buyer/seller dynamics.
+* The bot must not operate as a blind mechanism that only respects static, hardcoded Stop-Loss (SL) or Take-Profit (TP) boundaries. 
+* If live order flow indicates a structural breakdown, a sudden influx of massive institutional counter-momentum, or an invalidation of the strategy thesis, the bot must execute an immediate emergency early exit at market price to protect portfolio capital.
+
+---
+
+## MODULE 4: FAULT-TOLERANCE & BROKER-AGNOSTIC PIPE BOUNDS
+
+4.1 MODULAR BROKER-AGNOSTIC DATA ARCHITECTURE
+* The core systems (Scanner, Strategy Engine, and Position Tracker) must be completely detached from any specific broker API library or custom software framework. 
+* The internal logic must process unified, standardized internal data frames. All broker connections (whether sandbox environments, live REST APIs, WebSockets, or low-latency institutional streaming pipes) must exist inside a modular configuration translation file. This allows switching the system between broker backends without altering a single line of core trading logic.
+
+4.2 AUTOMATIC INPUT SANITIZATION
+* Every single asset ticker string ingested by the scanner must be automatically passed through a rigid cleaning pipeline: `.upper().strip()`. 
+* Ticker syntax for unique assets (e.g., crypto pair slash conventions, global ADR suffixes) must be verified programmatically before passing to the data engine.
+
+4.3 SELF-HEALING WEB ISOLATION & FAULT INJECTION PROTECTIONS
+* Every single external network call, data framework request, and mathematical processing loop must be fully enclosed inside strict `try/except` execution blocks.
+* If a network payload times out, experiences latency, returns an empty packet, or delivers a malformed data type string instead of a numerical float, the bot must safely trap the error.
+* The system will log a precise warning code directly to the local host visual telemetry interface, drop the corrupted packet, and gracefully `continue` onto the next execution loop cycle without causing a memory leak, thread lock, or system crash.
+# ==============================================================================

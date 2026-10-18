@@ -21,7 +21,7 @@ def run_demo() -> None:
         settings.paper_slippage_bps,
         settings.paper_commission_bps,
     )
-    wallet = WalletLedger(settings.initial_capital, profit_reserve_pct=settings.profit_reserve_pct)
+    wallet = WalletLedger(settings.initial_capital)
     risk = RiskEngine(
         settings.risk_per_trade_pct,
         settings.max_position_pct,
@@ -55,8 +55,7 @@ def run_demo() -> None:
     exit_quote = Quote("DEMO", 108.10, 108.20, 108.15, exit_time)
     closed = engine.cycle(exit_time, candidates, {"DEMO": exit_quote}, [])
     print("Close events:", [(x.kind, x.symbol, x.message, round(x.fill.realized_pnl or 0, 2)) for x in closed.trade_events])
-    print("Trading Wallet:", round(wallet.trading_wallet, 2))
-    print("Profit Reserve:", round(wallet.profit_reserve, 2))
+    print("Wallet Balance:", round(wallet.wallet, 2))
     print("Broker cash:", round(broker.available_cash, 2))
 
 

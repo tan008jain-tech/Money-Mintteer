@@ -29,8 +29,7 @@ class TradeSnapshot:
 class RuntimeSnapshot:
     captured_at: str
     broker_cash: float
-    trading_wallet: float
-    profit_reserve: float
+    wallet: float
     positions: tuple[PositionSnapshot, ...]
     open_trades: tuple[TradeSnapshot, ...]
     schema_version: int = 1
@@ -40,16 +39,14 @@ class RuntimeSnapshot:
         cls,
         *,
         broker_cash: float,
-        trading_wallet: float,
-        profit_reserve: float,
+        wallet: float,
         positions: tuple[PositionSnapshot, ...],
         open_trades: tuple[TradeSnapshot, ...],
     ) -> "RuntimeSnapshot":
         return cls(
             captured_at=datetime.now(timezone.utc).isoformat(),
             broker_cash=broker_cash,
-            trading_wallet=trading_wallet,
-            profit_reserve=profit_reserve,
+            wallet=wallet,
             positions=positions,
             open_trades=open_trades,
         )
@@ -68,8 +65,7 @@ class RuntimeSnapshot:
             return cls(
                 captured_at=str(payload["captured_at"]),
                 broker_cash=float(payload["broker_cash"]),
-                trading_wallet=float(payload["trading_wallet"]),
-                profit_reserve=float(payload["profit_reserve"]),
+                wallet=float(payload.get("wallet", payload.get("trading_wallet", 0.0))),
                 positions=positions,
                 open_trades=open_trades,
                 schema_version=int(payload.get("schema_version", 1)),

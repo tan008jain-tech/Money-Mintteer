@@ -25,27 +25,28 @@ class StrategyConfig:
     fifteen_minute_level_lookback: int = 30
     four_hour_level_lookback: int = 12
     structure_bars: int = 6
-    sweep_search_bars: int = 20
-    max_bars_after_sweep: int = 10
-    max_bars_after_mss: int = 8
+    sweep_search_bars: int = 40
+    max_bars_after_sweep: int = 15
+    max_bars_after_mss: int = 12
     atr_period: int = 14
-    min_sweep_penetration_atr: float = 0.02
+    min_sweep_penetration_atr: float = 0.01
     min_sweep_penetration_pct: float = 0.0001
-    max_sweep_depth_atr: float = 2.00
-    min_rejection_wick_fraction: float = 0.35
-    min_displacement_body_fraction: float = 0.60
+    max_sweep_depth_atr: float = 3.00
+    min_rejection_wick_fraction: float = 0.15
+    min_displacement_body_fraction: float = 0.35
     relative_volume_window: int = 20
-    min_relative_volume: float = 1.50
-    require_volume_confirmation: bool = False
-    max_spread_bps: float = 20.0
+    min_relative_volume: float = 1.10
+    require_volume_confirmation: bool = True
+    max_spread_bps: float = 15.0
     stop_buffer_atr: float = 0.03
-    max_stop_atr: float = 2.00
-    max_chase_atr: float = 1.00
-    liquidity_zone_merge_pct: float = 0.0015
-    min_liquidity_strength: float = 4.0
-    min_target_pct: float = 0.5
-    max_stop_pct: float = 1.0
-    min_strategy_score: float = 0.90
+    max_stop_atr: float = 3.00
+    max_chase_atr: float = 1.50
+    liquidity_zone_merge_pct: float = 0.0020
+    min_liquidity_strength: float = 0.5
+    min_target_pct: float = 0.15
+    max_stop_pct: float = 4.0
+    min_strategy_score: float = 0.65
+    min_reward_spread_multiple: float = 2.0
 
     def __post_init__(self) -> None:
         if self.entry_timeframe not in (Timeframe.THREE_MIN, Timeframe.FIVE_MIN):
@@ -78,6 +79,8 @@ class StrategyConfig:
             raise ValueError("invalid stop/chase configuration")
         if self.min_target_pct <= 0 or self.max_stop_pct <= 0:
             raise ValueError("target percentage and stop percentage must be positive")
+        if self.min_reward_spread_multiple < 0:
+            raise ValueError("min reward spread multiple cannot be negative")
         if not 0 < self.liquidity_zone_merge_pct < 0.05:
             raise ValueError("liquidity-zone merge tolerance is invalid")
         if self.min_liquidity_strength <= 0:
@@ -138,12 +141,14 @@ class LiquiditySweepReversalStrategy:
         passing = [result for result in (long_result, short_result) if result.passed]
         if passing:
             return max(passing, key=lambda result: result.score)
+
         best = max((long_result, short_result), key=lambda result: result.score)
+        all_vetoes = set(long_result.vetoes + short_result.vetoes)
         return SetupAnalysis(
             False,
             best.score,
-            f"no actionable setup: long={long_result.reason}; short={short_result.reason}",
-            vetoes=tuple(sorted(set(long_result.vetoes + short_result.vetoes))),
+            f"no strict liquidity sweep setup: long={long_result.reason}; short={short_result.reason}",
+            vetoes=tuple(sorted(all_vetoes)),
         )
 
     def analyze_side(self, snapshot: MultiTimeframeSnapshot, side: Side) -> SetupAnalysis:
@@ -359,6 +364,10 @@ class LiquiditySweepReversalStrategy:
         if target_percent < c.min_target_pct:
             return SetupAnalysis(False, 0.0, "target profit potential is too small", sweep_index=sweep_index, mss_index=mss_index, trigger_index=trigger_index, vetoes=("target_too_small",), side=side)
 
+        min_required_target_pct = max(c.min_target_pct, (snapshot.spread_bps / 100.0) * c.min_reward_spread_multiple)
+        if target_percent < min_required_target_pct:
+            return SetupAnalysis(False, 0.0, "target profit does not sufficiently clear execution spread costs", sweep_index=sweep_index, mss_index=mss_index, trigger_index=trigger_index, vetoes=("spread_friction",), side=side)
+
         reward_risk = abs(target_price - entry_price) / risk
 
         alignment = _alignment_score(side, daily_bias, four_hour_bias, one_hour_bias, fifteen_bias)
@@ -499,11 +508,6 @@ def _liquidity_zones(
             * min(sum(1 for _, item_source in cluster if item_source == source), 2)
             for source in sources
         )
-
-        # Daily/4H alone are broad context. An actionable entry zone must
-        # contain at least a 1H or 15M liquidity component.
-        if not any(source in sources for source in ("1H", "15M")):
-            continue
 
         zones.append(
             LiquidityZone(

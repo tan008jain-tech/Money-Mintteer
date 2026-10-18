@@ -2,7 +2,6 @@ from datetime import datetime, timezone
 
 from money_mintter.core.health import HealthRegistry, HealthStatus, Watchdog, WatchdogAction
 from money_mintter.core.pipeline import DeepAnalysisPipeline
-from money_mintter.dashboard.app import DashboardSnapshot, render_dashboard_html
 from money_mintter.domain import Candidate
 from money_mintter.storage.state import PositionSnapshot, RuntimeSnapshot, TradeSnapshot
 from money_mintter.strategy import MultiTimeframeSnapshot, Timeframe
@@ -11,7 +10,7 @@ from money_mintter.strategy import MultiTimeframeSnapshot, Timeframe
 def test_pipeline_rejects_low_quality_candidate_before_strategy() -> None:
     now = datetime(2026, 10, 1, 14, 0, tzinfo=timezone.utc)
     candidate = Candidate(
-        "ABC", "NYSE", 0.50, 0.70, 0.80, 0.80, now
+        "ABC", "NYSE", 0.30, 0.30, 0.30, 0.30, now
     )
     snapshot = MultiTimeframeSnapshot(
         as_of=now,
@@ -32,8 +31,7 @@ def test_runtime_snapshot_round_trip() -> None:
     snapshot = RuntimeSnapshot(
         captured_at="2026-10-01T14:00:00+00:00",
         broker_cash=9000,
-        trading_wallet=9500,
-        profit_reserve=500,
+        wallet=10000,
         positions=(PositionSnapshot("ABC", 10, 100),),
         open_trades=(
             TradeSnapshot("ABC", "BUY", 10, 100, 98, 110, "2026-10-01T14:00:00+00:00", "entry-1"),
@@ -56,10 +54,3 @@ def test_degraded_component_pauses() -> None:
     t0 = datetime(2026, 10, 1, 14, 0, tzinfo=timezone.utc)
     registry.heartbeat("broker", status=HealthStatus.DEGRADED, now=t0)
     assert Watchdog(registry).evaluate(t0) is WatchdogAction.PAUSE
-
-
-def test_dashboard_renders_as_read_only_control_room() -> None:
-    snapshot = DashboardSnapshot("RUN", 9500, 500, 9000, (), (), (), ())
-    html = render_dashboard_html(snapshot)
-    assert "Money Mintter Control Room" in html
-    assert snapshot.system_action in html

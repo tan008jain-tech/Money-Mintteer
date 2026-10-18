@@ -267,3 +267,31 @@ def test_confirmation_window_skips_failed_initial_breach():
     finally:
         lr._liquidity_zones = original_zones
 
+
+def test_spread_friction_vetoes_small_targets():
+    snapshot = build_snapshot(Side.BUY)
+    snapshot = MultiTimeframeSnapshot(
+        as_of=snapshot.as_of,
+        daily=snapshot.daily,
+        four_hour=snapshot.four_hour,
+        one_hour=snapshot.one_hour,
+        fifteen_minute=snapshot.fifteen_minute,
+        entry=snapshot.entry,
+        entry_timeframe=snapshot.entry_timeframe,
+        spread_bps=15.0,
+    )
+    strategy = LiquiditySweepReversalStrategy(
+        StrategyConfig(
+            min_strategy_score=0.80,
+            min_target_pct=0.25,
+            max_spread_bps=20.0,
+            min_reward_spread_multiple=20.0,
+            min_liquidity_strength=2.0,
+            max_stop_pct=5.0,
+            max_stop_atr=5.0,
+        )
+    )
+    result = strategy.analyze(snapshot)
+    assert not result.passed
+    assert "spread_friction" in result.vetoes
+

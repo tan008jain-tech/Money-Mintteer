@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from money_mintter.brokers.base import Broker, BrokerError
 from money_mintter.core.risk import RiskEngine
 from money_mintter.domain import Fill, ManagedTrade, Quote, Side, TradeSignal, WalletLedger
+from money_mintter.strategy.candles import Candle
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,18 +33,18 @@ class TradeManager:
                 total += max(0.0, trade.stop_price - trade.entry_price) * trade.quantity
         return total
 
-    def open_trade(self, signal: TradeSignal, quote: Quote) -> TradeEvent:
+    def open_trade(self, signal: TradeSignal, quote: Quote, active_candidates_count: int = 5, market_open: bool = True) -> TradeEvent:
         if signal.symbol in self.open_trades:
             return TradeEvent("REJECT", signal.symbol, "trade already open")
 
         available_capital = min(self.wallet.trading_wallet, self.broker.available_cash)
         if signal.side is Side.BUY:
             decision = self.risk.size_long(
-                available_capital, quote.ask, signal.stop_price, self.open_risk
+                available_capital, quote.ask, signal.stop_price, self.open_risk, active_candidates_count=active_candidates_count, market_open=market_open
             )
         else:
             decision = self.risk.size_short(
-                available_capital, quote.bid, signal.stop_price, self.open_risk
+                available_capital, quote.bid, signal.stop_price, self.open_risk, active_candidates_count=active_candidates_count, market_open=market_open
             )
 
         if not decision.approved:
@@ -74,24 +75,6 @@ class TradeManager:
             return None
 
         if trade.side is Side.BUY:
-            initial_risk = trade.entry_price - trade.stop_price
-            target_1r = trade.entry_price + initial_risk
-            if not trade.partial_taken and quote.last >= target_1r and quote.last < trade.target_price and trade.quantity > 1:
-                partial_qty = round(trade.quantity / 2, 4)
-                if partial_qty > 0:
-                    try:
-                        fill = self.broker.submit_market_order(
-                            trade.symbol, Side.SELL, partial_qty, quote
-                        )
-                    except BrokerError as exc:
-                        return TradeEvent("ERROR", quote.symbol, str(exc))
-                    pnl = fill.realized_pnl or 0.0
-                    self.wallet.apply_realized_pnl(pnl)
-                    trade.quantity -= partial_qty
-                    trade.stop_price = trade.entry_price
-                    trade.partial_taken = True
-                    return TradeEvent("PARTIAL", quote.symbol, "50% partial profit taken at 1.0R, stop moved to breakeven", fill)
-
             if quote.last <= trade.stop_price:
                 reason, exit_side = "stop", Side.SELL
             elif quote.last >= trade.target_price:
@@ -99,24 +82,6 @@ class TradeManager:
             else:
                 return None
         else:
-            initial_risk = trade.stop_price - trade.entry_price
-            target_1r = trade.entry_price - initial_risk
-            if not trade.partial_taken and quote.last <= target_1r and quote.last > trade.target_price and trade.quantity > 1:
-                partial_qty = round(trade.quantity / 2, 4)
-                if partial_qty > 0:
-                    try:
-                        fill = self.broker.submit_market_order(
-                            trade.symbol, Side.BUY, partial_qty, quote
-                        )
-                    except BrokerError as exc:
-                        return TradeEvent("ERROR", quote.symbol, str(exc))
-                    pnl = fill.realized_pnl or 0.0
-                    self.wallet.apply_realized_pnl(pnl)
-                    trade.quantity -= partial_qty
-                    trade.stop_price = trade.entry_price
-                    trade.partial_taken = True
-                    return TradeEvent("PARTIAL", quote.symbol, "50% partial profit taken at 1.0R, stop moved to breakeven", fill)
-
             if quote.last >= trade.stop_price:
                 reason, exit_side = "stop", Side.BUY
             elif quote.last <= trade.target_price:
@@ -139,3 +104,70 @@ class TradeManager:
         trade.close_reason = reason
         del self.open_trades[quote.symbol]
         return TradeEvent("CLOSE", quote.symbol, reason, fill)
+
+    def close_trade(self, symbol: str, quote: Quote, reason: str = "analysis_invalidation") -> TradeEvent | None:
+        trade = self.open_trades.get(symbol)
+        if trade is None:
+            return None
+
+        exit_side = Side.SELL if trade.side is Side.BUY else Side.BUY
+        try:
+            fill = self.broker.submit_market_order(
+                trade.symbol, exit_side, trade.quantity, quote
+            )
+        except BrokerError as exc:
+            return TradeEvent("ERROR", symbol, str(exc))
+
+        pnl = fill.realized_pnl or 0.0
+        self.wallet.apply_realized_pnl(pnl)
+        trade.exit_fill_id = fill.order_id
+        trade.closed_at = fill.timestamp
+        trade.realized_pnl = pnl
+        trade.close_reason = reason
+        del self.open_trades[symbol]
+        return TradeEvent("CLOSE", symbol, reason, fill)
+
+    def process_bar(self, candle: Candle, quote: Quote) -> TradeEvent | None:
+        """Discretionary candle-aware trade management (human-like trader logic).
+
+        Evaluates candle close, body fraction, and volume alongside quote stops/targets.
+        If price retraces near entry and a candle closes decisively against the thesis,
+        it cuts the trade early to prevent major drawdown. If it's noise/doji (confusion),
+        it waits for the next candle.
+        """
+        trade = self.open_trades.get(candle.symbol)
+        if trade is None:
+            return None
+
+        # First check standard stop and target via quote/last
+        event = self.process_quote(quote)
+        if event is not None:
+            return event
+
+        # Candle-aware discretionary evaluation
+        if trade.side is Side.BUY:
+            if candle.close < trade.entry_price and candle.bearish and candle.body_fraction > 0.55:
+                reason, exit_side = "thesis_invalidation", Side.SELL
+            else:
+                return None
+        else:
+            if candle.close > trade.entry_price and candle.bullish and candle.body_fraction > 0.55:
+                reason, exit_side = "thesis_invalidation", Side.BUY
+            else:
+                return None
+
+        try:
+            fill = self.broker.submit_market_order(
+                trade.symbol, exit_side, trade.quantity, quote
+            )
+        except BrokerError as exc:
+            return TradeEvent("ERROR", candle.symbol, str(exc))
+
+        pnl = fill.realized_pnl or 0.0
+        self.wallet.apply_realized_pnl(pnl)
+        trade.exit_fill_id = fill.order_id
+        trade.closed_at = fill.timestamp
+        trade.realized_pnl = pnl
+        trade.close_reason = reason
+        del self.open_trades[candle.symbol]
+        return TradeEvent("CLOSE", candle.symbol, reason, fill)

@@ -41,10 +41,14 @@ def _env_percent(name: str, default: float) -> float:
 @dataclass(frozen=True, slots=True)
 class Settings:
     initial_capital: float = field(default_factory=lambda: _env_float("INITIAL_CAPITAL", 10_000.0))
-    base_currency: str = field(default_factory=lambda: _env_text("BASE_CURRENCY", "USD"))
-    profit_reserve_pct: float = field(
-        default_factory=lambda: _env_percent("PROFIT_RESERVE_PCT", 0.20)
+    alpaca_api_key: str = field(
+        default_factory=lambda: os.getenv("APCA_API_KEY_ID") or os.getenv("APCA_API_KEY", "")
     )
+    alpaca_secret_key: str = field(
+        default_factory=lambda: os.getenv("APCA_API_SECRET_KEY") or os.getenv("APCA_API_SECRET", "")
+    )
+    alpaca_base_url: str = field(default_factory=lambda: _env_text("APCA_API_BASE_URL", "https://paper-api.alpaca.markets"))
+    base_currency: str = field(default_factory=lambda: _env_text("BASE_CURRENCY", "USD"))
     max_deep_candidates: int = field(
         default_factory=lambda: _env_int("MAX_DEEP_CANDIDATES", 5)
     )

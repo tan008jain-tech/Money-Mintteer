@@ -54,10 +54,53 @@ class MultiTimeframeSnapshot:
     entry_timeframe: Timeframe
     spread_bps: float = 0.0
 
+    @property
+    def one_hour_levels(self) -> tuple[float, ...]:
+        if not self.one_hour:
+            return ()
+        highs = [b.high for b in self.one_hour]
+        lows = [b.low for b in self.one_hour]
+        return (max(highs), min(lows), sum(highs) / len(highs), sum(lows) / len(lows))
+
+    @property
+    def fifteen_minute_levels(self) -> tuple[float, ...]:
+        if not self.fifteen_minute:
+            return ()
+        highs = [b.high for b in self.fifteen_minute]
+        lows = [b.low for b in self.fifteen_minute]
+        return (max(highs), min(lows), sum(highs) / len(highs), sum(lows) / len(lows))
+
+    @property
+    def projected_levels(self) -> tuple[dict[str, Any], ...]:
+        levels = []
+        for p in self.one_hour_levels:
+            levels.append({"source": "1H", "price": p})
+        for p in self.fifteen_minute_levels:
+            levels.append({"source": "15M", "price": p})
+        return tuple(levels)
+
+    @property
+    def candle_bias_summary(self) -> str:
+        if not self.entry:
+            return "No 5M entry candles"
+        recent = self.entry[-5:]
+        bullish_count = sum(1 for c in recent if c.bullish)
+        bearish_count = sum(1 for c in recent if c.bearish)
+        total_vol = sum(c.volume for c in recent)
+        avg_body = sum(c.body for c in recent) / len(recent)
+        latest = recent[-1]
+        pressure = "Buyer Control 🟢" if bullish_count >= bearish_count and latest.close >= latest.open else "Seller Control 🔴"
+        return (
+            f"5M Chart Bias: {pressure} | Bullish: {bullish_count}/5 | "
+            f"Bearish: {bearish_count}/5 | Avg Body: ${avg_body:.2f} | "
+            f"Volume: {total_vol:.0f} | Close: ${latest.close:.2f} "
+            f"(Upper Wick: ${latest.upper_wick:.2f}, Lower Wick: ${latest.lower_wick:.2f})"
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class MultiTimeframeSeries:
-    source_1m: tuple[Candle, ...]
+    source_5m: tuple[Candle, ...]
     daily: CandleSeries
     four_hour: CandleSeries
     one_hour: CandleSeries
@@ -75,14 +118,25 @@ class MultiTimeframeSeries:
         timezone_name: str = "America/New_York",
         spread_bps: float = 0.0,
     ) -> "MultiTimeframeSeries":
+        raise ValueError("1-minute timeframe is strictly forbidden due to high noise. Use 5-minute base bars via from_5m.")
+
+    @classmethod
+    def from_5m(
+        cls,
+        candles: list[Candle],
+        *,
+        entry_timeframe: Timeframe = Timeframe.FIVE_MIN,
+        timezone_name: str = "America/New_York",
+        spread_bps: float = 0.0,
+    ) -> "MultiTimeframeSeries":
         if not candles:
-            raise ValueError("multi-timeframe series requires 1-minute candles")
+            raise ValueError("multi-timeframe series requires 5-minute candles")
         if entry_timeframe not in (Timeframe.THREE_MIN, Timeframe.FIVE_MIN):
             raise ValueError("entry timeframe must be 3m or 5m")
         timezone = ZoneInfo(timezone_name)
         ordered = tuple(sorted(candles, key=lambda candle: candle.timestamp))
         return cls(
-            source_1m=ordered,
+            source_5m=ordered,
             daily=_resample(ordered, Timeframe.DAILY, timezone),
             four_hour=_resample(ordered, Timeframe.FOUR_HOUR, timezone),
             one_hour=_resample(ordered, Timeframe.ONE_HOUR, timezone),
@@ -94,7 +148,7 @@ class MultiTimeframeSeries:
 
     @property
     def source_end(self) -> datetime:
-        return self.source_1m[-1].timestamp + timedelta(minutes=1)
+        return self.source_5m[-1].timestamp + timedelta(minutes=5)
 
     def snapshots(self, *, lookback_bars: int = 96) -> tuple[MultiTimeframeSnapshot, ...]:
         result: list[MultiTimeframeSnapshot] = []

@@ -10,7 +10,9 @@ def test_confirmation_bug():
         entry_timeframe=Timeframe.FIVE_MIN,
         max_bars_after_sweep=8,
         max_bars_after_mss=5,
-        min_displacement_body_fraction=0.1 # Make it easy
+        min_displacement_body_fraction=0.1, # Make it easy
+        max_stop_pct=10.0,
+        max_stop_atr=10.0
     )
     strategy = LiquiditySweepReversalStrategy(config)
     
@@ -67,12 +69,18 @@ def test_confirmation_bug():
     # We need to monkeypatch _liquidity_zones to return our 95.0 zone easily
     import money_mintter.strategy.liquidity_reversal as lr
     original_zones = lr._liquidity_zones
-    lr._liquidity_zones = lambda *args, **kwargs: (LiquidityZone(95.0, ("1H",), 2.0),)
+    def mock_zones(snapshot, side, config):
+        if side == Side.BUY:
+            return (LiquidityZone(95.0, ("1H",), 2.0),)
+        else:
+            return (LiquidityZone(105.0, ("1H",), 2.0),)
+    
+    lr._liquidity_zones = mock_zones
     # Also need an opposing zone for target
     lr._nearest_opposing_zone = lambda *args, **kwargs: LiquidityZone(105.0, ("1H",), 2.0)
 
     try:
-        result = strategy.analyze(snapshot)
+        result = strategy.analyze_side(snapshot, Side.BUY)
         print(f"Result Passed: {result.passed}")
         print(f"Reason: {result.reason}")
         print(f"Vetoes: {result.vetoes}")
@@ -81,6 +89,8 @@ def test_confirmation_bug():
             print("CONFIRMED: The bug exists. First breach failed confirmation and blocked subsequent candles.")
         elif result.passed:
             print("The strategy passed (no bug or different behavior).")
+        else:
+            print("The strategy failed but not with weak_confirmation.")
     finally:
         lr._liquidity_zones = original_zones
 

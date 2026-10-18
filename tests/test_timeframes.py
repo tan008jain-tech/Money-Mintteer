@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+import pytest
 
 from money_mintter.strategy import Candle, MultiTimeframeSeries, Timeframe
 
@@ -6,7 +7,7 @@ from money_mintter.strategy import Candle, MultiTimeframeSeries, Timeframe
 def candle(index: int, price: float = 100.0) -> Candle:
     return Candle(
         "ABC",
-        datetime(2026, 10, 1, 9, 30, tzinfo=timezone.utc) + timedelta(minutes=index),
+        datetime(2026, 10, 1, 9, 30, tzinfo=timezone.utc) + timedelta(minutes=index * 5),
         price,
         price + 0.4,
         price - 0.4,
@@ -15,40 +16,35 @@ def candle(index: int, price: float = 100.0) -> Candle:
     )
 
 
-def test_five_minute_aggregation():
+def test_five_minute_base_aggregation():
     candles = [candle(i, 100 + i * 0.1) for i in range(10)]
-    series = MultiTimeframeSeries.from_1m(
+    series = MultiTimeframeSeries.from_5m(
         candles,
         entry_timeframe=Timeframe.FIVE_MIN,
         timezone_name="UTC",
     )
-    assert len(series.entry.bars) == 2
+    assert len(series.entry.bars) == 10
     first = series.entry.bars[0]
     assert first.open == candles[0].open
-    assert first.close == candles[4].close
-    assert first.high == max(c.high for c in candles[:5])
-    assert first.low == min(c.low for c in candles[:5])
-    assert first.volume == 500
+    assert first.close == candles[0].close
+    assert first.volume == 100
 
 
-def test_snapshot_excludes_unclosed_entry_bar():
-    candles = [candle(i) for i in range(7)]
-    series = MultiTimeframeSeries.from_1m(
+def test_one_minute_forbidden():
+    candles = [candle(i) for i in range(5)]
+    with pytest.raises(ValueError, match="1-minute timeframe is strictly forbidden"):
+        MultiTimeframeSeries.from_1m(candles)
+
+
+def test_mtf_levels_and_bias_summary():
+    candles = [candle(i, 100 + i * 0.5) for i in range(20)]
+    series = MultiTimeframeSeries.from_5m(
         candles,
         entry_timeframe=Timeframe.FIVE_MIN,
         timezone_name="UTC",
     )
-    snapshots = series.snapshots()
-    assert len(snapshots) == 1
-    assert snapshots[0].entry[-1].close == candles[4].close
-    assert snapshots[0].as_of == series.entry.bars[0].timestamp + timedelta(minutes=5)
-
-
-def test_three_minute_entry_is_supported():
-    candles = [candle(i) for i in range(9)]
-    series = MultiTimeframeSeries.from_1m(
-        candles,
-        entry_timeframe=Timeframe.THREE_MIN,
-        timezone_name="UTC",
-    )
-    assert len(series.entry.bars) == 3
+    snapshot = series.snapshot_at(series.entry.bars[-1].timestamp + timedelta(minutes=5))
+    assert snapshot.one_hour_levels
+    assert snapshot.fifteen_minute_levels
+    assert snapshot.projected_levels
+    assert "5M Chart Bias" in snapshot.candle_bias_summary

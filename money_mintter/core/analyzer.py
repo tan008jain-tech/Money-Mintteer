@@ -9,13 +9,13 @@ from money_mintter.domain import Candidate
 class AnalyzerConfig:
     """Strict market-selection thresholds before deep strategy analysis."""
 
-    min_liquidity: float = 0.80
-    min_activity: float = 0.80
-    min_volatility: float = 0.50
-    max_volatility: float = 0.95
-    min_signal_quality: float = 0.80
-    min_score: float = 0.85
-    max_spread_bps: float = 20.0
+    min_liquidity: float = 0.50
+    min_activity: float = 0.50
+    min_volatility: float = 0.30
+    max_volatility: float = 0.99
+    min_signal_quality: float = 0.50
+    min_score: float = 0.60
+    max_spread_bps: float = 15.0
 
     def __post_init__(self) -> None:
         if not 0 <= self.min_liquidity <= 1:

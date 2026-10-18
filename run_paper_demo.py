@@ -19,7 +19,7 @@ def main() -> None:
     
     initial_capital = 10000.0
     broker = PaperBroker(initial_capital, slippage_bps=5.0, commission_bps=2.0)
-    wallet = WalletLedger(initial_capital, profit_reserve_pct=0.20)
+    wallet = WalletLedger(initial_capital)
     risk = RiskEngine(risk_per_trade_pct=0.005, max_position_pct=0.20, max_portfolio_risk_pct=0.02)
     manager = TradeManager(broker, risk, wallet)
     engine = MoneyMintterEngine(
@@ -98,7 +98,6 @@ def main() -> None:
                 "entry_price": p.avg_entry_price,
                 "stop_price": manager.open_trades[sym].stop_price if sym in manager.open_trades else p.avg_entry_price * 0.98,
                 "target_price": manager.open_trades[sym].target_price if sym in manager.open_trades else p.avg_entry_price * 1.05,
-                "partial_taken": manager.open_trades[sym].partial_taken if sym in manager.open_trades else False,
             }
             for sym, p in broker.positions().items()
         ]
@@ -107,9 +106,7 @@ def main() -> None:
             {
                 "symbol": c.symbol,
                 "market": c.market,
-                "liquidity_score": c.liquidity_score,
-                "activity_score": c.activity_score,
-                "signal_quality_score": c.signal_quality_score,
+                "current_price": 180.00,
                 "score": 0.92,
             }
             for c in candidates
@@ -117,8 +114,7 @@ def main() -> None:
 
         return DashboardSnapshot(
             system_action="PAPER TRADING ACTIVE (>85% ELITE)",
-            investing_wallet=wallet.trading_wallet,
-            profit_wallet=wallet.profit_reserve,
+            wallet=wallet.wallet,
             broker_cash=broker.available_cash,
             analyzed_stocks=analyzed,
             open_positions=tuple(open_pos),

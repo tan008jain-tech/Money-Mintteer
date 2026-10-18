@@ -105,55 +105,38 @@ class ManagedTrade:
     closed_at: datetime | None = None
     realized_pnl: float | None = None
     close_reason: str | None = None
-    partial_taken: bool = False
 
 
 @dataclass(slots=True)
 class WalletLedger:
-    trading_wallet: float
-    profit_reserve: float = 0.0
-    profit_reserve_pct: float = 0.20
+    wallet: float
     realized_profit: float = 0.0
     realized_loss: float = 0.0
 
     def __post_init__(self) -> None:
-        if self.trading_wallet < 0:
-            raise ValueError("trading wallet cannot start negative")
-        if not 0 <= self.profit_reserve_pct <= 1:
-            raise ValueError("profit reserve percentage must be in [0, 1]")
+        if self.wallet < 0:
+            raise ValueError("wallet cannot start negative")
 
     @property
-    def total_tracked_capital(self) -> float:
-        return self.trading_wallet + self.profit_reserve
+    def trading_wallet(self) -> float:
+        return self.wallet
 
-    def apply_realized_pnl(self, pnl: float) -> tuple[float, float]:
+    def apply_realized_pnl(self, pnl: float) -> float:
+        self.wallet += pnl
         if pnl > 0:
-            reserve = pnl * self.profit_reserve_pct
-            reinvested = pnl - reserve
-            self.trading_wallet += reinvested
-            self.profit_reserve += reserve
             self.realized_profit += pnl
-            return reinvested, reserve
-        if pnl < 0:
-            self.trading_wallet += pnl
+        elif pnl < 0:
             self.realized_loss += -pnl
-        return pnl, 0.0
+        return pnl
 
-    def deposit_investing(self, amount: float) -> None:
+    def deposit(self, amount: float) -> None:
         if amount <= 0:
             raise ValueError("deposit amount must be positive")
-        self.trading_wallet += amount
+        self.wallet += amount
 
-    def withdraw_investing(self, amount: float) -> None:
+    def withdraw(self, amount: float) -> None:
         if amount <= 0:
             raise ValueError("withdrawal amount must be positive")
-        if amount > self.trading_wallet:
-            raise ValueError("insufficient funds in investing wallet")
-        self.trading_wallet -= amount
-
-    def withdraw_profit(self, amount: float) -> None:
-        if amount <= 0:
-            raise ValueError("withdrawal amount must be positive")
-        if amount > self.profit_reserve:
-            raise ValueError("insufficient funds in profit wallet")
-        self.profit_reserve -= amount
+        if amount > self.wallet:
+            raise ValueError("insufficient funds in wallet")
+        self.wallet -= amount

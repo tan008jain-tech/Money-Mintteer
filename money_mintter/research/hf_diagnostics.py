@@ -43,7 +43,7 @@ def main() -> int:
         return 1
 
     entry_tf = Timeframe.THREE_MIN if args.entry_minutes == 3 else Timeframe.FIVE_MIN
-    series = MultiTimeframeSeries.from_1m(
+    series = MultiTimeframeSeries.from_5m(
         candles,
         entry_timeframe=entry_tf,
         timezone_name=args.timezone,

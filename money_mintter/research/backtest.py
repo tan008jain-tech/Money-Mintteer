@@ -17,9 +17,11 @@ class BacktestConfig:
     spread_bps: float = 5.0
     slippage_bps: float = 5.0
     commission_bps: float = 2.0
+    gap_slippage_bps: float = 10.0
     max_holding_minutes: int = 120
     session_start: time = time(9, 30)
     session_end: time = time(16, 0)
+    exclude_opening_minutes: int = 0
     evaluation_start: date | None = None
     evaluation_end: date | None = None
     timezone_name: str = "America/New_York"
@@ -31,12 +33,14 @@ class BacktestConfig:
             raise ValueError("risk per trade must be in (0, 1]")
         if not 0 < self.max_position_pct <= 1:
             raise ValueError("max position must be in (0, 1]")
-        if min(self.spread_bps, self.slippage_bps, self.commission_bps) < 0:
+        if min(self.spread_bps, self.slippage_bps, self.commission_bps, self.gap_slippage_bps) < 0:
             raise ValueError("execution costs cannot be negative")
         if self.max_holding_minutes <= 0:
             raise ValueError("max holding time must be positive")
         if self.session_start >= self.session_end:
             raise ValueError("session start must precede session end")
+        if self.exclude_opening_minutes < 0:
+            raise ValueError("exclude opening minutes cannot be negative")
         if self.evaluation_start and self.evaluation_end and self.evaluation_start > self.evaluation_end:
             raise ValueError("evaluation start must precede evaluation end")
 
@@ -115,14 +119,14 @@ class StrategyBacktester:
 
     def run(self, candles: list[Candle]) -> BacktestReport:
         if not candles:
-            raise ValueError("backtest requires 1-minute candles")
+            raise ValueError("backtest requires 5-minute candles (1m forbidden)")
 
         ordered = sorted(candles, key=lambda candle: candle.timestamp)
         entry_timeframe = getattr(self.strategy.config, "entry_timeframe", None)
         if entry_timeframe is None:
             raise ValueError("strategy must expose an entry_timeframe")
 
-        series = MultiTimeframeSeries.from_1m(
+        series = MultiTimeframeSeries.from_5m(
             ordered,
             entry_timeframe=entry_timeframe,
             timezone_name=self.config.timezone_name,
@@ -223,10 +227,18 @@ class StrategyBacktester:
                 )
 
                 if raw_exit is not None:
+                    effective_raw_exit = raw_exit
+                    if reason == "stop_gap":
+                        gap_penalty = self.config.gap_slippage_bps / 10_000
+                        effective_raw_exit = (
+                            raw_exit * (1 - gap_penalty)
+                            if open_trade.side is Side.BUY
+                            else raw_exit * (1 + gap_penalty)
+                        )
                     exit_price = (
-                        raw_exit * (1 - penalty)
+                        effective_raw_exit * (1 - penalty)
                         if open_trade.side is Side.BUY
-                        else raw_exit * (1 + penalty)
+                        else effective_raw_exit * (1 + penalty)
                     )
                     exit_fee = exit_price * open_trade.quantity * self.config.commission_bps / 10_000
                     pnl_before_fees = (
@@ -391,7 +403,13 @@ class StrategyBacktester:
         )
 
     def _within_session(self, local_time: time) -> bool:
-        return self.config.session_start <= local_time < self.config.session_end
+        if not (self.config.session_start <= local_time < self.config.session_end):
+            return False
+        if self.config.exclude_opening_minutes > 0:
+            open_dt = datetime.combine(date.today(), self.config.session_start) + timedelta(minutes=self.config.exclude_opening_minutes)
+            if local_time < open_dt.time():
+                return False
+        return True
 
     def _within_evaluation_window(self, local_date: date) -> bool:
         return (

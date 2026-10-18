@@ -50,8 +50,7 @@ class RecoveryManager:
         )
         return RuntimeSnapshot.now(
             broker_cash=broker.available_cash,
-            trading_wallet=wallet.trading_wallet,
-            profit_reserve=wallet.profit_reserve,
+            wallet=wallet.wallet,
             positions=positions,
             open_trades=trades,
         )

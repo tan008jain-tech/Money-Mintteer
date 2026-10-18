@@ -73,8 +73,7 @@ def test_fake_postgres_store_uses_parameterized_inserts() -> None:
     snapshot = RuntimeSnapshot(
         captured_at=now.isoformat(),
         broker_cash=1000,
-        trading_wallet=1000,
-        profit_reserve=0,
+        wallet=1000,
         positions=(),
         open_trades=(),
     )

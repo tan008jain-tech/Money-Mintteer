@@ -60,6 +60,12 @@ class FmpClient:
                 status = getattr(response, "status", 200)
                 raw = response.read().decode("utf-8")
         except HTTPError as exc:
+            if exc.code == 402:
+                raise FmpApiError(
+                    f"FMP HTTP 402 Payment Required for {path}. Your current FMP API tier does not include 1-minute intraday historical chart data. "
+                    "To test on real historical data, place real 1-minute CSV files into data/raw/hf/ (e.g. AAPL.csv), "
+                    "which Money Mintter loads automatically with zero API limits."
+                ) from exc
             raise FmpApiError(f"FMP HTTP {exc.code} for {path}") from exc
         except (URLError, TimeoutError) as exc:
             raise FmpApiError(f"FMP request failed for {path}: {exc}") from exc

@@ -27,7 +27,7 @@ class RiskEngine:
         self.max_position_pct = max_position_pct
         self.max_portfolio_risk_pct = max_portfolio_risk_pct
 
-    def _size(self, available_capital: float, entry: float, stop: float, open_risk: float, *, side: str) -> RiskDecision:
+    def _size(self, available_capital: float, entry: float, stop: float, open_risk: float, *, side: str, active_candidates_count: int = 5, market_open: bool = True) -> RiskDecision:
         if available_capital <= 0:
             return RiskDecision(False, reason="no available capital")
         if side == "long":
@@ -43,16 +43,37 @@ class RiskEngine:
         if open_risk + risk_budget > available_capital * self.max_portfolio_risk_pct + 1e-9:
             return RiskDecision(False, reason="portfolio risk limit exceeded")
 
+        effective_max_position_pct = min(
+            1.0, self.max_position_pct * (5 / max(1, active_candidates_count))
+        )
+
+        leverage = 4.0 if market_open else 2.0
+        leveraged_capital = available_capital * leverage
+
         raw_qty = risk_budget / risk_per_share
-        max_qty_by_capital = (available_capital * self.max_position_pct) / entry
-        qty = floor(min(raw_qty, max_qty_by_capital) * 1_000_000) / 1_000_000
-        if qty <= 0:
-            return RiskDecision(False, reason="position size rounds to zero")
+        max_qty_by_capital = (leveraged_capital * effective_max_position_pct) / entry
+        qty_float = min(raw_qty, max_qty_by_capital)
 
-        return RiskDecision(True, qty, qty * risk_per_share, "approved")
+        if market_open:
+            qty = round(qty_float, 4)
+            if qty <= 1e-8:
+                if leveraged_capital * effective_max_position_pct >= entry:
+                    qty = 1.0
+                else:
+                    return RiskDecision(False, reason="position size rounds to zero")
+        else:
+            int_qty = int(floor(qty_float))
+            if int_qty <= 0:
+                if leveraged_capital * effective_max_position_pct >= entry:
+                    int_qty = 1
+                else:
+                    return RiskDecision(False, reason="position size rounds to zero")
+            qty = float(int_qty)
 
-    def size_long(self, available_capital: float, entry: float, stop: float, open_risk: float) -> RiskDecision:
-        return self._size(available_capital, entry, stop, open_risk, side="long")
+        return RiskDecision(True, float(qty), qty * risk_per_share, "approved")
 
-    def size_short(self, available_capital: float, entry: float, stop: float, open_risk: float) -> RiskDecision:
-        return self._size(available_capital, entry, stop, open_risk, side="short")
+    def size_long(self, available_capital: float, entry: float, stop: float, open_risk: float, active_candidates_count: int = 5, market_open: bool = True) -> RiskDecision:
+        return self._size(available_capital, entry, stop, open_risk, side="long", active_candidates_count=active_candidates_count, market_open=market_open)
+
+    def size_short(self, available_capital: float, entry: float, stop: float, open_risk: float, active_candidates_count: int = 5, market_open: bool = True) -> RiskDecision:
+        return self._size(available_capital, entry, stop, open_risk, side="short", active_candidates_count=active_candidates_count, market_open=market_open)
