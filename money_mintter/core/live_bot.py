@@ -10,8 +10,8 @@ from typing import Any
 from dotenv import load_dotenv
 
 from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import MarketOrderRequest, TakeProfitRequest, StopLossRequest
-from alpaca.trading.enums import OrderSide, TimeInForce
+from alpaca.trading.requests import MarketOrderRequest, TakeProfitRequest, StopLossRequest, GetOrdersRequest
+from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus
 from alpaca.data.historical import StockHistoricalDataClient, CryptoHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest, CryptoBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
@@ -21,6 +21,22 @@ from money_mintter.config import Settings
 from money_mintter.core.risk import RiskEngine
 from money_mintter.domain import Side
 from money_mintter.strategy import Candle, LiquiditySweepReversalStrategy, MultiTimeframeSeries, StrategyConfig, Timeframe
+
+
+def normalize_symbol(sym: str) -> str:
+    return sym.upper().replace("/", "").replace("-", "")
+
+
+def next_bar_boundary(now_utc: datetime, minutes: int = 5, delay_seconds: int = 5) -> datetime:
+    base = now_utc.replace(minute=0, second=0, microsecond=0)
+    total_seconds = (now_utc - base).total_seconds()
+    interval_sec = minutes * 60
+    k = int(total_seconds // interval_sec)
+    candidate = base + timedelta(seconds=(k * interval_sec) + delay_seconds)
+    if candidate <= now_utc:
+        k += 1
+        candidate = base + timedelta(seconds=(k * interval_sec) + delay_seconds)
+    return candidate
 
 
 class MarketScanner:
@@ -35,7 +51,12 @@ class MarketScanner:
         self.latest_snapshots: dict[str, MultiTimeframeSnapshot] = {}
 
     @staticmethod
-    def is_session_open(symbol: str, now_utc: datetime) -> tuple[bool, str]:
+    def is_session_open(*args) -> tuple[bool, str]:
+        if len(args) == 3:
+            _, symbol, now_utc = args
+        else:
+            symbol, now_utc = args
+
         sym_upper = symbol.upper()
         if sym_upper.endswith(('-USD', '/USD', '-USDT', '/USDT')) or any(c in sym_upper for c in ['BTC', 'ETH', 'SOL', 'AVAX']):
             return True, "Crypto 🟢 (24/7)"
@@ -78,6 +99,7 @@ class MarketScanner:
     def scan_universe(self, now_utc: datetime, locked_symbols: set[str], strategy: LiquiditySweepReversalStrategy) -> tuple[list[tuple[str, float, Side | None, str, float, float, float]], list[dict[str, Any]]]:
         analyzed_candidates: list[tuple[str, float, Side | None, str, float, float, float]] = []
         dashboard_stocks = []
+        locked_normalized = {normalize_symbol(s) for s in locked_symbols}
 
         self.logger.info(f"Scanning global asset pool ({len(self.global_universe)} assets) with core trading hours filtration...")
 
@@ -86,12 +108,12 @@ class MarketScanner:
             if "-" in clean_symbol and "/" not in clean_symbol and ("USD" in clean_symbol or "USDT" in clean_symbol):
                 clean_symbol = clean_symbol.replace("-", "/")
 
-            open_status, session_msg = self.is_session_open(clean_symbol, now_utc)
+            open_status, session_msg = MarketScanner.is_session_open(clean_symbol, now_utc)
             if not open_status:
                 self.logger.info(f"Skipping {clean_symbol}: {session_msg}")
                 continue
 
-            if clean_symbol in locked_symbols:
+            if normalize_symbol(clean_symbol) in locked_normalized:
                 self.logger.info(f"Retaining locked active trade slot for {clean_symbol} (Module 3.2 Slot Freezing)")
                 continue
 
@@ -143,7 +165,7 @@ class MarketScanner:
                 vwap = self.calculate_vwap(candles)
                 vwap_dev = ((latest_bar.close - vwap) / vwap) * 100.0 if vwap > 0 else 0.0
 
-                if clean_symbol in locked_symbols and abs(vwap_dev) >= 2.0:
+                if normalize_symbol(clean_symbol) in locked_normalized and abs(vwap_dev) >= 2.0:
                     self.logger.warning(f"EMERGENCY VWAP BREAKDOWN: {clean_symbol} price deviates {vwap_dev:+.2f}% from VWAP (${vwap:.2f})!")
 
                 series = MultiTimeframeSeries.from_5m(
@@ -227,7 +249,25 @@ class LivePortfolioManager:
 
         return account_cash, account_equity, buying_power, open_positions, dashboard_positions, locked_symbols
 
-    def submit_bracket_orders(self, top_new: list[tuple[str, float, Side | None, str, float, float, float]], locked_symbols: set[str], account_equity: float, settings: Settings) -> None:
+    def fetch_open_order_symbols(self) -> set[str]:
+        req = GetOrdersRequest(status=QueryOrderStatus.OPEN)
+        orders = self.trading_client.get_orders(req)
+        symbols = set()
+        for o in orders:
+            if hasattr(o, 'symbol') and o.symbol:
+                symbols.add(normalize_symbol(o.symbol))
+        return symbols
+
+    def submit_bracket_orders(
+        self,
+        top_new: list[tuple[str, float, Side | None, str, float, float, float]],
+        locked_symbols: set[str],
+        account_equity: float,
+        settings: Settings,
+        bar_time: datetime | None = None,
+        processed_signals: set[tuple[str, datetime]] | None = None,
+        locked_normalized: set[str] | None = None,
+    ) -> int:
         active_untraded_slots = max(1, 5 - len(locked_symbols))
         risk_engine = RiskEngine(
             risk_per_trade_pct=settings.risk_per_trade_pct,
@@ -236,8 +276,18 @@ class LivePortfolioManager:
             leverage=1.0,
         )
         open_risk = len(locked_symbols) * settings.risk_per_trade_pct * account_equity
+        orders_sent = 0
+
+        if locked_normalized is None:
+            locked_normalized = {normalize_symbol(s) for s in locked_symbols}
 
         for sym, sc, side_val, reason, curr_price, sl_price, tp_price in top_new[:active_untraded_slots]:
+            norm_sym = normalize_symbol(sym)
+            if norm_sym in locked_normalized:
+                continue
+            if bar_time is not None and processed_signals is not None and (norm_sym, bar_time) in processed_signals:
+                continue
+
             if sc >= settings.min_candidate_score and sym not in locked_symbols and side_val is not None:
                 try:
                     is_crypto = "/" in sym
@@ -287,9 +337,15 @@ class LivePortfolioManager:
                     )
                     submitted_order = self.trading_client.submit_order(order_req)
                     open_risk += decision.capital_at_risk
+                    orders_sent += 1
+                    if bar_time is not None and processed_signals is not None:
+                        processed_signals.add((norm_sym, bar_time))
+
                     self.logger.info(f">>> BRACKET ORDER SUBMITTED TO ALPACA: {alpaca_side.value} {qty} shares of {sym} @ ~${curr_price:.2f} (SL: ${sl_price:.2f}, TP: ${tp_price:.2f}, Score: {sc:.2f})")
                 except Exception as ord_err:
                     self.logger.error(f"Failed to submit bracket order for {sym}: {ord_err}")
+
+        return orders_sent
 
 
 class LiveMarketBot:
@@ -334,8 +390,7 @@ class LiveMarketBot:
             "current_candidates": [],
         }
 
-        self.last_scan_time: datetime | None = None
-        self.rotation_interval_seconds = 1800  # 30-minute rotation clock
+        self.processed_signals: set[tuple[str, datetime]] = set()
 
     def setup_logging(self) -> logging.Logger:
         log_dir = Path("logs") if 'Path' in globals() else __import__('pathlib').Path("logs")
@@ -362,90 +417,78 @@ class LiveMarketBot:
         logger.addHandler(sh)
         return logger
 
+    def run_cycle(self, now_utc: datetime) -> dict:
+        account_cash, account_equity, _, open_positions, dashboard_positions, locked_symbols_raw = self.portfolio_manager.fetch_account_and_positions()
+        self.latest_state["cash"] = account_cash
+        self.latest_state["equity"] = account_equity
+        self.latest_state["open_positions"] = dashboard_positions
+
+        if not hasattr(self, '_previously_locked_symbols'):
+            self._previously_locked_symbols = set()
+
+        closed_externally = [sym for sym in self._previously_locked_symbols if sym not in locked_symbols_raw]
+        if closed_externally:
+            self.logger.info(f"[Reconciliation] Detected external closure/liquidation on Alpaca for symbols: {closed_externally}. Forcing immediate candidate refresh & lock release.")
+        self._previously_locked_symbols = set(locked_symbols_raw)
+
+        open_order_symbols = self.portfolio_manager.fetch_open_order_symbols()
+        locked_normalized = {normalize_symbol(s) for s in locked_symbols_raw} | open_order_symbols
+
+        evaluated = 0
+        for sym in self.global_universe:
+            clean_sym = sym.upper().strip()
+            if normalize_symbol(clean_sym) in locked_normalized:
+                continue
+            open_status, _ = MarketScanner.is_session_open(clean_sym, now_utc)
+            if open_status:
+                evaluated += 1
+
+        analyzed_candidates, dashboard_stocks = self.scanner.scan_universe(now_utc, locked_symbols_raw, self.strategy)
+        signals = len(analyzed_candidates)
+
+        analyzed_candidates.sort(key=lambda x: x[1], reverse=True)
+        top_new = analyzed_candidates[:max(0, 5 - len(locked_symbols_raw))]
+
+        final_candidates = list(locked_symbols_raw) + [c[0] for c in analyzed_candidates]
+        self.latest_state["current_candidates"] = final_candidates[:5]
+        if dashboard_stocks:
+            self.latest_state["analyzed_stocks"] = dashboard_stocks
+
+        minute = (now_utc.minute // 5) * 5
+        bar_time = now_utc.replace(minute=minute, second=0, microsecond=0)
+
+        orders_sent = self.portfolio_manager.submit_bracket_orders(
+            top_new,
+            locked_symbols_raw,
+            account_equity,
+            self.settings,
+            bar_time=bar_time,
+            processed_signals=self.processed_signals,
+            locked_normalized=locked_normalized,
+        )
+
+        self.logger.info(f"[Cycle Summary] bar_time={bar_time.isoformat()}, evaluated={evaluated}, signals={signals}, orders_sent={orders_sent}")
+        return {"evaluated": evaluated, "signals": signals, "orders_sent": orders_sent}
+
     def run(self) -> None:
         self.logger.info("==================================================")
-        self.logger.info(" Headless Trading Engine Active (Dashboard Removed) ")
+        self.logger.info(" Headless Trading Engine Active (Event-Driven 5M) ")
         self.logger.info("==================================================")
 
         try:
             while True:
                 now_utc = datetime.now(timezone.utc)
-
-                # 1. Query Account & Positions
                 try:
-                    account_cash, account_equity, _, open_positions, dashboard_positions, locked_symbols = self.portfolio_manager.fetch_account_and_positions()
+                    self.run_cycle(now_utc)
                 except Exception as exc:
-                    self.logger.error(f"Failed to fetch account and positions: {exc}")
+                    self.logger.error(f"Cycle execution error: {exc}")
                     time.sleep(2)
                     continue
 
-                self.latest_state["cash"] = account_cash
-                self.latest_state["equity"] = account_equity
-                self.latest_state["open_positions"] = dashboard_positions
-
-                if not hasattr(self, '_previously_locked_symbols'):
-                    self._previously_locked_symbols = set()
-
-                should_scan = False
-                closed_externally = [sym for sym in self._previously_locked_symbols if sym not in locked_symbols]
-                if closed_externally:
-                    self.logger.info(f"[Reconciliation] Detected external closure/liquidation on Alpaca for symbols: {closed_externally}. Forcing immediate candidate refresh & lock release.")
-                    should_scan = True
-
-                self._previously_locked_symbols = set(locked_symbols)
-
-                # 2. 30-Minute Rotation Clock Check
-                if self.last_scan_time is None or (now_utc - self.last_scan_time).total_seconds() >= self.rotation_interval_seconds:
-                    should_scan = True
-                    self.last_scan_time = now_utc
-                    self.logger.info("[Module 1.1] 30-Minute Rotation Clock Triggered: Executing Full Global Scan.")
-
-                if should_scan or not self.latest_state["current_candidates"]:
-                    analyzed_candidates, dashboard_stocks = self.scanner.scan_universe(now_utc, locked_symbols, self.strategy)
-
-                    analyzed_candidates.sort(key=lambda x: x[1], reverse=True)
-                    top_new = analyzed_candidates[:max(0, 5 - len(locked_symbols))]
-
-                    final_candidates = list(locked_symbols) + [c[0] for c in top_new]
-                    self.latest_state["current_candidates"] = final_candidates[:5]
-                    if dashboard_stocks:
-                        self.latest_state["analyzed_stocks"] = dashboard_stocks
-                    self.logger.info(f"[Module 1.4] Rotation Complete. Active Candidates Set: {self.latest_state['current_candidates']}")
-
-                    # Submit Bracket Orders
-                    self.portfolio_manager.submit_bracket_orders(top_new, locked_symbols, account_equity, self.settings)
-
-                # 3. Print Console Status
-                active_untraded_slots = max(1, 5 - len(locked_symbols))
-                slot_capital_allocation = account_equity / active_untraded_slots
-                time_to_next_scan = max(0, self.rotation_interval_seconds - int((now_utc - (self.last_scan_time or now_utc)).total_seconds()))
-
-                print("\n==========================================================================")
-                print(f" MASTER BLUEPRINT SYSTEM (OO) | UTC: {now_utc.strftime('%Y-%m-%d %H:%M:%S')}")
-                print("==========================================================================")
-                print(f" [Global Scanner] Active Open Slots: {len(self.latest_state['current_candidates'])}/5 | Locked Trades: {len(locked_symbols)}")
-                print(f" [Portfolio] Dynamic Capital Allocation per Untraded Slot: ${slot_capital_allocation:,.2f}")
-
-                print(f"\n [Scanner Loop] Current Watchlist Candidates (Next 30M Rotation in {time_to_next_scan}s):")
-                if not self.latest_state["current_candidates"]:
-                    print("   (Awaiting open market core session hours / scanning active venues...)")
-                else:
-                    for sym in self.latest_state["current_candidates"]:
-                        is_locked = " [LOCKED - ACTIVE TRADE]" if sym in locked_symbols else ""
-                        print(f"   • {sym:<10}{is_locked}")
-
-                print(f"\n [Position Tracker Loop] Independent 2s / Loop Monitoring & Alpaca Positions:")
-                if not open_positions:
-                    print("   (No active positions currently held on Alpaca)")
-                else:
-                    for pos in open_positions:
-                        print(f"   • {pos['symbol']:<6} {pos['side']:<4} | Qty: {pos['quantity']} | Entry: ${pos['entry_price']:.2f} | Curr: ${pos['current_price']:.2f} | PnL: ${pos['unrealized_pnl']:+.2f}")
-
-                print("\n--------------------------------------------------------------------------")
-                print(f" Status: RUNNING (OO Bracket Orders Active) | Next Scan in {time_to_next_scan}s (Press Ctrl+C to exit)")
-                print("==========================================================================\n")
-
-                time.sleep(2)
+                next_boundary = next_bar_boundary(now_utc)
+                sleep_seconds = max(0.0, (next_boundary - datetime.now(timezone.utc)).total_seconds())
+                self.logger.info(f"[Scheduler] Cycle completed. Sleeping for {sleep_seconds:.1f}s until next bar boundary {next_boundary.isoformat()}")
+                time.sleep(sleep_seconds)
 
         except KeyboardInterrupt:
             print("\nMaster Blueprint Trading Engine stopped gracefully.")
