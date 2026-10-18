@@ -56,7 +56,9 @@ def test_max_position_pct_20_conversion(monkeypatch: pytest.MonkeyPatch) -> None
 
 
 def test_live_portfolio_manager_bracket_order_allocation(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RISK_PER_TRADE_PCT", "0.5")
     monkeypatch.setenv("MAX_POSITION_PCT", "20")
+    monkeypatch.setenv("MAX_PORTFOLIO_RISK_PCT", "2")
     settings = Settings()
 
     class FakeTradingClient:
@@ -70,11 +72,22 @@ def test_live_portfolio_manager_bracket_order_allocation(monkeypatch: pytest.Mon
     fake_client = FakeTradingClient()
     manager = LivePortfolioManager(fake_client, logging.getLogger("test"))
 
-    top_new = [("TEST", 0.9, Side.BUY, "r", 100.0, 98.5, 103.0)]
+    top_new = [("TEST", 0.9, Side.BUY, "r", 100.0, 99.0, 103.0)]
     manager.submit_bracket_orders(top_new, set(), 100_000.0, settings)
 
     assert len(fake_client.submitted_orders) == 1
-    assert fake_client.submitted_orders[0].qty == 200.0
+    assert fake_client.submitted_orders[0].qty == 500
+
+
+def test_fetch_account_and_positions_raises_on_failure() -> None:
+    class FailingTradingClient:
+        def get_account(self):
+            raise RuntimeError("API failure")
+
+    client = FailingTradingClient()
+    manager = LivePortfolioManager(client, logging.getLogger("test"))
+    with pytest.raises(RuntimeError, match="API failure"):
+        manager.fetch_account_and_positions()
 
 
 def test_market_scanner_with_fake_strategy_signal(monkeypatch: pytest.MonkeyPatch) -> None:

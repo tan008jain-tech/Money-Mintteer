@@ -18,6 +18,7 @@ from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from alpaca.data.enums import DataFeed
 
 from money_mintter.config import Settings
+from money_mintter.core.risk import RiskEngine
 from money_mintter.domain import Side
 from money_mintter.strategy import Candle, LiquiditySweepReversalStrategy, MultiTimeframeSeries, StrategyConfig, Timeframe
 
@@ -187,16 +188,10 @@ class LivePortfolioManager:
         self.logger = logger
 
     def fetch_account_and_positions(self) -> tuple[float, float, float, list[dict[str, Any]], list[dict[str, Any]], set[str]]:
-        account_cash = 100000.0
-        account_equity = 100000.0
-        buying_power = 200000.0
-        try:
-            account = self.trading_client.get_account()
-            account_cash = float(account.cash)
-            account_equity = float(account.equity)
-            buying_power = float(account.buying_power)
-        except Exception as e:
-            self.logger.debug(f"Account fetch fallback: {e}")
+        account = self.trading_client.get_account()
+        account_cash = float(account.cash)
+        account_equity = float(account.equity)
+        buying_power = float(account.buying_power)
 
         open_positions = []
         dashboard_positions = []
@@ -237,19 +232,51 @@ class LivePortfolioManager:
 
     def submit_bracket_orders(self, top_new: list[tuple[str, float, Side | None, str, float, float, float]], locked_symbols: set[str], account_equity: float, settings: Settings) -> None:
         active_untraded_slots = max(1, 5 - len(locked_symbols))
-        slot_capital = account_equity / active_untraded_slots
+        risk_engine = RiskEngine(
+            risk_per_trade_pct=settings.risk_per_trade_pct,
+            max_position_pct=settings.max_position_pct,
+            max_portfolio_risk_pct=settings.max_portfolio_risk_pct,
+        )
+        open_risk = len(locked_symbols) * settings.risk_per_trade_pct * account_equity
 
         for sym, sc, side_val, reason, curr_price, sl_price, tp_price in top_new[:active_untraded_slots]:
             if sc >= settings.min_candidate_score and sym not in locked_symbols and side_val is not None:
                 try:
-                    alloc_amt = min(slot_capital, account_equity * settings.max_position_pct)
                     is_crypto = "/" in sym
-                    qty_float = alloc_amt / curr_price if curr_price > 0 else 0.0
-                    qty = round(qty_float, 4 if is_crypto else 2)
+                    if side_val is Side.BUY:
+                        decision = risk_engine.size_long(
+                            available_capital=account_equity,
+                            entry=curr_price,
+                            stop=sl_price,
+                            open_risk=open_risk,
+                            active_candidates_count=max(1, len(top_new)),
+                            market_open=True,
+                        )
+                    else:
+                        decision = risk_engine.size_short(
+                            available_capital=account_equity,
+                            entry=curr_price,
+                            stop=sl_price,
+                            open_risk=open_risk,
+                            active_candidates_count=max(1, len(top_new)),
+                            market_open=True,
+                        )
 
-                    if qty <= 0 or alloc_amt < 10.0:
-                        self.logger.info(f"Skipping {sym}: allocated capital (${alloc_amt:.2f}) insufficient for price (${curr_price:.2f})")
+                    if not decision.approved:
+                        self.logger.info(f"Skipping {sym}: RiskEngine rejected trade ({decision.reason})")
                         continue
+
+                    qty_val = decision.quantity
+                    if not is_crypto:
+                        qty = int(qty_val)
+                        if qty < 1:
+                            self.logger.info(f"Skipping {sym}: whole share quantity ({qty}) < 1")
+                            continue
+                    else:
+                        qty = round(qty_val, 4)
+                        if qty <= 0:
+                            self.logger.info(f"Skipping {sym}: fractional quantity ({qty}) <= 0")
+                            continue
 
                     alpaca_side = OrderSide.BUY if side_val is Side.BUY else OrderSide.SELL
                     order_req = MarketOrderRequest(
@@ -346,7 +373,13 @@ class LiveMarketBot:
                 now_utc = datetime.now(timezone.utc)
 
                 # 1. Query Account & Positions
-                account_cash, account_equity, _, open_positions, dashboard_positions, locked_symbols = self.portfolio_manager.fetch_account_and_positions()
+                try:
+                    account_cash, account_equity, _, open_positions, dashboard_positions, locked_symbols = self.portfolio_manager.fetch_account_and_positions()
+                except Exception as exc:
+                    self.logger.error(f"Failed to fetch account and positions: {exc}")
+                    time.sleep(2)
+                    continue
+
                 self.latest_state["cash"] = account_cash
                 self.latest_state["equity"] = account_equity
                 self.latest_state["open_positions"] = dashboard_positions
