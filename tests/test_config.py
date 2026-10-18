@@ -1,8 +1,12 @@
+import logging
 import os
+from typing import Any
 
 import pytest
 
 from money_mintter.config import Settings
+from money_mintter.core.live_bot import LivePortfolioManager
+from money_mintter.domain import Side
 
 
 def test_settings_keep_existing_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -42,3 +46,31 @@ def test_settings_reject_invalid_numeric_environment(monkeypatch: pytest.MonkeyP
     monkeypatch.setenv("INITIAL_CAPITAL", "not-a-number")
     with pytest.raises(ValueError, match="INITIAL_CAPITAL"):
         Settings()
+
+
+def test_max_position_pct_20_conversion(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MAX_POSITION_PCT", "20")
+    settings = Settings()
+    assert settings.max_position_pct == 0.20
+
+
+def test_live_portfolio_manager_bracket_order_allocation(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MAX_POSITION_PCT", "20")
+    settings = Settings()
+
+    class FakeTradingClient:
+        def __init__(self) -> None:
+            self.submitted_orders: list[Any] = []
+
+        def submit_order(self, order_req: Any) -> Any:
+            self.submitted_orders.append(order_req)
+            return object()
+
+    fake_client = FakeTradingClient()
+    manager = LivePortfolioManager(fake_client, logging.getLogger("test"))
+
+    top_new = [("TEST", 0.9, Side.BUY, "r", 100.0, 98.5, 103.0)]
+    manager.submit_bracket_orders(top_new, set(), 100_000.0, settings)
+
+    assert len(fake_client.submitted_orders) == 1
+    assert fake_client.submitted_orders[0].qty == 200.0

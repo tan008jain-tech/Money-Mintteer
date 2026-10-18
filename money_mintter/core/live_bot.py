@@ -246,7 +246,7 @@ class LivePortfolioManager:
         for sym, sc, side_val, reason, curr_price, sl_price, tp_price in top_new[:active_untraded_slots]:
             if sc >= settings.min_candidate_score and sym not in locked_symbols and side_val is not None:
                 try:
-                    alloc_amt = min(slot_capital, account_equity * (settings.max_position_pct / 100.0))
+                    alloc_amt = min(slot_capital, account_equity * settings.max_position_pct)
                     is_crypto = "/" in sym
                     qty_float = alloc_amt / curr_price if curr_price > 0 else 0.0
                     qty = round(qty_float, 4 if is_crypto else 2)
