@@ -610,3 +610,129 @@ def test_crypto_slash_blocked_by_normalized_position(monkeypatch: pytest.MonkeyP
 
     assert metrics["orders_sent"] == 0
     assert len(bot.trading_client.submitted_orders) == 0
+
+
+def test_session_open_rules() -> None:
+    # 2026-10-16 is Friday (EDT, UTC-4)
+    dt_1325_oct16 = datetime(2026, 10, 16, 13, 25, tzinfo=timezone.utc)  # 09:25 EDT
+    dt_1345_oct16 = datetime(2026, 10, 16, 13, 45, tzinfo=timezone.utc)  # 09:45 EDT
+    dt_1959_oct16 = datetime(2026, 10, 16, 19, 59, tzinfo=timezone.utc)  # 15:59 EDT
+    dt_2010_oct16 = datetime(2026, 10, 16, 20, 10, tzinfo=timezone.utc)  # 16:10 EDT
+
+    assert MarketScanner.is_session_open("AAPL", dt_1325_oct16)[0] is False
+    assert MarketScanner.is_session_open("AAPL", dt_1345_oct16)[0] is True
+    assert MarketScanner.is_session_open("AAPL", dt_1959_oct16)[0] is True
+    assert MarketScanner.is_session_open("AAPL", dt_2010_oct16)[0] is False
+
+    # 2026-12-15 is Tuesday (EST, UTC-5)
+    dt_1425_dec15 = datetime(2026, 12, 15, 14, 25, tzinfo=timezone.utc)  # 09:25 EST
+    dt_1445_dec15 = datetime(2026, 12, 15, 14, 45, tzinfo=timezone.utc)  # 09:45 EST
+    dt_2059_dec15 = datetime(2026, 12, 15, 20, 59, tzinfo=timezone.utc)  # 15:59 EST
+    dt_2110_dec15 = datetime(2026, 12, 15, 21, 10, tzinfo=timezone.utc)  # 16:10 EST
+
+    assert MarketScanner.is_session_open("AAPL", dt_1425_dec15)[0] is False
+    assert MarketScanner.is_session_open("AAPL", dt_1445_dec15)[0] is True
+    assert MarketScanner.is_session_open("AAPL", dt_2059_dec15)[0] is True
+    assert MarketScanner.is_session_open("AAPL", dt_2110_dec15)[0] is False
+
+    # Saturday 2026-10-17 15:00 UTC
+    dt_sat = datetime(2026, 10, 17, 15, 0, tzinfo=timezone.utc)
+    assert MarketScanner.is_session_open("AAPL", dt_sat)[0] is False
+    assert MarketScanner.is_session_open("SOLV", dt_sat)[0] is False
+    assert MarketScanner.is_session_open("BTC/USD", dt_sat)[0] is True
+
+    # GLD, SLV, USO, UNG equity hours
+    dt_gld_closed = datetime(2026, 10, 16, 8, 0, tzinfo=timezone.utc)
+    dt_gld_open = datetime(2026, 10, 16, 15, 0, tzinfo=timezone.utc)
+    assert MarketScanner.is_session_open("GLD", dt_gld_closed)[0] is False
+    assert MarketScanner.is_session_open("GLD", dt_gld_open)[0] is True
+
+
+def test_enable_crypto_setting_and_bot_universe(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("ENABLE_CRYPTO", raising=False)
+    s = Settings()
+    assert s.enable_crypto is False
+
+    monkeypatch.setenv("ENABLE_CRYPTO", "true")
+    s2 = Settings()
+    assert s2.enable_crypto is True
+
+    monkeypatch.delenv("ENABLE_CRYPTO", raising=False)
+    bot_default = LiveMarketBot()
+    assert not any("/" in sym for sym in bot_default.global_universe)
+
+    monkeypatch.setenv("ENABLE_CRYPTO", "true")
+    bot_crypto = LiveMarketBot()
+    assert any("/" in sym for sym in bot_crypto.global_universe)
+
+
+def test_submit_bracket_orders_crypto_short_vs_long(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RISK_PER_TRADE_PCT", "0.5")
+    monkeypatch.setenv("MAX_POSITION_PCT", "20")
+    monkeypatch.setenv("MAX_PORTFOLIO_RISK_PCT", "2")
+    settings = Settings()
+
+    class FakeTradingClient:
+        def __init__(self) -> None:
+            self.submitted_orders: list[Any] = []
+
+        def submit_order(self, order_req: Any) -> Any:
+            self.submitted_orders.append(order_req)
+            return object()
+
+    fake_client = FakeTradingClient()
+    manager = LivePortfolioManager(fake_client, logging.getLogger("test"))
+
+    # Crypto SELL should be skipped
+    top_sell = [("BTC/USD", 0.9, Side.SELL, "r", 50000.0, 51000.0, 45000.0)]
+    manager.submit_bracket_orders(top_sell, set(), 100_000.0, settings)
+    assert len(fake_client.submitted_orders) == 0
+
+    # Crypto BUY should be submitted
+    top_buy = [("BTC/USD", 0.9, Side.BUY, "r", 50000.0, 49000.0, 55000.0)]
+    manager.submit_bracket_orders(top_buy, set(), 100_000.0, settings)
+    assert len(fake_client.submitted_orders) == 1
+    assert fake_client.submitted_orders[0].side == OrderSide.BUY
+
+
+def test_bot_run_normal_sleep_scheduling(monkeypatch: pytest.MonkeyPatch) -> None:
+    bot = LiveMarketBot()
+    monkeypatch.setattr(bot, "run_cycle", lambda now: {"evaluated": 0, "signals": 0, "orders_sent": 0})
+    
+    sleep_calls = []
+    def fake_sleep(secs: float) -> None:
+        sleep_calls.append(secs)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("money_mintter.core.live_bot.time.sleep", fake_sleep)
+
+    try:
+        bot.run()
+    except KeyboardInterrupt:
+        pass
+
+    assert len(sleep_calls) == 1
+    assert 0 <= sleep_calls[0] <= 300
+
+
+def test_bot_run_error_sleep_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
+    bot = LiveMarketBot()
+    def failing_cycle(now):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(bot, "run_cycle", failing_cycle)
+    
+    sleep_calls = []
+    def fake_sleep(secs: float) -> None:
+        sleep_calls.append(secs)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("money_mintter.core.live_bot.time.sleep", fake_sleep)
+
+    try:
+        bot.run()
+    except KeyboardInterrupt:
+        pass
+
+    assert len(sleep_calls) == 1
+    assert sleep_calls[0] == 10

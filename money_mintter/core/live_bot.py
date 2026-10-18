@@ -4,8 +4,9 @@ import logging
 import os
 import sys
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, time as dt_time
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 
@@ -56,35 +57,27 @@ class MarketScanner:
     @staticmethod
     def is_session_open(symbol: str, now_utc: datetime) -> tuple[bool, str]:
         sym_upper = symbol.upper()
-        if sym_upper.endswith(('-USD', '/USD', '-USDT', '/USDT')) or any(c in sym_upper for c in ['BTC', 'ETH', 'SOL', 'AVAX']):
-            return True, "Crypto 🟢 (24/7)"
+        if "/" in sym_upper and (sym_upper.endswith("/USD") or sym_upper.endswith("/USDT")):
+            return True, "Crypto 24/7"
 
-        if sym_upper.endswith('=F') or sym_upper in ['GLD', 'SLV', 'USO', 'UNG']:
-            weekday = now_utc.weekday()
-            hour_utc = now_utc.hour + now_utc.minute / 60.0
-            if weekday == 5:
-                return False, "Commodity 🔴 (Saturday Closed)"
-            if weekday == 6 and hour_utc < 18.0:
-                return False, "Commodity 🔴 (Sunday Pre-Open)"
-            if weekday == 4 and hour_utc >= 17.0:
-                return False, "Commodity 🔴 (Friday Closed)"
-            if 17.0 <= hour_utc < 18.0 and weekday < 4:
-                return False, "Commodity 🔴 (Daily Maintenance Break)"
-            return True, "Commodities 🟢 (Active Futures/ETF)"
+        if sym_upper.endswith("=F"):
+            return False, "Unsupported symbol"
 
-        hour_utc = now_utc.hour + now_utc.minute / 60.0
-        if now_utc.weekday() >= 5:
+        try:
+            ny_time = now_utc.astimezone(ZoneInfo("America/New_York"))
+        except Exception:
+            ny_time = now_utc
+
+        if ny_time.weekday() >= 5:
             return False, "US Equities 🔴 (Weekend Closed)"
-        
-        if 14.5 <= hour_utc <= 21.0:
-            return True, "US Equities 🟢 (Core Regular Hours 9:30-16:00 EST)"
-        
-        if 8.5 <= hour_utc < 14.5:
-            return False, "US Equities ⏳ (Pre-Market - Ignored per Blueprint)"
-        if 21.0 < hour_utc <= 25.0:
-            return False, "US Equities ⏳ (After-Hours - Ignored per Blueprint)"
 
-        return False, "US Equities 🔴 (Market Closed)"
+        market_open = dt_time(9, 30)
+        market_close = dt_time(16, 0)
+
+        if market_open <= ny_time.time() < market_close:
+            return True, "US Equities 🟢 (Core Regular Hours 9:30-16:00 EST/EDT)"
+        else:
+            return False, "US Equities 🔴 (Market Closed)"
 
     @staticmethod
     def calculate_vwap(candles: tuple[Candle, ...]) -> float:
@@ -301,6 +294,10 @@ class LivePortfolioManager:
             if sc >= settings.min_candidate_score and sym not in locked_symbols and side_val is not None:
                 try:
                     is_crypto = "/" in sym
+                    if is_crypto and side_val is Side.SELL:
+                        self.logger.info(f"Skipping {sym}: crypto shorting is not supported")
+                        continue
+
                     if side_val is Side.BUY:
                         decision = risk_engine.size_long(
                             available_capital=account_equity,
@@ -389,6 +386,8 @@ class LiveMarketBot:
             "BTC/USD", "ETH/USD", "SOL/USD", "AVAX/USD",
             "GLD", "SLV", "USO", "UNG"
         ]
+        if not self.settings.enable_crypto:
+            self.global_universe = [sym for sym in self.global_universe if "/" not in sym]
         self.scanner = MarketScanner(self.global_universe, self.stock_client, self.crypto_client, self.logger)
 
         self.latest_state = {
