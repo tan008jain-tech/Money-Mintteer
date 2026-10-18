@@ -23,11 +23,14 @@ from money_mintter.domain import Side
 from money_mintter.strategy import Candle, LiquiditySweepReversalStrategy, MultiTimeframeSeries, StrategyConfig, Timeframe
 
 
+BAR_CLOSE_DELAY_SECONDS = 20
+
+
 def normalize_symbol(sym: str) -> str:
     return sym.upper().replace("/", "").replace("-", "")
 
 
-def next_bar_boundary(now_utc: datetime, minutes: int = 5, delay_seconds: int = 5) -> datetime:
+def next_bar_boundary(now_utc: datetime, minutes: int = 5, delay_seconds: int = BAR_CLOSE_DELAY_SECONDS) -> datetime:
     base = now_utc.replace(minute=0, second=0, microsecond=0)
     total_seconds = (now_utc - base).total_seconds()
     interval_sec = minutes * 60
@@ -51,12 +54,7 @@ class MarketScanner:
         self.latest_snapshots: dict[str, MultiTimeframeSnapshot] = {}
 
     @staticmethod
-    def is_session_open(*args) -> tuple[bool, str]:
-        if len(args) == 3:
-            _, symbol, now_utc = args
-        else:
-            symbol, now_utc = args
-
+    def is_session_open(symbol: str, now_utc: datetime) -> tuple[bool, str]:
         sym_upper = symbol.upper()
         if sym_upper.endswith(('-USD', '/USD', '-USDT', '/USDT')) or any(c in sym_upper for c in ['BTC', 'ETH', 'SOL', 'AVAX']):
             return True, "Crypto 🟢 (24/7)"
@@ -162,6 +160,18 @@ class MarketScanner:
                 )
 
                 latest_bar = candles[-1]
+                latest_ts = latest_bar.timestamp
+                if latest_ts.tzinfo is None:
+                    latest_ts = latest_ts.replace(tzinfo=timezone.utc)
+
+                minute = (now_utc.minute // 5) * 5
+                bar_time = now_utc.replace(minute=minute, second=0, microsecond=0)
+                expected_last_bar_start = bar_time - timedelta(minutes=5)
+
+                if latest_ts < expected_last_bar_start:
+                    self.logger.warning(f"stale bars for {clean_symbol}: latest={latest_ts}, expected>={expected_last_bar_start}")
+                    continue
+
                 vwap = self.calculate_vwap(candles)
                 vwap_dev = ((latest_bar.close - vwap) / vwap) * 100.0 if vwap > 0 else 0.0
 
@@ -482,7 +492,7 @@ class LiveMarketBot:
                     self.run_cycle(now_utc)
                 except Exception as exc:
                     self.logger.error(f"Cycle execution error: {exc}")
-                    time.sleep(2)
+                    time.sleep(10)
                     continue
 
                 next_boundary = next_bar_boundary(now_utc)
