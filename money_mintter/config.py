@@ -94,8 +94,8 @@ class Settings:
         feed_lower = self.alpaca_data_feed.strip().lower()
         if feed_lower not in ("iex", "sip"):
             raise ValueError("ALPACA_DATA_FEED must be either 'iex' or 'sip'")
-        if not 0 <= self.max_daily_loss_pct <= 1:
-            raise ValueError("max daily loss percentage must be in [0, 1]")
+        if not 0 < self.max_daily_loss_pct <= 1:
+            raise ValueError("max daily loss percentage must be in (0, 1]")
         if self.max_consecutive_errors <= 0:
             raise ValueError("max consecutive errors must be positive")
         if self.initial_capital <= 0:

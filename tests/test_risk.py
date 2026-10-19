@@ -45,3 +45,10 @@ def test_dynamic_capital_scaling_size_below_minimum() -> None:
     assert not rej.approved
     assert rej.reason == "size_below_minimum"
 
+
+def test_phase5b_market_closed_size_below_minimum() -> None:
+    risk = RiskEngine(risk_per_trade_pct=0.005, max_position_pct=0.20, max_portfolio_risk_pct=0.02, leverage=1.0)
+    decision = risk.size_long(10_000.0, 500.0, 400.0, 0.0, active_candidates_count=5, market_open=False)
+    assert not decision.approved
+    assert decision.reason == "size_below_minimum"
+

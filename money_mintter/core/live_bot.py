@@ -56,6 +56,8 @@ class MarketScanner:
         self.logger = logger
         self.data_feed = data_feed
         self.latest_snapshots: dict[str, MultiTimeframeSnapshot] = {}
+        self.last_scan_attempts = 0
+        self.last_scan_errors = 0
 
     @staticmethod
     def is_session_open(symbol: str, now_utc: datetime) -> tuple[bool, str]:
@@ -214,6 +216,9 @@ class LivePortfolioManager:
     def __init__(self, trading_client: TradingClient, logger: logging.Logger) -> None:
         self.trading_client = trading_client
         self.logger = logger
+        self.last_equity: float | None = None
+        self.last_submit_failures = 0
+        self._last_equity_date = None
 
     def fetch_account_and_positions(self) -> tuple[float, float, float, list[dict[str, Any]], list[dict[str, Any]], set[str]]:
         account = self.trading_client.get_account()
@@ -292,6 +297,7 @@ class LivePortfolioManager:
         )
         open_risk = len(locked_symbols) * settings.risk_per_trade_pct * account_equity
         orders_sent = 0
+        self.last_submit_failures = 0
 
         if locked_normalized is None:
             locked_normalized = {normalize_symbol(s) for s in locked_symbols}
@@ -362,6 +368,7 @@ class LivePortfolioManager:
 
                     self.logger.info(f">>> BRACKET ORDER SUBMITTED TO ALPACA: {alpaca_side.value} {qty} shares of {sym} @ ~${curr_price:.2f} (SL: ${sl_price:.2f}, TP: ${tp_price:.2f}, Score: {sc:.2f})")
                 except Exception as ord_err:
+                    self.last_submit_failures += 1
                     self.logger.error(f"Failed to submit bracket order for {sym}: {ord_err}")
 
         return orders_sent
@@ -454,16 +461,11 @@ class LiveMarketBot:
             self.logger.critical(f"Kill switch tripped: {self.kill_switch.reason}")
             return {"evaluated": 0, "signals": 0, "orders_sent": 0, "halted": True}
 
-        try:
-            account_cash, account_equity, _, open_positions, dashboard_positions, locked_symbols_raw = self.portfolio_manager.fetch_account_and_positions()
-            self.kill_switch.record_success()
-            self.kill_switch.check_daily_loss(self.portfolio_manager.last_equity, account_equity)
-            if self.kill_switch.tripped:
-                self.logger.critical(f"Kill switch tripped: {self.kill_switch.reason}")
-                return {"evaluated": 0, "signals": 0, "orders_sent": 0, "halted": True}
-        except Exception as exc:
-            self.kill_switch.record_error()
-            raise exc
+        account_cash, account_equity, _, open_positions, dashboard_positions, locked_symbols_raw = self.portfolio_manager.fetch_account_and_positions()
+        self.kill_switch.check_daily_loss(self.portfolio_manager.last_equity, account_equity)
+        if self.kill_switch.tripped:
+            self.logger.critical(f"Kill switch tripped: {self.kill_switch.reason}")
+            return {"evaluated": 0, "signals": 0, "orders_sent": 0, "halted": True}
 
         self.latest_state["cash"] = account_cash
         self.latest_state["equity"] = account_equity
@@ -490,6 +492,8 @@ class LiveMarketBot:
                 evaluated += 1
 
         analyzed_candidates, dashboard_stocks = self.scanner.scan_universe(now_utc, locked_symbols_raw, self.strategy)
+        if self.scanner.last_scan_attempts > 0 and self.scanner.last_scan_errors == self.scanner.last_scan_attempts:
+            raise RuntimeError("all symbol analyses failed")
         signals = len(analyzed_candidates)
 
         analyzed_candidates.sort(key=lambda x: x[1], reverse=True)
@@ -513,8 +517,22 @@ class LiveMarketBot:
             locked_normalized=locked_normalized,
         )
 
+        if self.portfolio_manager.last_submit_failures > 0 and orders_sent == 0:
+            raise RuntimeError("all order submissions failed")
+
         self.logger.info(f"[Cycle Summary] bar_time={bar_time.isoformat()}, evaluated={evaluated}, signals={signals}, orders_sent={orders_sent}")
         return {"evaluated": evaluated, "signals": signals, "orders_sent": orders_sent}
+
+    def run_once(self, now_utc: datetime) -> dict:
+        try:
+            res = self.run_cycle(now_utc)
+            if not res.get("halted", False):
+                self.kill_switch.record_success()
+            return res
+        except Exception as exc:
+            self.kill_switch.record_error()
+            self.logger.error(f"Cycle execution error: {exc}")
+            return {"error": True, "orders_sent": 0}
 
     def run(self) -> None:
         self.logger.info("==================================================")
@@ -524,10 +542,8 @@ class LiveMarketBot:
         try:
             while True:
                 now_utc = datetime.now(timezone.utc)
-                try:
-                    self.run_cycle(now_utc)
-                except Exception as exc:
-                    self.logger.error(f"Cycle execution error: {exc}")
+                res = self.run_once(now_utc)
+                if res.get("error"):
                     time.sleep(10)
                     continue
 
