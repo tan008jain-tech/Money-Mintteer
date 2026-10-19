@@ -19,6 +19,7 @@ from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from alpaca.data.enums import DataFeed
 
 from money_mintter.config import Settings
+from money_mintter.core.killswitch import KillSwitch
 from money_mintter.core.risk import RiskEngine
 from money_mintter.domain import Side
 from money_mintter.strategy import Candle, LiquiditySweepReversalStrategy, MultiTimeframeSeries, StrategyConfig, Timeframe
@@ -220,6 +221,15 @@ class LivePortfolioManager:
         account_equity = float(account.equity)
         buying_power = float(account.buying_power)
 
+        if not hasattr(self, 'last_equity') or self.last_equity is None:
+            if hasattr(account, 'last_equity') and account.last_equity is not None:
+                try:
+                    self.last_equity = float(account.last_equity)
+                except (ValueError, TypeError):
+                    self.last_equity = account_equity
+            else:
+                self.last_equity = account_equity
+
         open_positions = []
         dashboard_positions = []
         locked_symbols = set()
@@ -397,6 +407,10 @@ class LiveMarketBot:
             self.logger.warning("IEX feed carries only a fraction of market volume; relative volume confirmation is unreliable.")
 
         self.scanner = MarketScanner(self.global_universe, self.stock_client, self.crypto_client, self.logger, data_feed=data_feed_enum)
+        self.kill_switch = KillSwitch(
+            max_consecutive_errors=self.settings.max_consecutive_errors,
+            max_daily_loss_pct=self.settings.max_daily_loss_pct,
+        )
 
         self.latest_state = {
             "cash": 100000.0,
@@ -436,7 +450,21 @@ class LiveMarketBot:
         return logger
 
     def run_cycle(self, now_utc: datetime) -> dict:
-        account_cash, account_equity, _, open_positions, dashboard_positions, locked_symbols_raw = self.portfolio_manager.fetch_account_and_positions()
+        if self.kill_switch.tripped:
+            self.logger.critical(f"Kill switch tripped: {self.kill_switch.reason}")
+            return {"evaluated": 0, "signals": 0, "orders_sent": 0, "halted": True}
+
+        try:
+            account_cash, account_equity, _, open_positions, dashboard_positions, locked_symbols_raw = self.portfolio_manager.fetch_account_and_positions()
+            self.kill_switch.record_success()
+            self.kill_switch.check_daily_loss(self.portfolio_manager.last_equity, account_equity)
+            if self.kill_switch.tripped:
+                self.logger.critical(f"Kill switch tripped: {self.kill_switch.reason}")
+                return {"evaluated": 0, "signals": 0, "orders_sent": 0, "halted": True}
+        except Exception as exc:
+            self.kill_switch.record_error()
+            raise exc
+
         self.latest_state["cash"] = account_cash
         self.latest_state["equity"] = account_equity
         self.latest_state["open_positions"] = dashboard_positions

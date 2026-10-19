@@ -38,10 +38,10 @@ def test_whole_shares_and_leverage_market_closed() -> None:
     assert decision.quantity.is_integer()
 
 
-def test_dynamic_capital_scaling_rounds_to_zero() -> None:
+def test_dynamic_capital_scaling_size_below_minimum() -> None:
     risk = RiskEngine(0.005, 0.01, 0.02)
     # Very small capital and strict position cap -> rounds to zero.
     rej = risk.size_long(100.0, 5000.0, 4900.0, 0, active_candidates_count=5, market_open=False)
     assert not rej.approved
-    assert rej.reason == "position size rounds to zero"
+    assert rej.reason == "size_below_minimum"
 

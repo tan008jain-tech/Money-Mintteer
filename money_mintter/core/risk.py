@@ -59,17 +59,11 @@ class RiskEngine:
         if market_open:
             qty = round(qty_float, 4)
             if qty <= 1e-8:
-                if leveraged_capital * effective_max_position_pct >= entry:
-                    qty = 1.0
-                else:
-                    return RiskDecision(False, reason="position size rounds to zero")
+                return RiskDecision(False, reason="size_below_minimum")
         else:
             int_qty = int(floor(qty_float))
             if int_qty <= 0:
-                if leveraged_capital * effective_max_position_pct >= entry:
-                    int_qty = 1
-                else:
-                    return RiskDecision(False, reason="position size rounds to zero")
+                return RiskDecision(False, reason="size_below_minimum")
             qty = float(int_qty)
 
         return RiskDecision(True, float(qty), qty * risk_per_share, "approved")

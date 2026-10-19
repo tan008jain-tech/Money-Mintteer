@@ -8,6 +8,7 @@ import pytest
 from alpaca.data.enums import DataFeed
 from alpaca.trading.enums import OrderSide
 from money_mintter.config import Settings
+from money_mintter.core.killswitch import KillSwitch
 from money_mintter.core.live_bot import LiveMarketBot, LivePortfolioManager, MarketScanner, next_bar_boundary, normalize_symbol
 from money_mintter.domain import Side, TradeSignal
 from money_mintter.strategy import LiquiditySweepReversalStrategy, StrategyConfig
@@ -892,3 +893,78 @@ def test_fresh_bar_with_previous_bar_succeeds(monkeypatch: pytest.MonkeyPatch) -
 
     analyzed, dashboard = scanner.scan_universe(now_utc, set(), FakeStrategyWithSignal())
     assert len(analyzed) == 1
+
+
+def test_kill_switch_settings_parsing(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MAX_DAILY_LOSS_PCT", "3")
+    monkeypatch.setenv("MAX_CONSECUTIVE_ERRORS", "4")
+    s = Settings()
+    assert s.max_daily_loss_pct == 0.03
+    assert s.max_consecutive_errors == 4
+
+
+def test_kill_switch_consecutive_errors() -> None:
+    ks = KillSwitch(max_consecutive_errors=5, max_daily_loss_pct=0.02)
+    assert not ks.tripped
+    for _ in range(4):
+        ks.record_error()
+        assert not ks.tripped
+
+    ks.record_error()
+    assert ks.tripped
+    assert "consecutive errors" in ks.reason
+
+
+def test_kill_switch_daily_loss() -> None:
+    ks = KillSwitch(max_consecutive_errors=5, max_daily_loss_pct=0.02)
+    assert not ks.tripped
+
+    # 1% loss (99,000 vs 100,000) does not trip
+    ks.check_daily_loss(100_000.0, 99_000.0)
+    assert not ks.tripped
+
+    # 3% loss (97,000 vs 100,000) trips (>= 2%)
+    ks.check_daily_loss(100_000.0, 97_000.0)
+    assert ks.tripped
+    assert "max daily loss" in ks.reason
+
+
+def test_tripped_bot_halts_and_skips_scan(monkeypatch: pytest.MonkeyPatch) -> None:
+    bot = LiveMarketBot()
+    bot.kill_switch._tripped = True
+    bot.kill_switch._reason = "forced trip"
+
+    scan_called = False
+    def fake_scan(*args, **kwargs):
+        nonlocal scan_called
+        scan_called = True
+        return [], []
+
+    monkeypatch.setattr(bot.scanner, "scan_universe", fake_scan)
+
+    class FakeTradingClient:
+        def __init__(self):
+            self.orders = []
+        def get_account(self):
+            class Acc:
+                cash = "100000"
+                equity = "100000"
+                buying_power = "200000"
+            return Acc()
+        def get_all_positions(self):
+            return []
+        def get_orders(self, req):
+            return []
+        def submit_order(self, req):
+            self.orders.append(req)
+            return object()
+
+    bot.trading_client = FakeTradingClient()
+    bot.portfolio_manager = LivePortfolioManager(bot.trading_client, bot.logger)
+
+    now_utc = datetime(2026, 10, 18, 10, 10, 0, tzinfo=timezone.utc)
+    metrics = bot.run_cycle(now_utc)
+
+    assert metrics["halted"] is True
+    assert metrics["orders_sent"] == 0
+    assert not scan_called

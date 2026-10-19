@@ -83,11 +83,21 @@ class Settings:
     alpaca_data_feed: str = field(
         default_factory=lambda: _env_text("ALPACA_DATA_FEED", "iex")
     )
+    max_daily_loss_pct: float = field(
+        default_factory=lambda: _env_percent("MAX_DAILY_LOSS_PCT", 0.02)
+    )
+    max_consecutive_errors: int = field(
+        default_factory=lambda: _env_int("MAX_CONSECUTIVE_ERRORS", 5)
+    )
 
     def __post_init__(self) -> None:
         feed_lower = self.alpaca_data_feed.strip().lower()
         if feed_lower not in ("iex", "sip"):
             raise ValueError("ALPACA_DATA_FEED must be either 'iex' or 'sip'")
+        if not 0 <= self.max_daily_loss_pct <= 1:
+            raise ValueError("max daily loss percentage must be in [0, 1]")
+        if self.max_consecutive_errors <= 0:
+            raise ValueError("max consecutive errors must be positive")
         if self.initial_capital <= 0:
             raise ValueError("initial capital must be positive")
         if self.max_deep_candidates <= 0:

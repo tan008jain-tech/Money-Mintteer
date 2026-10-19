@@ -295,3 +295,69 @@ def test_spread_friction_vetoes_small_targets():
     assert not result.passed
     assert "spread_friction" in result.vetoes
 
+
+def test_strategy_cost_edge_and_reward_risk_gates() -> None:
+    snapshot = build_snapshot(Side.BUY)
+
+    # 1. High round_trip_cost_bps (100.0 * 2.0 = 2.0% threshold) -> target < 2.0% is vetoed with "cost_edge"
+    strat_cost = LiquiditySweepReversalStrategy(
+        StrategyConfig(
+            min_strategy_score=0.80,
+            min_target_pct=0.2,
+            min_liquidity_strength=2.0,
+            max_stop_pct=5.0,
+            max_stop_atr=5.0,
+            round_trip_cost_bps=100.0,
+            min_net_edge_multiple=2.0,
+        )
+    )
+    res_cost = strat_cost.analyze(snapshot)
+    assert not res_cost.passed
+    assert "cost_edge" in res_cost.vetoes
+
+    # 2. Low round_trip_cost_bps (1.0 * 1.0 = 1.0% threshold or passing target) -> passes cost_edge gate
+    strat_pass = LiquiditySweepReversalStrategy(
+        StrategyConfig(
+            min_strategy_score=0.80,
+            min_target_pct=0.2,
+            min_liquidity_strength=2.0,
+            max_stop_pct=5.0,
+            max_stop_atr=5.0,
+            round_trip_cost_bps=1.0,
+            min_net_edge_multiple=1.0,
+        )
+    )
+    res_pass = strat_pass.analyze(snapshot)
+    assert res_pass.passed
+    assert "cost_edge" not in res_pass.vetoes
+
+    # 3. min_reward_risk=20.0 vetoes setup with lower R:R
+    strat_rr = LiquiditySweepReversalStrategy(
+        StrategyConfig(
+            min_strategy_score=0.80,
+            min_target_pct=0.2,
+            min_liquidity_strength=2.0,
+            max_stop_pct=5.0,
+            max_stop_atr=5.0,
+            min_reward_risk=20.0,
+        )
+    )
+    res_rr = strat_rr.analyze(snapshot)
+    assert not res_rr.passed
+    assert "reward_risk" in res_rr.vetoes
+
+    # 4. min_reward_risk=None (disabled) does not veto
+    strat_rr_dis = LiquiditySweepReversalStrategy(
+        StrategyConfig(
+            min_strategy_score=0.80,
+            min_target_pct=0.2,
+            min_liquidity_strength=2.0,
+            max_stop_pct=5.0,
+            max_stop_atr=5.0,
+            min_reward_risk=None,
+        )
+    )
+    res_rr_dis = strat_rr_dis.analyze(snapshot)
+    assert res_rr_dis.passed
+    assert "reward_risk" not in res_rr_dis.vetoes
+
