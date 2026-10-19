@@ -25,6 +25,7 @@ from money_mintter.strategy import Candle, LiquiditySweepReversalStrategy, Multi
 
 
 BAR_CLOSE_DELAY_SECONDS = 20
+HISTORY_DAYS = 30
 
 
 def normalize_symbol(sym: str) -> str:
@@ -47,11 +48,12 @@ class MarketScanner:
     """Object-oriented Market Screener modeled after Freqtrade DataProvider / Lumibot Scanners.
     Responsible for global universe ingestion, session filtering, and candidate scoring.
     """
-    def __init__(self, global_universe: list[str], stock_client: StockHistoricalDataClient, crypto_client: CryptoHistoricalDataClient, logger: logging.Logger) -> None:
+    def __init__(self, global_universe: list[str], stock_client: StockHistoricalDataClient, crypto_client: CryptoHistoricalDataClient, logger: logging.Logger, data_feed: DataFeed = DataFeed.IEX) -> None:
         self.global_universe = global_universe
         self.stock_client = stock_client
         self.crypto_client = crypto_client
         self.logger = logger
+        self.data_feed = data_feed
         self.latest_snapshots: dict[str, MultiTimeframeSnapshot] = {}
 
     @staticmethod
@@ -110,7 +112,7 @@ class MarketScanner:
 
             try:
                 end_dt = now_utc
-                start_dt = end_dt - timedelta(days=5)
+                start_dt = end_dt - timedelta(days=HISTORY_DAYS)
 
                 self.logger.info(f"Analyzing {clean_symbol} | Venue Status: {session_msg}")
 
@@ -129,7 +131,7 @@ class MarketScanner:
                         timeframe=TimeFrame(5, TimeFrameUnit.Minute),
                         start=start_dt,
                         end=end_dt,
-                        feed=DataFeed.IEX
+                        feed=self.data_feed,
                     )
                     bars_response = self.stock_client.get_stock_bars(bar_request)
 
@@ -152,25 +154,6 @@ class MarketScanner:
                     for b in symbol_bars
                 )
 
-                latest_bar = candles[-1]
-                latest_ts = latest_bar.timestamp
-                if latest_ts.tzinfo is None:
-                    latest_ts = latest_ts.replace(tzinfo=timezone.utc)
-
-                minute = (now_utc.minute // 5) * 5
-                bar_time = now_utc.replace(minute=minute, second=0, microsecond=0)
-                expected_last_bar_start = bar_time - timedelta(minutes=5)
-
-                if latest_ts < expected_last_bar_start:
-                    self.logger.warning(f"stale bars for {clean_symbol}: latest={latest_ts}, expected>={expected_last_bar_start}")
-                    continue
-
-                vwap = self.calculate_vwap(candles)
-                vwap_dev = ((latest_bar.close - vwap) / vwap) * 100.0 if vwap > 0 else 0.0
-
-                if normalize_symbol(clean_symbol) in locked_normalized and abs(vwap_dev) >= 2.0:
-                    self.logger.warning(f"EMERGENCY VWAP BREAKDOWN: {clean_symbol} price deviates {vwap_dev:+.2f}% from VWAP (${vwap:.2f})!")
-
                 series = MultiTimeframeSeries.from_5m(
                     list(candles),
                     entry_timeframe=Timeframe.FIVE_MIN,
@@ -178,6 +161,25 @@ class MarketScanner:
                     spread_bps=2.0,
                 )
                 snapshot = series.snapshot_at(now_utc)
+
+                minute = (now_utc.minute // 5) * 5
+                bar_time = now_utc.replace(minute=minute, second=0, microsecond=0)
+                expected_last_bar_start = bar_time - timedelta(minutes=5)
+                if expected_last_bar_start.tzinfo is None:
+                    expected_last_bar_start = expected_last_bar_start.replace(tzinfo=timezone.utc)
+
+                if not snapshot.entry:
+                    self.logger.warning(f"stale bars for {clean_symbol}: no entry-timeframe candles in snapshot")
+                    continue
+
+                last_entry = snapshot.entry[-1]
+                last_ts = last_entry.timestamp
+                if last_ts.tzinfo is None:
+                    last_ts = last_ts.replace(tzinfo=timezone.utc)
+
+                if last_ts < expected_last_bar_start:
+                    self.logger.warning(f"stale bars for {clean_symbol}: latest={last_ts}, expected>={expected_last_bar_start}")
+                    continue
                 self.latest_snapshots[clean_symbol] = snapshot
                 self.logger.info(f"[{clean_symbol}] MTF Chart Analysis | {snapshot.candle_bias_summary} | 1H Levels: {snapshot.one_hour_levels} | 15M Levels: {snapshot.fifteen_minute_levels}")
 
@@ -388,7 +390,13 @@ class LiveMarketBot:
         ]
         if not self.settings.enable_crypto:
             self.global_universe = [sym for sym in self.global_universe if "/" not in sym]
-        self.scanner = MarketScanner(self.global_universe, self.stock_client, self.crypto_client, self.logger)
+
+        feed_val = self.settings.alpaca_data_feed.strip().lower()
+        data_feed_enum = DataFeed.SIP if feed_val == "sip" else DataFeed.IEX
+        if data_feed_enum == DataFeed.IEX:
+            self.logger.warning("IEX feed carries only a fraction of market volume; relative volume confirmation is unreliable.")
+
+        self.scanner = MarketScanner(self.global_universe, self.stock_client, self.crypto_client, self.logger, data_feed=data_feed_enum)
 
         self.latest_state = {
             "cash": 100000.0,
@@ -402,8 +410,9 @@ class LiveMarketBot:
         self.processed_signals: set[tuple[str, datetime]] = set()
 
     def setup_logging(self) -> logging.Logger:
-        log_dir = Path("logs") if 'Path' in globals() else __import__('pathlib').Path("logs")
-        log_dir.mkdir(exist_ok=True)
+        log_dir_env = os.getenv("MM_LOG_DIR", "logs")
+        log_dir = Path(log_dir_env) if 'Path' in globals() else __import__('pathlib').Path(log_dir_env)
+        log_dir.mkdir(exist_ok=True, parents=True)
         today_str = datetime.now(timezone.utc).strftime('%Y%m%d')
         daily_log = log_dir / f"live_market_{today_str}.log"
         master_log = log_dir / "live_market.log"

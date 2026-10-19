@@ -5,10 +5,12 @@ from typing import Any
 
 import pytest
 
+from alpaca.data.enums import DataFeed
 from alpaca.trading.enums import OrderSide
 from money_mintter.config import Settings
 from money_mintter.core.live_bot import LiveMarketBot, LivePortfolioManager, MarketScanner, next_bar_boundary, normalize_symbol
 from money_mintter.domain import Side, TradeSignal
+from money_mintter.strategy import LiquiditySweepReversalStrategy, StrategyConfig
 
 
 def test_settings_keep_existing_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -156,11 +158,13 @@ def test_market_scanner_with_fake_strategy_signal(monkeypatch: pytest.MonkeyPatc
     class FakeStockClient:
         def get_stock_bars(self, req):
             end_dt = getattr(req, 'end', datetime.now(timezone.utc))
+            if end_dt.tzinfo is None:
+                end_dt = end_dt.replace(tzinfo=timezone.utc)
             minute = (end_dt.minute // 5) * 5
             bar_time = end_dt.replace(minute=minute, second=0, microsecond=0)
-            expected_last_bar_start = bar_time - timedelta(minutes=5)
-            bars = [FakeBar(expected_last_bar_start - timedelta(minutes=5 * i), 100, 101, 99, 100, 1000) for i in range(50, 0, -1)]
-            bars.append(FakeBar(expected_last_bar_start, 100, 101, 99, 100, 1000))
+            expected_last_bar_start = (bar_time - timedelta(minutes=5)).replace(tzinfo=timezone.utc)
+            bars = [FakeBar((expected_last_bar_start - timedelta(minutes=5 * i)).replace(tzinfo=timezone.utc), 100, 101, 99, 100, 1000) for i in range(50, 0, -1)]
+            bars.append(FakeBar(expected_last_bar_start.replace(tzinfo=timezone.utc), 100, 101, 99, 100, 1000))
             return FakeBarsResponse({req.symbol_or_symbols: bars})
 
     class FakeStrategyWithSignal:
@@ -227,11 +231,13 @@ def test_market_scanner_with_no_signal(monkeypatch: pytest.MonkeyPatch) -> None:
     class FakeStockClient:
         def get_stock_bars(self, req):
             end_dt = getattr(req, 'end', datetime.now(timezone.utc))
+            if end_dt.tzinfo is None:
+                end_dt = end_dt.replace(tzinfo=timezone.utc)
             minute = (end_dt.minute // 5) * 5
             bar_time = end_dt.replace(minute=minute, second=0, microsecond=0)
-            expected_last_bar_start = bar_time - timedelta(minutes=5)
-            bars = [FakeBar(expected_last_bar_start - timedelta(minutes=5 * i), 100, 101, 99, 100, 1000) for i in range(50, 0, -1)]
-            bars.append(FakeBar(expected_last_bar_start, 100, 101, 99, 100, 1000))
+            expected_last_bar_start = (bar_time - timedelta(minutes=5)).replace(tzinfo=timezone.utc)
+            bars = [FakeBar((expected_last_bar_start - timedelta(minutes=5 * i)).replace(tzinfo=timezone.utc), 100, 101, 99, 100, 1000) for i in range(50, 0, -1)]
+            bars.append(FakeBar(expected_last_bar_start.replace(tzinfo=timezone.utc), 100, 101, 99, 100, 1000))
             return FakeBarsResponse({req.symbol_or_symbols: bars})
 
     class FakeStrategyNoSignal:
@@ -375,11 +381,13 @@ def test_run_cycle_counts_and_single_scan(monkeypatch: pytest.MonkeyPatch) -> No
     class FakeStockClient:
         def get_stock_bars(self, req):
             end_dt = getattr(req, 'end', datetime.now(timezone.utc))
+            if end_dt.tzinfo is None:
+                end_dt = end_dt.replace(tzinfo=timezone.utc)
             minute = (end_dt.minute // 5) * 5
             bar_time = end_dt.replace(minute=minute, second=0, microsecond=0)
-            expected_last_bar_start = bar_time - timedelta(minutes=5)
-            bars = [FakeBar(expected_last_bar_start - timedelta(minutes=5 * i), 100, 101, 99, 100, 1000) for i in range(50, 0, -1)]
-            bars.append(FakeBar(expected_last_bar_start, 100, 101, 99, 100, 1000))
+            expected_last_bar_start = (bar_time - timedelta(minutes=5)).replace(tzinfo=timezone.utc)
+            bars = [FakeBar((expected_last_bar_start - timedelta(minutes=5 * i)).replace(tzinfo=timezone.utc), 100, 101, 99, 100, 1000) for i in range(50, 0, -1)]
+            bars.append(FakeBar(expected_last_bar_start.replace(tzinfo=timezone.utc), 100, 101, 99, 100, 1000))
             return FakeBarsResponse({req.symbol_or_symbols: bars})
 
     class FakeStrategy:
@@ -476,11 +484,13 @@ def test_symbol_with_open_order_does_not_produce_order(monkeypatch: pytest.Monke
     class FakeStockClient:
         def get_stock_bars(self, req):
             end_dt = getattr(req, 'end', datetime.now(timezone.utc))
+            if end_dt.tzinfo is None:
+                end_dt = end_dt.replace(tzinfo=timezone.utc)
             minute = (end_dt.minute // 5) * 5
             bar_time = end_dt.replace(minute=minute, second=0, microsecond=0)
-            expected_last_bar_start = bar_time - timedelta(minutes=5)
-            bars = [FakeBar(expected_last_bar_start - timedelta(minutes=5 * i), 100, 101, 99, 100, 1000) for i in range(50, 0, -1)]
-            bars.append(FakeBar(expected_last_bar_start, 100, 101, 99, 100, 1000))
+            expected_last_bar_start = (bar_time - timedelta(minutes=5)).replace(tzinfo=timezone.utc)
+            bars = [FakeBar((expected_last_bar_start - timedelta(minutes=5 * i)).replace(tzinfo=timezone.utc), 100, 101, 99, 100, 1000) for i in range(50, 0, -1)]
+            bars.append(FakeBar(expected_last_bar_start.replace(tzinfo=timezone.utc), 100, 101, 99, 100, 1000))
             return FakeBarsResponse({req.symbol_or_symbols: bars})
 
     class FakeStrategy:
@@ -736,3 +746,149 @@ def test_bot_run_error_sleep_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert len(sleep_calls) == 1
     assert sleep_calls[0] == 10
+
+
+def test_history_window_and_data_feed_requests(monkeypatch: pytest.MonkeyPatch) -> None:
+    class RecordedStockClient:
+        def __init__(self) -> None:
+            self.requests: list[Any] = []
+
+        def get_stock_bars(self, req):
+            self.requests.append(req)
+            return type("Resp", (), {"data": {}})()
+
+    stock_client = RecordedStockClient()
+    scanner = MarketScanner(["AAPL"], stock_client, stock_client, logging.getLogger("test"), data_feed=DataFeed.IEX)
+    now_utc = datetime(2026, 10, 18, 10, 10, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(MarketScanner, "is_session_open", lambda sym, now: (True, "Open"))
+    scanner.scan_universe(now_utc, set(), LiquiditySweepReversalStrategy(StrategyConfig()))
+
+    assert len(stock_client.requests) == 1
+    req = stock_client.requests[0]
+    assert req.end - req.start == timedelta(days=30)
+    assert req.feed is DataFeed.IEX
+
+    stock_client_sip = RecordedStockClient()
+    scanner_sip = MarketScanner(["AAPL"], stock_client_sip, stock_client_sip, logging.getLogger("test"), data_feed=DataFeed.SIP)
+    scanner_sip.scan_universe(now_utc, set(), LiquiditySweepReversalStrategy(StrategyConfig()))
+    assert stock_client_sip.requests[0].feed is DataFeed.SIP
+
+
+def test_alpaca_data_feed_settings_parsing(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ALPACA_DATA_FEED", "SIP")
+    s1 = Settings()
+    assert s1.alpaca_data_feed == "SIP"
+
+    monkeypatch.setenv("ALPACA_DATA_FEED", "iex")
+    s2 = Settings()
+    assert s2.alpaca_data_feed == "iex"
+
+    monkeypatch.setenv("ALPACA_DATA_FEED", "invalid_feed")
+    with pytest.raises(ValueError, match="ALPACA_DATA_FEED"):
+        Settings()
+
+
+def test_iex_startup_warning(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level(logging.WARNING):
+        LiveMarketBot()
+    assert any("IEX feed carries only a fraction of market volume" in record.message for record in caplog.records)
+
+
+def test_mm_log_dir_isolation(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    monkeypatch.setenv("MM_LOG_DIR", str(tmp_path))
+    LiveMarketBot()
+    log_files = list(tmp_path.glob("*.log"))
+    assert len(log_files) > 0
+
+
+def test_still_forming_bar_missing_previous_skipped_stale(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    class FakeBar:
+        def __init__(self, ts, o, h, l, c, v):
+            self.timestamp = ts
+            self.open = o
+            self.high = h
+            self.low = l
+            self.close = c
+            self.volume = v
+
+    class FakeBarsResponse:
+        def __init__(self, data):
+            self.data = data
+
+    class FakeStockClient:
+        def get_stock_bars(self, req):
+            now_utc = getattr(req, 'end', datetime(2026, 10, 18, 10, 10, 0, tzinfo=timezone.utc))
+            minute = (now_utc.minute // 5) * 5
+            bar_time = now_utc.replace(minute=minute, second=0, microsecond=0)
+            end_historical = bar_time - timedelta(minutes=10)
+            bars = [FakeBar(end_historical - timedelta(minutes=5 * i), 100, 101, 99, 100, 1000) for i in range(59, -1, -1)]
+            # NO bar at bar_time - 5 minutes (10:05)
+            # Add still-forming bar at bar_time (10:10)
+            bars.append(FakeBar(bar_time, 100, 101, 99, 100, 1000))
+            return FakeBarsResponse({req.symbol_or_symbols: bars})
+
+    monkeypatch.setattr(MarketScanner, "is_session_open", lambda sym, now: (True, "Open"))
+    scanner = MarketScanner(["AAPL"], FakeStockClient(), FakeStockClient(), logging.getLogger("test"))
+    now_utc = datetime(2026, 10, 18, 10, 10, 0, tzinfo=timezone.utc)
+
+    with caplog.at_level(logging.WARNING):
+        analyzed, dashboard = scanner.scan_universe(now_utc, set(), LiquiditySweepReversalStrategy(StrategyConfig()))
+
+    assert len(analyzed) == 0
+    assert any("stale bars" in record.message and "latest=" in record.message for record in caplog.records)
+
+
+def test_fresh_bar_with_previous_bar_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeBar:
+        def __init__(self, ts, o, h, l, c, v):
+            self.timestamp = ts
+            self.open = o
+            self.high = h
+            self.low = l
+            self.close = c
+            self.volume = v
+
+    class FakeBarsResponse:
+        def __init__(self, data):
+            self.data = data
+
+    class FakeStockClient:
+        def get_stock_bars(self, req):
+            now_utc = getattr(req, 'end', datetime(2026, 10, 18, 10, 10, 0, tzinfo=timezone.utc))
+            if now_utc.tzinfo is None:
+                now_utc = now_utc.replace(tzinfo=timezone.utc)
+            minute = (now_utc.minute // 5) * 5
+            bar_time = now_utc.replace(minute=minute, second=0, microsecond=0)
+            end_historical = bar_time - timedelta(minutes=10)
+            bars = [FakeBar((end_historical - timedelta(minutes=5 * i)).replace(tzinfo=timezone.utc), 100, 101, 99, 100, 1000) for i in range(59, -1, -1)]
+            # WITH bar at bar_time - 5 minutes (10:05)
+            bars.append(FakeBar((bar_time - timedelta(minutes=5)).replace(tzinfo=timezone.utc), 100, 101, 99, 100, 1000))
+            # Still-forming bar at bar_time (10:10)
+            bars.append(FakeBar(bar_time.replace(tzinfo=timezone.utc), 100, 101, 99, 100, 1000))
+            return FakeBarsResponse({req.symbol_or_symbols: bars})
+
+    class FakeStrategyWithSignal:
+        def analyze(self, snapshot):
+            class Analysis:
+                passed = True
+                reason = "ok"
+            return Analysis()
+
+        def signal(self, snapshot):
+            return TradeSignal(
+                symbol="AAPL",
+                side=Side.BUY,
+                entry_price=100.0,
+                stop_price=98.0,
+                target_price=101.0,
+                confidence=0.85,
+                timestamp=snapshot.as_of,
+                reason="test signal",
+            )
+
+    monkeypatch.setattr(MarketScanner, "is_session_open", lambda sym, now: (True, "Open"))
+    scanner = MarketScanner(["AAPL"], FakeStockClient(), FakeStockClient(), logging.getLogger("test"))
+    now_utc = datetime(2026, 10, 18, 10, 10, 0, tzinfo=timezone.utc)
+
+    analyzed, dashboard = scanner.scan_universe(now_utc, set(), FakeStrategyWithSignal())
+    assert len(analyzed) == 1
