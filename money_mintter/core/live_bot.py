@@ -571,6 +571,14 @@ class LiveMarketBot:
         cycles = 0
         orders_sent_total = 0
         errors = 0
+        trading_started = False
+
+        def _safe_flatten() -> list[str]:
+            try:
+                return self.portfolio_manager.flatten_all(sleep_fn)
+            except Exception as exc:
+                self.logger.critical(f"flatten_all raised exception: {exc}")
+                return ["UNKNOWN"]
 
         try:
             try:
@@ -639,22 +647,25 @@ class LiveMarketBot:
 
                 if self.kill_switch.tripped:
                     self.logger.critical(f"Kill switch tripped mid-session: {self.kill_switch.reason}")
-                    remaining = self.portfolio_manager.flatten_all(sleep_fn)
-                    self._log_session_summary("halted", cycles, orders_sent_total, errors)
-                    return {"status": "halted", "cycles": cycles, "orders_sent": orders_sent_total, "errors": errors, "remaining": remaining}
+                    remaining = _safe_flatten()
+                    status = "halted" if remaining != ["UNKNOWN"] else "flatten_incomplete"
+                    self._log_session_summary(status, cycles, orders_sent_total, errors)
+                    return {"status": status, "cycles": cycles, "orders_sent": orders_sent_total, "errors": errors, "remaining": remaining}
 
                 if now >= flatten_at:
                     break
 
                 if now < cutoff:
+                    trading_started = True
                     res = self.run_once(now)
                     cycles += 1
                     orders_sent_total += res.get("orders_sent", 0)
                     if self.kill_switch.tripped or res.get("halted", False):
                         self.logger.critical(f"Kill switch tripped: {self.kill_switch.reason if hasattr(self.kill_switch, 'reason') else 'halted'}")
-                        remaining = self.portfolio_manager.flatten_all(sleep_fn)
-                        self._log_session_summary("halted", cycles, orders_sent_total, errors)
-                        return {"status": "halted", "cycles": cycles, "orders_sent": orders_sent_total, "errors": errors, "remaining": remaining}
+                        remaining = _safe_flatten()
+                        status = "halted" if remaining != ["UNKNOWN"] else "flatten_incomplete"
+                        self._log_session_summary(status, cycles, orders_sent_total, errors)
+                        return {"status": status, "cycles": cycles, "orders_sent": orders_sent_total, "errors": errors, "remaining": remaining}
                     if res.get("error"):
                         errors += 1
                         sleep_fn(10)
@@ -665,18 +676,31 @@ class LiveMarketBot:
                 if target > now:
                     _sleep_until(target, now_fn, sleep_fn)
 
-            remaining = self.portfolio_manager.flatten_all(sleep_fn)
-            status = "completed" if not remaining else "flatten_incomplete"
+            remaining = _safe_flatten()
+            status = "completed" if not remaining and remaining != ["UNKNOWN"] else "flatten_incomplete"
+            if remaining == ["UNKNOWN"]:
+                status = "flatten_incomplete"
             self._log_session_summary(status, cycles, orders_sent_total, errors)
             return {"status": status, "cycles": cycles, "orders_sent": orders_sent_total, "errors": errors, "remaining": remaining}
 
         except KeyboardInterrupt:
             self.logger.warning("Session interrupted by user (KeyboardInterrupt).")
             remaining = []
-            if cycles > 0:
-                remaining = self.portfolio_manager.flatten_all(sleep_fn)
-            self._log_session_summary("interrupted", cycles, orders_sent_total, errors)
-            return {"status": "interrupted", "cycles": cycles, "orders_sent": orders_sent_total, "errors": errors, "remaining": remaining}
+            if trading_started:
+                remaining = _safe_flatten()
+            status = "interrupted" if remaining != ["UNKNOWN"] else "flatten_incomplete"
+            self._log_session_summary(status, cycles, orders_sent_total, errors)
+            return {"status": status, "cycles": cycles, "orders_sent": orders_sent_total, "errors": errors, "remaining": remaining}
+
+        except Exception as exc:
+            self.logger.exception(f"Session error: {exc}")
+            errors += 1
+            remaining = []
+            if trading_started:
+                remaining = _safe_flatten()
+            status = "error" if remaining != ["UNKNOWN"] else "flatten_incomplete"
+            self._log_session_summary(status, cycles, orders_sent_total, errors)
+            return {"status": status, "cycles": cycles, "orders_sent": orders_sent_total, "errors": errors, "remaining": remaining}
 
     def _log_session_summary(self, status: str, cycles: int, orders_sent: int, errors: int) -> None:
         if cycles == 0:
@@ -729,6 +753,8 @@ def main() -> int:
         elif status == "halted":
             return 2
         elif status == "flatten_incomplete":
+            return 3
+        elif status == "error":
             return 3
         elif status == "interrupted":
             return 130
