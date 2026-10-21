@@ -13,8 +13,8 @@ from dotenv import load_dotenv
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import MarketOrderRequest, TakeProfitRequest, StopLossRequest, GetOrdersRequest
 from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus
-from alpaca.data.historical import StockHistoricalDataClient, CryptoHistoricalDataClient
-from alpaca.data.requests import StockBarsRequest, CryptoBarsRequest
+from alpaca.data.historical import StockHistoricalDataClient
+from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from alpaca.data.enums import DataFeed
 
@@ -49,10 +49,9 @@ class MarketScanner:
     """Object-oriented Market Screener modeled after Freqtrade DataProvider / Lumibot Scanners.
     Responsible for global universe ingestion, session filtering, and candidate scoring.
     """
-    def __init__(self, global_universe: list[str], stock_client: StockHistoricalDataClient, crypto_client: CryptoHistoricalDataClient, logger: logging.Logger, data_feed: DataFeed = DataFeed.IEX) -> None:
+    def __init__(self, global_universe: list[str], stock_client: StockHistoricalDataClient, logger: logging.Logger, data_feed: DataFeed = DataFeed.IEX) -> None:
         self.global_universe = global_universe
         self.stock_client = stock_client
-        self.crypto_client = crypto_client
         self.logger = logger
         self.data_feed = data_feed
         self.latest_snapshots: dict[str, MultiTimeframeSnapshot] = {}
@@ -62,10 +61,7 @@ class MarketScanner:
     @staticmethod
     def is_session_open(symbol: str, now_utc: datetime) -> tuple[bool, str]:
         sym_upper = symbol.upper()
-        if "/" in sym_upper and (sym_upper.endswith("/USD") or sym_upper.endswith("/USDT")):
-            return True, "Crypto 24/7"
-
-        if sym_upper.endswith("=F"):
+        if "/" in sym_upper or sym_upper.endswith("=F"):
             return False, "Unsupported symbol"
 
         try:
@@ -103,8 +99,9 @@ class MarketScanner:
 
         for symbol in self.global_universe:
             clean_symbol = symbol.upper().strip()
-            if "-" in clean_symbol and "/" not in clean_symbol and ("USD" in clean_symbol or "USDT" in clean_symbol):
-                clean_symbol = clean_symbol.replace("-", "/")
+            if "/" in clean_symbol:
+                self.logger.info(f"Skipping {clean_symbol}: Unsupported symbol")
+                continue
 
             open_status, session_msg = MarketScanner.is_session_open(clean_symbol, now_utc)
             if not open_status:
@@ -122,24 +119,14 @@ class MarketScanner:
 
                 self.logger.info(f"Analyzing {clean_symbol} | Venue Status: {session_msg}")
 
-                is_crypto = "/" in clean_symbol
-                if is_crypto:
-                    bar_request = CryptoBarsRequest(
-                        symbol_or_symbols=clean_symbol,
-                        timeframe=TimeFrame(5, TimeFrameUnit.Minute),
-                        start=start_dt,
-                        end=end_dt
-                    )
-                    bars_response = self.crypto_client.get_crypto_bars(bar_request)
-                else:
-                    bar_request = StockBarsRequest(
-                        symbol_or_symbols=clean_symbol,
-                        timeframe=TimeFrame(5, TimeFrameUnit.Minute),
-                        start=start_dt,
-                        end=end_dt,
-                        feed=self.data_feed,
-                    )
-                    bars_response = self.stock_client.get_stock_bars(bar_request)
+                bar_request = StockBarsRequest(
+                    symbol_or_symbols=clean_symbol,
+                    timeframe=TimeFrame(5, TimeFrameUnit.Minute),
+                    start=start_dt,
+                    end=end_dt,
+                    feed=self.data_feed,
+                )
+                bars_response = self.stock_client.get_stock_bars(bar_request)
 
                 symbol_bars = bars_response.data.get(clean_symbol, []) if hasattr(bars_response, 'data') else []
 
@@ -201,7 +188,7 @@ class MarketScanner:
                 analyzed_candidates.append((clean_symbol, signal.confidence, signal.side, signal.reason, signal.entry_price, signal.stop_price, signal.target_price))
                 dashboard_stocks.append({
                     "symbol": clean_symbol,
-                    "market": "Global/US/Crypto",
+                    "market": "Global/US",
                     "current_price": signal.entry_price,
                     "score": signal.confidence,
                 })
@@ -312,14 +299,12 @@ class LivePortfolioManager:
                 continue
             if bar_time is not None and processed_signals is not None and (norm_sym, bar_time) in processed_signals:
                 continue
+            if "/" in sym:
+                self.logger.info(f"Skipping {sym}: unsupported slash symbol")
+                continue
 
             if sc >= settings.min_candidate_score and sym not in locked_symbols and side_val is not None:
                 try:
-                    is_crypto = "/" in sym
-                    if is_crypto and side_val is Side.SELL:
-                        self.logger.info(f"Skipping {sym}: crypto shorting is not supported")
-                        continue
-
                     if side_val is Side.BUY:
                         decision = risk_engine.size_long(
                             available_capital=account_equity,
@@ -343,17 +328,10 @@ class LivePortfolioManager:
                         self.logger.info(f"Skipping {sym}: RiskEngine rejected trade ({decision.reason})")
                         continue
 
-                    qty_val = decision.quantity
-                    if not is_crypto:
-                        qty = int(qty_val)
-                        if qty < 1:
-                            self.logger.info(f"Skipping {sym}: whole share quantity ({qty}) < 1")
-                            continue
-                    else:
-                        qty = round(qty_val, 4)
-                        if qty <= 0:
-                            self.logger.info(f"Skipping {sym}: fractional quantity ({qty}) <= 0")
-                            continue
+                    qty = int(decision.quantity)
+                    if qty < 1:
+                        self.logger.info(f"Skipping {sym}: whole share quantity ({qty}) < 1")
+                        continue
 
                     alpaca_side = OrderSide.BUY if side_val is Side.BUY else OrderSide.SELL
                     order_req = MarketOrderRequest(
@@ -395,7 +373,6 @@ class LiveMarketBot:
         try:
             self.trading_client = TradingClient(api_key=api_key or "mock_key", secret_key=secret_key or "mock_secret", paper=True)
             self.stock_client = StockHistoricalDataClient(api_key=api_key or "mock_key", secret_key=secret_key or "mock_secret")
-            self.crypto_client = CryptoHistoricalDataClient(api_key=api_key or "mock_key", secret_key=secret_key or "mock_secret")
         except Exception as exc:
             self.logger.error(f"Critical initialization error: {exc}")
             sys.exit(1)
@@ -406,18 +383,15 @@ class LiveMarketBot:
         self.global_universe = [
             "AAPL", "MSFT", "NVDA", "TSLA", "AMZN", "GOOGL", "META", "AMD", "NFLX", "INTC",
             "SPY", "QQQ", "IWM", "XLF", "XLE", "XLK", "ARKK", "JPM", "BAC", "DIS",
-            "BTC/USD", "ETH/USD", "SOL/USD", "AVAX/USD",
             "GLD", "SLV", "USO", "UNG"
         ]
-        if not self.settings.enable_crypto:
-            self.global_universe = [sym for sym in self.global_universe if "/" not in sym]
 
         feed_val = self.settings.alpaca_data_feed.strip().lower()
         data_feed_enum = DataFeed.SIP if feed_val == "sip" else DataFeed.IEX
         if data_feed_enum == DataFeed.IEX:
             self.logger.warning("IEX feed carries only a fraction of market volume; relative volume confirmation is unreliable.")
 
-        self.scanner = MarketScanner(self.global_universe, self.stock_client, self.crypto_client, self.logger, data_feed=data_feed_enum)
+        self.scanner = MarketScanner(self.global_universe, self.stock_client, self.logger, data_feed=data_feed_enum)
         self.kill_switch = KillSwitch(
             max_consecutive_errors=self.settings.max_consecutive_errors,
             max_daily_loss_pct=self.settings.max_daily_loss_pct,
@@ -496,10 +470,6 @@ class LiveMarketBot:
                 evaluated += 1
 
         analyzed_candidates, dashboard_stocks = self.scanner.scan_universe(now_utc, locked_symbols_raw, self.strategy)
-        if self.scanner.last_scan_attempts > 0 and self.scanner.last_scan_errors == self.scanner.last_scan_attempts:
-            raise RuntimeError("all symbol analyses failed")
-        if self.scanner.last_scan_attempts > 0 and self.scanner.last_scan_errors == self.scanner.last_scan_attempts:
-            raise RuntimeError("all symbol analyses failed")
         if self.scanner.last_scan_attempts > 0 and self.scanner.last_scan_errors == self.scanner.last_scan_attempts:
             raise RuntimeError("all symbol analyses failed")
         signals = len(analyzed_candidates)

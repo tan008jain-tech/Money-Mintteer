@@ -196,7 +196,7 @@ def test_market_scanner_with_fake_strategy_signal(monkeypatch: pytest.MonkeyPatc
             return object()
 
     monkeypatch.setattr(MarketScanner, "is_session_open", lambda sym, now: (True, "Open"))
-    scanner = MarketScanner(["AAPL"], FakeStockClient(), FakeStockClient(), logging.getLogger("test"))
+    scanner = MarketScanner(["AAPL"], FakeStockClient(), logging.getLogger("test"))
     now_utc = datetime(2026, 10, 18, 10, 10, 0, tzinfo=timezone.utc)
     analyzed, _ = scanner.scan_universe(now_utc, set(), FakeStrategyWithSignal())
 
@@ -260,7 +260,7 @@ def test_market_scanner_with_no_signal(monkeypatch: pytest.MonkeyPatch) -> None:
             return object()
 
     monkeypatch.setattr(MarketScanner, "is_session_open", lambda sym, now: (True, "Open"))
-    scanner = MarketScanner(["AAPL"], FakeStockClient(), FakeStockClient(), logging.getLogger("test"))
+    scanner = MarketScanner(["AAPL"], FakeStockClient(), logging.getLogger("test"))
     now_utc = datetime(2026, 10, 18, 10, 10, 0, tzinfo=timezone.utc)
     analyzed, _ = scanner.scan_universe(now_utc, set(), FakeStrategyNoSignal())
 
@@ -329,7 +329,7 @@ def test_scan_universe_rejects_stale_bars(monkeypatch: pytest.MonkeyPatch, caplo
             )
 
     monkeypatch.setattr(MarketScanner, "is_session_open", lambda sym, now: (True, "Open"))
-    scanner = MarketScanner(["AAPL"], FakeStockClient(), FakeStockClient(), logging.getLogger("test"))
+    scanner = MarketScanner(["AAPL"], FakeStockClient(), logging.getLogger("test"))
     now_utc = datetime(2026, 10, 18, 10, 10, 0, tzinfo=timezone.utc)
 
     with caplog.at_level(logging.WARNING):
@@ -414,7 +414,7 @@ def test_run_cycle_counts_and_single_scan(monkeypatch: pytest.MonkeyPatch) -> No
     bot.global_universe = ["AAPL"]
     bot.trading_client = FakeTradingClient()
     bot.portfolio_manager = LivePortfolioManager(bot.trading_client, bot.logger)
-    bot.scanner = MarketScanner(bot.global_universe, FakeStockClient(), FakeStockClient(), bot.logger)
+    bot.scanner = MarketScanner(bot.global_universe, FakeStockClient(), bot.logger)
     bot.strategy = FakeStrategy()
 
     scan_calls = 0
@@ -517,7 +517,7 @@ def test_symbol_with_open_order_does_not_produce_order(monkeypatch: pytest.Monke
     bot.global_universe = ["AAPL"]
     bot.trading_client = FakeTradingClient()
     bot.portfolio_manager = LivePortfolioManager(bot.trading_client, bot.logger)
-    bot.scanner = MarketScanner(bot.global_universe, FakeStockClient(), FakeStockClient(), bot.logger)
+    bot.scanner = MarketScanner(bot.global_universe, FakeStockClient(), bot.logger)
     bot.strategy = FakeStrategy()
 
     monkeypatch.setattr(MarketScanner, "is_session_open", lambda sym, now: (True, "Open"))
@@ -528,7 +528,7 @@ def test_symbol_with_open_order_does_not_produce_order(monkeypatch: pytest.Monke
     assert len(bot.trading_client.submitted_orders) == 0
 
 
-def test_crypto_slash_blocked_by_normalized_position(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_equity_position_blocks_signal(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RISK_PER_TRADE_PCT", "0.5")
     monkeypatch.setenv("MAX_POSITION_PCT", "20")
     monkeypatch.setenv("MAX_PORTFOLIO_RISK_PCT", "2")
@@ -539,11 +539,11 @@ def test_crypto_slash_blocked_by_normalized_position(monkeypatch: pytest.MonkeyP
         buying_power = "200000"
 
     class FakePosition:
-        symbol = "BTCUSD"
-        qty = "1"
-        avg_entry_price = "50000"
-        current_price = "51000"
-        unrealized_pl = "1000"
+        symbol = "AAPL"
+        qty = "10"
+        avg_entry_price = "150"
+        current_price = "155"
+        unrealized_pl = "50"
 
     class FakeTradingClient:
         def __init__(self) -> None:
@@ -577,16 +577,12 @@ def test_crypto_slash_blocked_by_normalized_position(monkeypatch: pytest.MonkeyP
 
     class FakeStockClient:
         def get_stock_bars(self, req):
-            return FakeBarsResponse({})
-
-    class FakeCryptoClient:
-        def get_crypto_bars(self, req):
             end_dt = getattr(req, 'end', datetime.now(timezone.utc))
             minute = (end_dt.minute // 5) * 5
             bar_time = end_dt.replace(minute=minute, second=0, microsecond=0)
             expected_last_bar_start = bar_time - timedelta(minutes=5)
-            bars = [FakeBar(expected_last_bar_start - timedelta(minutes=5 * i), 50000, 51000, 49000, 50000, 100) for i in range(50, 0, -1)]
-            bars.append(FakeBar(expected_last_bar_start, 50000, 51000, 49000, 50000, 100))
+            bars = [FakeBar(expected_last_bar_start - timedelta(minutes=5 * i), 150, 155, 149, 150, 1000) for i in range(50, 0, -1)]
+            bars.append(FakeBar(expected_last_bar_start, 150, 155, 149, 150, 1000))
             return FakeBarsResponse({req.symbol_or_symbols: bars})
 
     class FakeStrategy:
@@ -598,29 +594,33 @@ def test_crypto_slash_blocked_by_normalized_position(monkeypatch: pytest.MonkeyP
 
         def signal(self, snapshot):
             return TradeSignal(
-                symbol="BTC/USD",
+                symbol="AAPL",
                 side=Side.BUY,
-                entry_price=50000.0,
-                stop_price=49000.0,
-                target_price=53000.0,
+                entry_price=150.0,
+                stop_price=145.0,
+                target_price=160.0,
                 confidence=0.9,
                 timestamp=snapshot.as_of,
                 reason="signal",
             )
 
     bot = LiveMarketBot()
-    bot.global_universe = ["BTC/USD"]
+    bot.global_universe = ["AAPL"]
     bot.trading_client = FakeTradingClient()
     bot.portfolio_manager = LivePortfolioManager(bot.trading_client, bot.logger)
-    bot.scanner = MarketScanner(bot.global_universe, FakeStockClient(), FakeCryptoClient(), bot.logger)
+    bot.scanner = MarketScanner(bot.global_universe, FakeStockClient(), bot.logger)
     bot.strategy = FakeStrategy()
 
-    monkeypatch.setattr(MarketScanner, "is_session_open", lambda sym, now: (True, "Crypto 24/7"))
+    monkeypatch.setattr(MarketScanner, "is_session_open", lambda sym, now: (True, "Open"))
     now_utc = datetime(2026, 10, 18, 10, 10, 0, tzinfo=timezone.utc)
     metrics = bot.run_cycle(now_utc)
 
     assert metrics["orders_sent"] == 0
     assert len(bot.trading_client.submitted_orders) == 0
+
+
+def test_normalize_symbol_brk() -> None:
+    assert normalize_symbol("BRK-B") == normalize_symbol("BRKB")
 
 
 def test_session_open_rules() -> None:
@@ -650,7 +650,7 @@ def test_session_open_rules() -> None:
     dt_sat = datetime(2026, 10, 17, 15, 0, tzinfo=timezone.utc)
     assert MarketScanner.is_session_open("AAPL", dt_sat)[0] is False
     assert MarketScanner.is_session_open("SOLV", dt_sat)[0] is False
-    assert MarketScanner.is_session_open("BTC/USD", dt_sat)[0] is True
+    assert MarketScanner.is_session_open("BTC/USD", dt_sat) == (False, "Unsupported symbol")
 
     # GLD, SLV, USO, UNG equity hours
     dt_gld_closed = datetime(2026, 10, 16, 8, 0, tzinfo=timezone.utc)
@@ -661,20 +661,11 @@ def test_session_open_rules() -> None:
 
 def test_enable_crypto_setting_and_bot_universe(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("ENABLE_CRYPTO", raising=False)
-    s = Settings()
-    assert s.enable_crypto is False
+    assert not hasattr(Settings(), "enable_crypto")
 
     monkeypatch.setenv("ENABLE_CRYPTO", "true")
-    s2 = Settings()
-    assert s2.enable_crypto is True
-
-    monkeypatch.delenv("ENABLE_CRYPTO", raising=False)
-    bot_default = LiveMarketBot()
-    assert not any("/" in sym for sym in bot_default.global_universe)
-
-    monkeypatch.setenv("ENABLE_CRYPTO", "true")
-    bot_crypto = LiveMarketBot()
-    assert any("/" in sym for sym in bot_crypto.global_universe)
+    bot = LiveMarketBot()
+    assert not any("/" in sym for sym in bot.global_universe)
 
 
 def test_submit_bracket_orders_crypto_short_vs_long(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -694,16 +685,17 @@ def test_submit_bracket_orders_crypto_short_vs_long(monkeypatch: pytest.MonkeyPa
     fake_client = FakeTradingClient()
     manager = LivePortfolioManager(fake_client, logging.getLogger("test"))
 
-    # Crypto SELL should be skipped
+    # Crypto SELL should produce no order and last_submit_failures stays 0
     top_sell = [("BTC/USD", 0.9, Side.SELL, "r", 50000.0, 51000.0, 45000.0)]
     manager.submit_bracket_orders(top_sell, set(), 100_000.0, settings)
     assert len(fake_client.submitted_orders) == 0
+    assert manager.last_submit_failures == 0
 
-    # Crypto BUY should be submitted
+    # Crypto BUY should produce no order and last_submit_failures stays 0
     top_buy = [("BTC/USD", 0.9, Side.BUY, "r", 50000.0, 49000.0, 55000.0)]
     manager.submit_bracket_orders(top_buy, set(), 100_000.0, settings)
-    assert len(fake_client.submitted_orders) == 1
-    assert fake_client.submitted_orders[0].side == OrderSide.BUY
+    assert len(fake_client.submitted_orders) == 0
+    assert manager.last_submit_failures == 0
 
 
 def test_bot_run_normal_sleep_scheduling(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -759,7 +751,7 @@ def test_history_window_and_data_feed_requests(monkeypatch: pytest.MonkeyPatch) 
             return type("Resp", (), {"data": {}})()
 
     stock_client = RecordedStockClient()
-    scanner = MarketScanner(["AAPL"], stock_client, stock_client, logging.getLogger("test"), data_feed=DataFeed.IEX)
+    scanner = MarketScanner(["AAPL"], stock_client, logging.getLogger("test"), data_feed=DataFeed.IEX)
     now_utc = datetime(2026, 10, 18, 10, 10, 0, tzinfo=timezone.utc)
     monkeypatch.setattr(MarketScanner, "is_session_open", lambda sym, now: (True, "Open"))
     scanner.scan_universe(now_utc, set(), LiquiditySweepReversalStrategy(StrategyConfig()))
@@ -770,7 +762,7 @@ def test_history_window_and_data_feed_requests(monkeypatch: pytest.MonkeyPatch) 
     assert req.feed is DataFeed.IEX
 
     stock_client_sip = RecordedStockClient()
-    scanner_sip = MarketScanner(["AAPL"], stock_client_sip, stock_client_sip, logging.getLogger("test"), data_feed=DataFeed.SIP)
+    scanner_sip = MarketScanner(["AAPL"], stock_client_sip, logging.getLogger("test"), data_feed=DataFeed.SIP)
     scanner_sip.scan_universe(now_utc, set(), LiquiditySweepReversalStrategy(StrategyConfig()))
     assert stock_client_sip.requests[0].feed is DataFeed.SIP
 
@@ -829,7 +821,7 @@ def test_still_forming_bar_missing_previous_skipped_stale(monkeypatch: pytest.Mo
             return FakeBarsResponse({req.symbol_or_symbols: bars})
 
     monkeypatch.setattr(MarketScanner, "is_session_open", lambda sym, now: (True, "Open"))
-    scanner = MarketScanner(["AAPL"], FakeStockClient(), FakeStockClient(), logging.getLogger("test"))
+    scanner = MarketScanner(["AAPL"], FakeStockClient(), logging.getLogger("test"))
     now_utc = datetime(2026, 10, 18, 10, 10, 0, tzinfo=timezone.utc)
 
     with caplog.at_level(logging.WARNING):
@@ -888,7 +880,7 @@ def test_fresh_bar_with_previous_bar_succeeds(monkeypatch: pytest.MonkeyPatch) -
             )
 
     monkeypatch.setattr(MarketScanner, "is_session_open", lambda sym, now: (True, "Open"))
-    scanner = MarketScanner(["AAPL"], FakeStockClient(), FakeStockClient(), logging.getLogger("test"))
+    scanner = MarketScanner(["AAPL"], FakeStockClient(), logging.getLogger("test"))
     now_utc = datetime(2026, 10, 18, 10, 10, 0, tzinfo=timezone.utc)
 
     analyzed, dashboard = scanner.scan_universe(now_utc, set(), FakeStrategyWithSignal())
@@ -1023,8 +1015,7 @@ def test_run_once_consecutive_scan_failures(monkeypatch: pytest.MonkeyPatch) -> 
             raise RuntimeError("bar request failed")
 
     bot.stock_client = RaisingStockClient()
-    bot.crypto_client = RaisingStockClient()
-    scanner = MarketScanner(bot.global_universe, bot.stock_client, bot.crypto_client, bot.logger)
+    scanner = MarketScanner(bot.global_universe, bot.stock_client, bot.logger)
     bot.scanner = scanner
 
     monkeypatch.setattr(MarketScanner, "is_session_open", lambda sym, now: (True, "Open"))
@@ -1109,8 +1100,7 @@ def test_scan_failure_detection_survives_earlier_success(monkeypatch: pytest.Mon
             return None
 
     bot.stock_client = RaisingStockClient()
-    bot.crypto_client = RaisingStockClient()
-    scanner = MarketScanner(bot.global_universe, bot.stock_client, bot.crypto_client, bot.logger)
+    scanner = MarketScanner(bot.global_universe, bot.stock_client, bot.logger)
     bot.scanner = scanner
     bot.strategy = FakeStrategyNoSignal()
 
@@ -1123,9 +1113,7 @@ def test_scan_failure_detection_survives_earlier_success(monkeypatch: pytest.Mon
 
     # Cycle 2: healthy client
     bot.stock_client = HealthyStockClient()
-    bot.crypto_client = HealthyStockClient()
     scanner.stock_client = bot.stock_client
-    scanner.crypto_client = bot.crypto_client
 
     res2 = bot.run_once(now_utc)
     assert "error" not in res2
@@ -1134,9 +1122,7 @@ def test_scan_failure_detection_survives_earlier_success(monkeypatch: pytest.Mon
 
     # Cycle 3: failing client back in
     bot.stock_client = RaisingStockClient()
-    bot.crypto_client = RaisingStockClient()
     scanner.stock_client = bot.stock_client
-    scanner.crypto_client = bot.crypto_client
 
     res3 = bot.run_once(now_utc)
     assert res3.get("error")
@@ -1194,8 +1180,7 @@ def test_run_once_partial_scan_failure_no_error_six_cycles(monkeypatch: pytest.M
             return FakeBarsResponse({sym: bars})
 
     bot.stock_client = MixedStockClient()
-    bot.crypto_client = MixedStockClient()
-    bot.scanner = MarketScanner(bot.global_universe, bot.stock_client, bot.crypto_client, bot.logger)
+    bot.scanner = MarketScanner(bot.global_universe, bot.stock_client, bot.logger)
 
     class FakeStrategyNoSignal:
         def analyze(self, snapshot):
@@ -1267,8 +1252,7 @@ def test_run_once_partial_scan_failure_not_cycle_error(monkeypatch: pytest.Monke
             return FakeBarsResponse({sym: bars})
 
     bot.stock_client = MixedStockClient()
-    bot.crypto_client = MixedStockClient()
-    bot.scanner = MarketScanner(bot.global_universe, bot.stock_client, bot.crypto_client, bot.logger)
+    bot.scanner = MarketScanner(bot.global_universe, bot.stock_client, bot.logger)
 
     monkeypatch.setattr(MarketScanner, "is_session_open", lambda sym, now: (True, "Open"))
     now_utc = datetime(2026, 10, 18, 10, 10, 0, tzinfo=timezone.utc)
@@ -1342,7 +1326,7 @@ def test_consecutive_submission_failures(monkeypatch: pytest.MonkeyPatch) -> Non
     bot.trading_client = FailingTradingClient()
     bot.portfolio_manager = LivePortfolioManager(bot.trading_client, bot.logger)
     bot.global_universe = ["AAPL"]
-    bot.scanner = MarketScanner(bot.global_universe, bot.stock_client, bot.crypto_client, bot.logger)
+    bot.scanner = MarketScanner(bot.global_universe, bot.stock_client, bot.logger)
 
     class FakeStrategy:
         def analyze(self, snapshot):
@@ -1389,7 +1373,7 @@ def test_consecutive_submission_failures(monkeypatch: pytest.MonkeyPatch) -> Non
             return FakeBarsResponse({req.symbol_or_symbols: bars})
 
     bot.stock_client = FakeStockClient()
-    bot.scanner = MarketScanner(bot.global_universe, bot.stock_client, bot.crypto_client, bot.logger)
+    bot.scanner = MarketScanner(bot.global_universe, bot.stock_client, bot.logger)
 
     now_utc = datetime(2026, 10, 18, 10, 10, 0, tzinfo=timezone.utc)
 

@@ -38,11 +38,7 @@ def _env_percent(name: str, default: float) -> float:
     return _env_float(name, default * 100.0) / 100.0
 
 
-def _env_bool(name: str, default: bool) -> bool:
-    raw = os.getenv(name)
-    if raw is None or not raw.strip():
-        return default
-    return raw.strip().lower() in ("1", "true", "yes", "on")
+
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,9 +73,7 @@ class Settings:
     paper_commission_bps: float = field(
         default_factory=lambda: _env_float("PAPER_COMMISSION_BPS", 2.0)
     )
-    enable_crypto: bool = field(
-        default_factory=lambda: _env_bool("ENABLE_CRYPTO", False)
-    )
+
     alpaca_data_feed: str = field(
         default_factory=lambda: _env_text("ALPACA_DATA_FEED", "iex")
     )
