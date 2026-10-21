@@ -83,6 +83,15 @@ class Settings:
     max_consecutive_errors: int = field(
         default_factory=lambda: _env_int("MAX_CONSECUTIVE_ERRORS", 5)
     )
+    flatten_minutes_before_close: int = field(
+        default_factory=lambda: _env_int("FLATTEN_MINUTES_BEFORE_CLOSE", 5)
+    )
+    no_new_entries_minutes_before_close: int = field(
+        default_factory=lambda: _env_int("NO_NEW_ENTRIES_MINUTES_BEFORE_CLOSE", 30)
+    )
+    max_wait_for_open_minutes: int = field(
+        default_factory=lambda: _env_int("MAX_WAIT_FOR_OPEN_MINUTES", 45)
+    )
 
     def __post_init__(self) -> None:
         feed_lower = self.alpaca_data_feed.strip().lower()
@@ -102,3 +111,9 @@ class Settings:
             raise ValueError("per-trade risk must be positive and <= portfolio risk")
         if not 0 < self.max_position_pct <= 1:
             raise ValueError("max position percentage must be in (0, 1]")
+        if self.flatten_minutes_before_close < 1:
+            raise ValueError("flatten_minutes_before_close must be >= 1")
+        if self.no_new_entries_minutes_before_close <= self.flatten_minutes_before_close:
+            raise ValueError("no_new_entries_minutes_before_close must be > flatten_minutes_before_close")
+        if self.max_wait_for_open_minutes < 0:
+            raise ValueError("max_wait_for_open_minutes must be >= 0")

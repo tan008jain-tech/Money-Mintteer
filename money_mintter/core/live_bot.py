@@ -21,6 +21,7 @@ from alpaca.data.enums import DataFeed
 from money_mintter.config import Settings
 from money_mintter.core.killswitch import KillSwitch
 from money_mintter.core.risk import RiskEngine
+from money_mintter.core.session_lock import SessionLock
 from money_mintter.domain import Side
 from money_mintter.strategy import Candle, LiquiditySweepReversalStrategy, MultiTimeframeSeries, StrategyConfig, Timeframe
 
@@ -355,6 +356,30 @@ class LivePortfolioManager:
 
         return orders_sent
 
+    def flatten_all(self, sleep_fn=time.sleep, retries: int = 3, retry_delay: int = 5) -> list[str]:
+        try:
+            self.trading_client.cancel_orders()
+        except Exception as exc:
+            self.logger.error(f"Error cancelling orders during flatten_all: {exc}")
+
+        try:
+            self.trading_client.close_all_positions(cancel_orders=True)
+        except Exception as exc:
+            self.logger.error(f"Error closing all positions during flatten_all: {exc}")
+
+        remaining = []
+        for attempt in range(retries):
+            try:
+                _, _, _, open_pos, _, _ = self.fetch_account_and_positions()
+                remaining = [p["symbol"] for p in open_pos]
+                if not remaining:
+                    break
+            except Exception as exc:
+                self.logger.error(f"Error fetching open positions during flatten_all verification attempt {attempt+1}: {exc}")
+            if attempt < retries - 1:
+                sleep_fn(retry_delay)
+        return remaining
+
 
 class LiveMarketBot:
     """Master Orchestrator class managing the trading lifecycle, dashboard server, and execution loops."""
@@ -532,3 +557,164 @@ class LiveMarketBot:
 
         except KeyboardInterrupt:
             print("\nMaster Blueprint Trading Engine stopped gracefully.")
+
+    def run_session(self, now_fn=None, sleep_fn=None) -> dict:
+        if now_fn is None:
+            now_fn = lambda: datetime.now(timezone.utc)
+        if sleep_fn is None:
+            sleep_fn = time.sleep
+
+        self.logger.info("==================================================")
+        self.logger.info(" PAPER TRADING SESSION ORCHESTRATION ACTIVE       ")
+        self.logger.info("==================================================")
+
+        try:
+            clock = self.trading_client.get_clock()
+        except Exception as exc:
+            self.logger.error(f"Failed to get market clock: {exc}")
+            return {"status": "error", "cycles": 0, "orders_sent": 0, "errors": 1, "remaining": []}
+
+        is_open = getattr(clock, 'is_open', False)
+        next_open = getattr(clock, 'next_open', None)
+        next_close = getattr(clock, 'next_close', None)
+
+        now = now_fn()
+        if not is_open:
+            if next_open is not None:
+                if next_open.tzinfo is None:
+                    next_open = next_open.replace(tzinfo=timezone.utc)
+                if now.tzinfo is None:
+                    now = now.replace(tzinfo=timezone.utc)
+                wait_mins = (next_open - now).total_seconds() / 60.0
+                if wait_mins > self.settings.max_wait_for_open_minutes:
+                    self.logger.info(f"Market closed and next_open ({next_open.isoformat()}) is {wait_mins:.1f} mins away (> max_wait={self.settings.max_wait_for_open_minutes} mins). Skipping session.")
+                    return {"status": "skipped_market_closed", "cycles": 0, "orders_sent": 0, "errors": 0, "remaining": []}
+                else:
+                    self.logger.info(f"Market closed. Waiting until next open at {next_open.isoformat()} ({wait_mins:.1f} mins)...")
+                    _sleep_until(next_open, now_fn, sleep_fn)
+                    try:
+                        clock = self.trading_client.get_clock()
+                        is_open = getattr(clock, 'is_open', False)
+                        next_open = getattr(clock, 'next_open', next_open)
+                        next_close = getattr(clock, 'next_close', next_close)
+                    except Exception as exc:
+                        self.logger.error(f"Failed to get clock after waiting for open: {exc}")
+
+                    if not getattr(clock, 'is_open', False):
+                        self.logger.info("Market still not open after waiting. Skipping session.")
+                        return {"status": "skipped_market_closed", "cycles": 0, "orders_sent": 0, "errors": 0, "remaining": []}
+            else:
+                return {"status": "skipped_market_closed", "cycles": 0, "orders_sent": 0, "errors": 0, "remaining": []}
+
+        if next_close is not None and next_close.tzinfo is None:
+            next_close = next_close.replace(tzinfo=timezone.utc)
+
+        close_time = next_close
+        flatten_mins = self.settings.flatten_minutes_before_close
+        no_new_entries_mins = self.settings.no_new_entries_minutes_before_close
+
+        cycles = 0
+        orders_sent_total = 0
+        errors = 0
+        last_known_close = close_time
+
+        while True:
+            now = now_fn()
+
+            try:
+                clk = self.trading_client.get_clock()
+                if hasattr(clk, 'next_close') and clk.next_close is not None:
+                    nc = clk.next_close
+                    if nc.tzinfo is None:
+                        nc = nc.replace(tzinfo=timezone.utc)
+                    last_known_close = nc
+            except Exception as exc:
+                self.logger.warning(f"Failed to re-fetch clock, using last known close {last_known_close}: {exc}")
+
+            close_time = last_known_close
+            flatten_at = close_time - timedelta(minutes=flatten_mins)
+            cutoff = close_time - timedelta(minutes=no_new_entries_mins)
+
+            if self.kill_switch.tripped:
+                self.logger.critical(f"Kill switch tripped mid-session: {self.kill_switch.reason}")
+                remaining = self.portfolio_manager.flatten_all(sleep_fn)
+                self._log_session_summary("halted", cycles, orders_sent_total, errors)
+                return {"status": "halted", "cycles": cycles, "orders_sent": orders_sent_total, "errors": errors, "remaining": remaining}
+
+            if now >= flatten_at:
+                break
+
+            if now < cutoff:
+                res = self.run_once(now)
+                cycles += 1
+                orders_sent_total += res.get("orders_sent", 0)
+                if res.get("error"):
+                    errors += 1
+                    sleep_fn(10)
+                    continue
+
+            nb = next_bar_boundary(now)
+            target = min(nb, flatten_at)
+            if target > now:
+                _sleep_until(target, now_fn, sleep_fn)
+
+        remaining = self.portfolio_manager.flatten_all(sleep_fn)
+        status = "completed" if not remaining else "flatten_incomplete"
+        self._log_session_summary(status, cycles, orders_sent_total, errors)
+        return {"status": status, "cycles": cycles, "orders_sent": orders_sent_total, "errors": errors, "remaining": remaining}
+
+    def _log_session_summary(self, status: str, cycles: int, orders_sent: int, errors: int) -> None:
+        equity = self.latest_state.get("equity", 100000.0)
+        last_eq = self.portfolio_manager.last_equity
+        change_str = ""
+        if last_eq is not None and last_eq > 0:
+            diff = equity - last_eq
+            pct = (diff / last_eq) * 100.0
+            change_str = f", equity=${equity:.2f}, change=${diff:+.2f} ({pct:+.2f}%) vs last_equity=${last_eq:.2f}"
+        else:
+            change_str = f", equity=${equity:.2f}"
+        self.logger.info(f"[Session Summary] status={status}, cycles={cycles}, orders_sent={orders_sent}, errors={errors}{change_str}")
+
+
+def _sleep_until(target_dt: datetime, now_fn, sleep_fn) -> None:
+    while True:
+        now = now_fn()
+        if now.tzinfo is None and target_dt.tzinfo is not None:
+            now = now.replace(tzinfo=timezone.utc)
+        elif now.tzinfo is not None and target_dt.tzinfo is None:
+            target_dt = target_dt.replace(tzinfo=timezone.utc)
+        diff = (target_dt - now).total_seconds()
+        if diff <= 0:
+            break
+        chunk = min(60.0, diff)
+        sleep_fn(chunk)
+
+
+def main() -> int:
+    print("==================================================")
+    print(" PAPER TRADING SESSION MODE ACTIVE                ")
+    print("==================================================")
+    lock_path = os.path.join(os.getenv("MM_LOG_DIR", "logs"), "mm_session.lock")
+    lock = SessionLock(lock_path)
+    if not lock.acquire():
+        print(f"Session lock acquisition failed (lock file exists and is fresh): {lock_path}")
+        return 4
+
+    bot = LiveMarketBot()
+    try:
+        res = bot.run_session()
+        status = res.get("status")
+        if status in ("completed", "skipped_market_closed"):
+            return 0
+        elif status == "halted":
+            return 2
+        elif status == "flatten_incomplete":
+            return 3
+        else:
+            return 3
+    finally:
+        lock.release()
+
+
+if __name__ == "__main__":
+    sys.exit(main())
