@@ -93,6 +93,8 @@ class MarketScanner:
         return cum_pv / cum_v if cum_v > 0 else candles[-1].close
 
     def scan_universe(self, now_utc: datetime, locked_symbols: set[str], strategy: LiquiditySweepReversalStrategy) -> tuple[list[tuple[str, float, Side | None, str, float, float, float]], list[dict[str, Any]]]:
+        self.last_scan_attempts = 0
+        self.last_scan_errors = 0
         analyzed_candidates: list[tuple[str, float, Side | None, str, float, float, float]] = []
         dashboard_stocks = []
         locked_normalized = {normalize_symbol(s) for s in locked_symbols}
@@ -113,6 +115,7 @@ class MarketScanner:
                 self.logger.info(f"Retaining locked active trade slot for {clean_symbol} (Module 3.2 Slot Freezing)")
                 continue
 
+            self.last_scan_attempts += 1
             try:
                 end_dt = now_utc
                 start_dt = end_dt - timedelta(days=HISTORY_DAYS)
@@ -204,6 +207,7 @@ class MarketScanner:
                 })
 
             except Exception as ex:
+                self.last_scan_errors += 1
                 self.logger.error(f"CRITICAL: Data stream error for ticker {clean_symbol}: {ex}")
 
         return analyzed_candidates, dashboard_stocks
@@ -492,6 +496,10 @@ class LiveMarketBot:
                 evaluated += 1
 
         analyzed_candidates, dashboard_stocks = self.scanner.scan_universe(now_utc, locked_symbols_raw, self.strategy)
+        if self.scanner.last_scan_attempts > 0 and self.scanner.last_scan_errors == self.scanner.last_scan_attempts:
+            raise RuntimeError("all symbol analyses failed")
+        if self.scanner.last_scan_attempts > 0 and self.scanner.last_scan_errors == self.scanner.last_scan_attempts:
+            raise RuntimeError("all symbol analyses failed")
         if self.scanner.last_scan_attempts > 0 and self.scanner.last_scan_errors == self.scanner.last_scan_attempts:
             raise RuntimeError("all symbol analyses failed")
         signals = len(analyzed_candidates)

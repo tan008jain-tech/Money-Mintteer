@@ -995,6 +995,63 @@ def test_run_once_consecutive_account_failures(monkeypatch: pytest.MonkeyPatch) 
 def test_run_once_consecutive_scan_failures(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MAX_CONSECUTIVE_ERRORS", "5")
     bot = LiveMarketBot()
+    bot.global_universe = ["AAPL", "MSFT"]
+
+    class FakeAccount:
+        cash = "100000"
+        equity = "100000"
+        buying_power = "200000"
+        last_equity = "100000"
+
+    class FakeTradingClient:
+        def __init__(self):
+            self.get_account_calls = 0
+        def get_account(self):
+            self.get_account_calls += 1
+            return FakeAccount()
+        def get_all_positions(self):
+            return []
+        def get_orders(self, req):
+            return []
+
+    trading_client = FakeTradingClient()
+    bot.trading_client = trading_client
+    bot.portfolio_manager = LivePortfolioManager(bot.trading_client, bot.logger)
+
+    class RaisingStockClient:
+        def get_stock_bars(self, req):
+            raise RuntimeError("bar request failed")
+
+    bot.stock_client = RaisingStockClient()
+    bot.crypto_client = RaisingStockClient()
+    scanner = MarketScanner(bot.global_universe, bot.stock_client, bot.crypto_client, bot.logger)
+    bot.scanner = scanner
+
+    monkeypatch.setattr(MarketScanner, "is_session_open", lambda sym, now: (True, "Open"))
+    now_utc = datetime(2026, 10, 18, 10, 10, 0, tzinfo=timezone.utc)
+
+    for i in range(1, 5):
+        res = bot.run_once(now_utc)
+        assert res.get("error")
+        assert not bot.kill_switch.tripped
+        assert scanner.last_scan_attempts == 2
+        assert scanner.last_scan_errors == 2
+
+    res5 = bot.run_once(now_utc)
+    assert res5.get("error")
+    assert bot.kill_switch.tripped
+    assert scanner.last_scan_attempts == 2
+    assert scanner.last_scan_errors == 2
+
+    calls_before = trading_client.get_account_calls
+    res6 = bot.run_once(now_utc)
+    assert res6.get("halted")
+    assert trading_client.get_account_calls == calls_before
+
+
+def test_scan_failure_detection_survives_earlier_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    bot = LiveMarketBot()
+    bot.global_universe = ["AAPL", "MSFT"]
 
     class FakeAccount:
         cash = "100000"
@@ -1012,27 +1069,212 @@ def test_run_once_consecutive_scan_failures(monkeypatch: pytest.MonkeyPatch) -> 
 
     bot.trading_client = FakeTradingClient()
     bot.portfolio_manager = LivePortfolioManager(bot.trading_client, bot.logger)
-    bot.global_universe = ["AAPL"]
-    bot.scanner = MarketScanner(bot.global_universe, bot.stock_client, bot.crypto_client, bot.logger)
 
-    def raising_scan(now_utc, locked, strategy):
-        bot.scanner.last_scan_attempts = 1
-        bot.scanner.last_scan_errors = 1
-        raise RuntimeError("scan error")
+    class RaisingStockClient:
+        def get_stock_bars(self, req):
+            raise RuntimeError("bar request failed")
 
-    monkeypatch.setattr(bot.scanner, "scan_universe", raising_scan)
+    class FakeBar:
+        def __init__(self, ts, o, h, l, c, v):
+            self.timestamp = ts
+            self.open = o
+            self.high = h
+            self.low = l
+            self.close = c
+            self.volume = v
+    class FakeBarsResponse:
+        def __init__(self, data):
+            self.data = data
+
+    class HealthyStockClient:
+        def get_stock_bars(self, req):
+            sym = req.symbol_or_symbols
+            now_utc = getattr(req, 'end', datetime(2026, 10, 18, 10, 10, 0, tzinfo=timezone.utc))
+            if now_utc.tzinfo is None:
+                now_utc = now_utc.replace(tzinfo=timezone.utc)
+            minute = (now_utc.minute // 5) * 5
+            bar_time = now_utc.replace(minute=minute, second=0, microsecond=0)
+            expected_last_bar_start = (bar_time - timedelta(minutes=5)).replace(tzinfo=timezone.utc)
+            bars = [FakeBar((expected_last_bar_start - timedelta(minutes=5 * i)).replace(tzinfo=timezone.utc), 100, 101, 99, 100, 1000) for i in range(50, 0, -1)]
+            bars.append(FakeBar(expected_last_bar_start.replace(tzinfo=timezone.utc), 100, 101, 99, 100, 1000))
+            return FakeBarsResponse({sym: bars})
+
+    class FakeStrategyNoSignal:
+        def analyze(self, snapshot):
+            class Analysis:
+                passed = False
+                reason = "no signal"
+            return Analysis()
+        def signal(self, snapshot):
+            return None
+
+    bot.stock_client = RaisingStockClient()
+    bot.crypto_client = RaisingStockClient()
+    scanner = MarketScanner(bot.global_universe, bot.stock_client, bot.crypto_client, bot.logger)
+    bot.scanner = scanner
+    bot.strategy = FakeStrategyNoSignal()
+
     monkeypatch.setattr(MarketScanner, "is_session_open", lambda sym, now: (True, "Open"))
-
     now_utc = datetime(2026, 10, 18, 10, 10, 0, tzinfo=timezone.utc)
 
-    for _ in range(4):
+    # Cycle 1: failing client
+    res1 = bot.run_once(now_utc)
+    assert res1.get("error")
+
+    # Cycle 2: healthy client
+    bot.stock_client = HealthyStockClient()
+    bot.crypto_client = HealthyStockClient()
+    scanner.stock_client = bot.stock_client
+    scanner.crypto_client = bot.crypto_client
+
+    res2 = bot.run_once(now_utc)
+    assert "error" not in res2
+    assert scanner.last_scan_attempts == 2
+    assert scanner.last_scan_errors == 0
+
+    # Cycle 3: failing client back in
+    bot.stock_client = RaisingStockClient()
+    bot.crypto_client = RaisingStockClient()
+    scanner.stock_client = bot.stock_client
+    scanner.crypto_client = bot.crypto_client
+
+    res3 = bot.run_once(now_utc)
+    assert res3.get("error")
+    assert scanner.last_scan_attempts == 2
+    assert scanner.last_scan_errors == 2
+    assert not bot.kill_switch.tripped
+
+
+def test_run_once_partial_scan_failure_no_error_six_cycles(monkeypatch: pytest.MonkeyPatch) -> None:
+    bot = LiveMarketBot()
+    bot.global_universe = ["AAPL", "MSFT"]
+
+    class FakeAccount:
+        cash = "100000"
+        equity = "100000"
+        buying_power = "200000"
+        last_equity = "100000"
+
+    class FakeTradingClient:
+        def get_account(self):
+            return FakeAccount()
+        def get_all_positions(self):
+            return []
+        def get_orders(self, req):
+            return []
+
+    bot.trading_client = FakeTradingClient()
+    bot.portfolio_manager = LivePortfolioManager(bot.trading_client, bot.logger)
+
+    class FakeBar:
+        def __init__(self, ts, o, h, l, c, v):
+            self.timestamp = ts
+            self.open = o
+            self.high = h
+            self.low = l
+            self.close = c
+            self.volume = v
+    class FakeBarsResponse:
+        def __init__(self, data):
+            self.data = data
+
+    class MixedStockClient:
+        def get_stock_bars(self, req):
+            sym = req.symbol_or_symbols
+            if sym == "AAPL":
+                raise RuntimeError("AAPL failed")
+            now_utc = getattr(req, 'end', datetime(2026, 10, 18, 10, 10, 0, tzinfo=timezone.utc))
+            if now_utc.tzinfo is None:
+                now_utc = now_utc.replace(tzinfo=timezone.utc)
+            minute = (now_utc.minute // 5) * 5
+            bar_time = now_utc.replace(minute=minute, second=0, microsecond=0)
+            expected_last_bar_start = (bar_time - timedelta(minutes=5)).replace(tzinfo=timezone.utc)
+            bars = [FakeBar((expected_last_bar_start - timedelta(minutes=5 * i)).replace(tzinfo=timezone.utc), 100, 101, 99, 100, 1000) for i in range(50, 0, -1)]
+            bars.append(FakeBar(expected_last_bar_start.replace(tzinfo=timezone.utc), 100, 101, 99, 100, 1000))
+            return FakeBarsResponse({sym: bars})
+
+    bot.stock_client = MixedStockClient()
+    bot.crypto_client = MixedStockClient()
+    bot.scanner = MarketScanner(bot.global_universe, bot.stock_client, bot.crypto_client, bot.logger)
+
+    class FakeStrategyNoSignal:
+        def analyze(self, snapshot):
+            class Analysis:
+                passed = False
+                reason = "no signal"
+            return Analysis()
+        def signal(self, snapshot):
+            return None
+
+    bot.strategy = FakeStrategyNoSignal()
+
+    monkeypatch.setattr(MarketScanner, "is_session_open", lambda sym, now: (True, "Open"))
+    now_utc = datetime(2026, 10, 18, 10, 10, 0, tzinfo=timezone.utc)
+
+    for _ in range(6):
         res = bot.run_once(now_utc)
-        assert res.get("error")
+        assert "error" not in res
+        assert res.get("orders_sent") == 0
         assert not bot.kill_switch.tripped
 
-    res5 = bot.run_once(now_utc)
-    assert res5.get("error")
-    assert bot.kill_switch.tripped
+
+def test_run_once_partial_scan_failure_not_cycle_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    bot = LiveMarketBot()
+    bot.global_universe = ["AAPL", "MSFT"]
+
+    class FakeAccount:
+        cash = "100000"
+        equity = "100000"
+        buying_power = "200000"
+        last_equity = "100000"
+
+    class FakeTradingClient:
+        def get_account(self):
+            return FakeAccount()
+        def get_all_positions(self):
+            return []
+        def get_orders(self, req):
+            return []
+
+    bot.trading_client = FakeTradingClient()
+    bot.portfolio_manager = LivePortfolioManager(bot.trading_client, bot.logger)
+
+    class FakeBar:
+        def __init__(self, ts, o, h, l, c, v):
+            self.timestamp = ts
+            self.open = o
+            self.high = h
+            self.low = l
+            self.close = c
+            self.volume = v
+    class FakeBarsResponse:
+        def __init__(self, data):
+            self.data = data
+
+    class MixedStockClient:
+        def get_stock_bars(self, req):
+            sym = req.symbol_or_symbols
+            if sym == "AAPL":
+                raise RuntimeError("AAPL failed")
+            now_utc = getattr(req, 'end', datetime(2026, 10, 18, 10, 10, 0, tzinfo=timezone.utc))
+            if now_utc.tzinfo is None:
+                now_utc = now_utc.replace(tzinfo=timezone.utc)
+            minute = (now_utc.minute // 5) * 5
+            bar_time = now_utc.replace(minute=minute, second=0, microsecond=0)
+            expected_last_bar_start = (bar_time - timedelta(minutes=5)).replace(tzinfo=timezone.utc)
+            bars = [FakeBar((expected_last_bar_start - timedelta(minutes=5 * i)).replace(tzinfo=timezone.utc), 100, 101, 99, 100, 1000) for i in range(50, 0, -1)]
+            bars.append(FakeBar(expected_last_bar_start.replace(tzinfo=timezone.utc), 100, 101, 99, 100, 1000))
+            return FakeBarsResponse({sym: bars})
+
+    bot.stock_client = MixedStockClient()
+    bot.crypto_client = MixedStockClient()
+    bot.scanner = MarketScanner(bot.global_universe, bot.stock_client, bot.crypto_client, bot.logger)
+
+    monkeypatch.setattr(MarketScanner, "is_session_open", lambda sym, now: (True, "Open"))
+    now_utc = datetime(2026, 10, 18, 10, 10, 0, tzinfo=timezone.utc)
+
+    res = bot.run_once(now_utc)
+    assert not res.get("error")
 
 
 def test_failures_success_reset(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1179,6 +1421,52 @@ def test_kill_switch_consecutive_errors() -> None:
     ks.record_error()
     assert ks.tripped
     assert "consecutive errors" in ks.reason
+
+
+def test_submit_bracket_orders_sub_minimum(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RISK_PER_TRADE_PCT", "0.5")
+    monkeypatch.setenv("MAX_POSITION_PCT", "20")
+    monkeypatch.setenv("MAX_PORTFOLIO_RISK_PCT", "2")
+    settings = Settings()
+
+    class FakeTradingClient:
+        def __init__(self) -> None:
+            self.submitted_orders: list[Any] = []
+
+        def submit_order(self, order_req: Any) -> Any:
+            self.submitted_orders.append(order_req)
+            return object()
+
+    fake_client = FakeTradingClient()
+    manager = LivePortfolioManager(fake_client, logging.getLogger("test"))
+
+    top_skip = [("AAPL", 0.9, Side.BUY, "r", 500.0, 400.0, 600.0)]
+    manager.submit_bracket_orders(top_skip, set(), 10_000.0, settings)
+    assert len(fake_client.submitted_orders) == 0
+    assert manager.last_submit_failures == 0
+
+
+def test_submit_bracket_orders_position_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RISK_PER_TRADE_PCT", "0.5")
+    monkeypatch.setenv("MAX_POSITION_PCT", "20")
+    monkeypatch.setenv("MAX_PORTFOLIO_RISK_PCT", "2")
+    settings = Settings()
+
+    class FakeTradingClient:
+        def __init__(self) -> None:
+            self.submitted_orders: list[Any] = []
+
+        def submit_order(self, order_req: Any) -> Any:
+            self.submitted_orders.append(order_req)
+            return object()
+
+    fake_client = FakeTradingClient()
+    manager = LivePortfolioManager(fake_client, logging.getLogger("test"))
+
+    top_cap = [("AAPL", 0.9, Side.BUY, "r", 500.0, 495.0, 520.0)]
+    manager.submit_bracket_orders(top_cap, set(), 10_000.0, settings)
+    assert len(fake_client.submitted_orders) == 1
+    assert fake_client.submitted_orders[0].qty == 4
 
 
 def test_kill_switch_daily_loss() -> None:
