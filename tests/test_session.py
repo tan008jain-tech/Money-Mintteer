@@ -69,7 +69,6 @@ class FakeTradingClient:
 
 
 def test_settings_defaults_and_validation():
-    # Break test if default values or validation checks are removed from Settings
     settings = Settings()
     assert settings.flatten_minutes_before_close == 5
     assert settings.no_new_entries_minutes_before_close == 30
@@ -86,31 +85,28 @@ def test_settings_defaults_and_validation():
 
 
 def test_session_lock(tmp_path):
-    # Break test if SessionLock logic (exclusive creation, freshness check, stale removal) is removed
     lock_path = str(tmp_path / "test_session.lock")
     lock1 = SessionLock(lock_path, stale_hours=12)
     assert lock1.acquire() is True
 
     lock2 = SessionLock(lock_path, stale_hours=12)
-    assert lock2.acquire() is False  # Fresh lock
+    assert lock2.acquire() is False
 
     lock1.release()
-    assert lock2.acquire() is True  # Released successfully
+    assert lock2.acquire() is True
     lock2.release()
 
-    # Test stale lock replacement
     lock3 = SessionLock(lock_path, stale_hours=12)
     assert lock3.acquire() is True
     old_time = time.time() - 13 * 3600
     os.utime(lock_path, (old_time, old_time))
 
     lock4 = SessionLock(lock_path, stale_hours=12)
-    assert lock4.acquire() is True  # Stale lock replaced
+    assert lock4.acquire() is True
     lock4.release()
 
 
 def test_market_closed_skipped(monkeypatch):
-    # Break test if market closed check and skip logic is removed
     bot = LiveMarketBot()
     t0 = datetime(2026, 10, 21, 10, 0, tzinfo=timezone.utc)
     clock = FakeClock(is_open=False, next_open=t0 + timedelta(hours=3), next_close=t0 + timedelta(hours=9))
@@ -129,7 +125,6 @@ def test_market_closed_skipped(monkeypatch):
 
 
 def test_market_closed_waits_then_runs(monkeypatch):
-    # Break test if market wait logic for close-by next_open is removed
     bot = LiveMarketBot()
     t0 = datetime(2026, 10, 21, 9, 20, tzinfo=timezone.utc)
     t_open = datetime(2026, 10, 21, 9, 30, tzinfo=timezone.utc)
@@ -160,7 +155,6 @@ def test_market_closed_waits_then_runs(monkeypatch):
 
 
 def test_session_trading_cycles_completed(monkeypatch):
-    # Break test if session execution loop, cutoff, and flatten_all at close are removed
     bot = LiveMarketBot()
     t_open = datetime(2026, 10, 21, 9, 30, tzinfo=timezone.utc)
     t_close = datetime(2026, 10, 21, 10, 30, tzinfo=timezone.utc)
@@ -190,7 +184,6 @@ def test_session_trading_cycles_completed(monkeypatch):
 
 
 def test_early_close_flatten(monkeypatch):
-    # Break test if next_close calculation / early close handling is removed
     bot = LiveMarketBot()
     t_open = datetime(2026, 11, 27, 14, 30, tzinfo=timezone.utc)
     t_close = datetime(2026, 11, 27, 18, 0, tzinfo=timezone.utc)
@@ -209,7 +202,6 @@ def test_early_close_flatten(monkeypatch):
 
 
 def test_flatten_incomplete_and_exit_mapping(monkeypatch):
-    # Break test if flatten_incomplete status and exit code mapping (status 3) are removed
     bot = LiveMarketBot()
     t_close = datetime(2026, 10, 21, 16, 0, tzinfo=timezone.utc)
     flatten_at = t_close - timedelta(minutes=5)
@@ -230,7 +222,6 @@ def test_flatten_incomplete_and_exit_mapping(monkeypatch):
 
 
 def test_kill_switch_tripped_mid_session(monkeypatch):
-    # Break test if mid-session kill switch check and halted status are removed
     bot = LiveMarketBot()
     t_open = datetime(2026, 10, 21, 9, 30, tzinfo=timezone.utc)
     t_close = datetime(2026, 10, 21, 16, 0, tzinfo=timezone.utc)
@@ -250,7 +241,6 @@ def test_kill_switch_tripped_mid_session(monkeypatch):
 
 
 def test_run_once_error_recovery(monkeypatch):
-    # Break test if run_once error catching and 10s sleep / continuation logic is removed
     bot = LiveMarketBot()
     t_open = datetime(2026, 10, 21, 9, 30, tzinfo=timezone.utc)
     t_close = datetime(2026, 10, 21, 11, 0, tzinfo=timezone.utc)
@@ -279,7 +269,6 @@ def test_run_once_error_recovery(monkeypatch):
 
 
 def test_flatten_all_order_and_robustness(monkeypatch):
-    # Break test if cancel_orders order before close_all_positions or exception robustness is removed
     clock = FakeClock(is_open=True, next_open=datetime.now(), next_close=datetime.now())
     client = FakeTradingClient(clock, positions=[])
     client.cancel_orders_raises = True
@@ -291,3 +280,161 @@ def test_flatten_all_order_and_robustness(monkeypatch):
     assert "close_all_positions" in client.call_order
     assert client.call_order.index("cancel_orders") < client.call_order.index("close_all_positions")
     assert client.close_all_positions_calls == 1
+
+
+def test_halt_is_immediate(monkeypatch):
+    events = []
+    class EventTradingClient(FakeTradingClient):
+        def cancel_orders(self):
+            events.append("cancel_orders")
+            return super().cancel_orders()
+        def close_all_positions(self, cancel_orders=None):
+            events.append("close_all_positions")
+            return super().close_all_positions(cancel_orders)
+
+    t_open = datetime(2026, 10, 21, 9, 30, tzinfo=timezone.utc)
+    t_close = datetime(2026, 10, 21, 16, 0, tzinfo=timezone.utc)
+    clock = FakeClock(is_open=True, next_open=t_open, next_close=t_close)
+    client = EventTradingClient(clock, positions=[])
+    
+    bot = LiveMarketBot()
+    bot.trading_client = client
+    bot.portfolio_manager = LivePortfolioManager(client, bot.logger)
+
+    def fake_run_once(now):
+        events.append("run_once")
+        bot.kill_switch.check_daily_loss(100000.0, 90000.0)
+        return {"orders_sent": 0, "halted": True}
+
+    monkeypatch.setattr(bot, "run_once", fake_run_once)
+
+    def fake_sleep(secs):
+        events.append(f"sleep:{secs}")
+
+    current_time = t_open
+    res = bot.run_session(now_fn=lambda: current_time, sleep_fn=fake_sleep)
+    assert res["status"] == "halted"
+    idx = events.index("run_once")
+    assert events[idx + 1] == "cancel_orders"
+    assert not any(e.startswith("sleep:") for e in events[idx:])
+    assert client.cancel_orders_calls == 1
+
+
+def test_cutoff_and_flatten_timing(monkeypatch):
+    t_open = datetime(2026, 10, 21, 14, 30, tzinfo=timezone.utc)
+    t_close = datetime(2026, 10, 21, 16, 0, tzinfo=timezone.utc)
+    flatten_at = t_close - timedelta(minutes=5)
+    cutoff = t_close - timedelta(minutes=30)
+
+    clock = FakeClock(is_open=True, next_open=t_open, next_close=t_close)
+    cancel_time = None
+    class TimingClient(FakeTradingClient):
+        def cancel_orders(self):
+            nonlocal cancel_time
+            cancel_time = current_time
+            return super().cancel_orders()
+
+    current_time = t_open
+    client = TimingClient(clock, positions=[])
+    
+    bot = LiveMarketBot()
+    bot.trading_client = client
+    bot.portfolio_manager = LivePortfolioManager(client, bot.logger)
+
+    recorded_times = []
+    def fake_run_once(now):
+        recorded_times.append(now)
+        return {"orders_sent": 1}
+
+    monkeypatch.setattr(bot, "run_once", fake_run_once)
+
+    def fake_now():
+        return current_time
+
+    def fake_sleep(secs):
+        nonlocal current_time
+        current_time += timedelta(seconds=secs)
+
+    res = bot.run_session(now_fn=fake_now, sleep_fn=fake_sleep)
+    assert len(recorded_times) >= 10
+    for rt in recorded_times:
+        assert rt < cutoff
+    assert client.cancel_orders_calls == 1
+    assert cancel_time is not None
+    assert datetime(2026, 10, 21, 15, 55, tzinfo=timezone.utc) <= cancel_time < datetime(2026, 10, 21, 16, 0, tzinfo=timezone.utc)
+
+
+def test_main_releases_lock_on_construction_failure(monkeypatch, tmp_path):
+    monkeypatch.setenv("MM_LOG_DIR", str(tmp_path))
+    monkeypatch.setattr("money_mintter.core.live_bot.LiveMarketBot", lambda: (_ for _ in ()).throw(SystemExit(1)))
+    with pytest.raises(SystemExit):
+        main()
+    lock_path = tmp_path / "mm_session.lock"
+    assert not lock_path.exists()
+
+
+def test_ctrl_c_interrupted(monkeypatch):
+    bot = LiveMarketBot()
+    t_open = datetime(2026, 10, 21, 9, 30, tzinfo=timezone.utc)
+    t_close = datetime(2026, 10, 21, 16, 0, tzinfo=timezone.utc)
+
+    clock = FakeClock(is_open=True, next_open=t_open, next_close=t_close)
+    client = FakeTradingClient(clock, positions=[])
+    bot.trading_client = client
+    bot.portfolio_manager = LivePortfolioManager(client, bot.logger)
+
+    call_count = 0
+    def fake_run_once(now):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 2:
+            raise KeyboardInterrupt()
+        return {"orders_sent": 1}
+
+    monkeypatch.setattr(bot, "run_once", fake_run_once)
+    res = bot.run_session(now_fn=lambda: t_open, sleep_fn=lambda s: None)
+    assert res["status"] == "interrupted"
+    assert client.cancel_orders_calls == 1
+    assert client.close_all_positions_calls == 1
+
+    monkeypatch.setattr(LiveMarketBot, "run_session", lambda self, *a, **kw: res)
+    monkeypatch.setattr(SessionLock, "acquire", lambda self: True)
+    monkeypatch.setattr(SessionLock, "release", lambda self: None)
+    assert main() == 130
+
+
+def test_interrupt_before_any_cycle(monkeypatch):
+    bot = LiveMarketBot()
+    t_open = datetime(2026, 10, 21, 9, 30, tzinfo=timezone.utc)
+    t_close = datetime(2026, 10, 21, 16, 0, tzinfo=timezone.utc)
+
+    clock = FakeClock(is_open=False, next_open=t_open, next_close=t_close)
+    client = FakeTradingClient(clock, positions=[])
+    bot.trading_client = client
+    bot.portfolio_manager = LivePortfolioManager(client, bot.logger)
+
+    def fake_sleep(secs):
+        raise KeyboardInterrupt()
+
+    res = bot.run_session(now_fn=lambda: t_open - timedelta(minutes=10), sleep_fn=fake_sleep)
+    assert res["status"] == "interrupted"
+    assert res["cycles"] == 0
+    assert client.cancel_orders_calls == 0
+    assert client.close_all_positions_calls == 0
+
+
+def test_summary_equity_na_zero_cycles(monkeypatch, caplog):
+    bot = LiveMarketBot()
+    t_open = datetime(2026, 10, 21, 9, 30, tzinfo=timezone.utc)
+    t_close = datetime(2026, 10, 21, 16, 0, tzinfo=timezone.utc)
+    clock = FakeClock(is_open=False, next_open=t_open, next_close=t_close)
+    client = FakeTradingClient(clock)
+    bot.trading_client = client
+    bot.portfolio_manager = LivePortfolioManager(client, bot.logger)
+
+    def fake_sleep(secs):
+        raise KeyboardInterrupt()
+
+    with caplog.at_level(logging.INFO):
+        bot.run_session(now_fn=lambda: t_open - timedelta(minutes=5), sleep_fn=fake_sleep)
+    assert "equity=n/a" in caplog.text
