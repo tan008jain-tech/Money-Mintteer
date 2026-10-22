@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import MarketOrderRequest, TakeProfitRequest, StopLossRequest, GetOrdersRequest
-from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus
+from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus, OrderClass
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
@@ -340,6 +340,7 @@ class LivePortfolioManager:
                         qty=qty,
                         side=alpaca_side,
                         time_in_force=TimeInForce.DAY,
+                        order_class=OrderClass.BRACKET,
                         take_profit=TakeProfitRequest(limit_price=round(tp_price, 2)),
                         stop_loss=StopLossRequest(stop_price=round(sl_price, 2))
                     )
