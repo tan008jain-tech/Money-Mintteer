@@ -76,6 +76,12 @@ class Settings:
     min_gross_to_cost_multiple: float = field(
         default_factory=lambda: _env_float("MIN_GROSS_TO_COST_MULTIPLE", 3.0)
     )
+    min_reward_risk: float = field(
+        default_factory=lambda: _env_float("MIN_REWARD_RISK", 0.0)
+    )
+    min_target_pct: float = field(
+        default_factory=lambda: _env_float("MIN_TARGET_PCT", 0.0)
+    )
     max_portfolio_risk_pct: float = field(
         default_factory=lambda: _env_percent("MAX_PORTFOLIO_RISK_PCT", 0.02)
     )
@@ -137,6 +143,10 @@ class Settings:
             raise ValueError("COMMISSION_PER_SHARE_USD must be >= 0")
         if self.min_gross_to_cost_multiple < 0:
             raise ValueError("MIN_GROSS_TO_COST_MULTIPLE must be >= 0")
+        if self.min_reward_risk < 0:
+            raise ValueError("min_reward_risk must be >= 0")
+        if self.min_target_pct < 0:
+            raise ValueError("min_target_pct must be >= 0")
         if self.flatten_minutes_before_close < 1:
             raise ValueError("flatten_minutes_before_close must be >= 1")
         if self.no_new_entries_minutes_before_close <= self.flatten_minutes_before_close:

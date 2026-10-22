@@ -323,14 +323,43 @@ class LivePortfolioManager:
 
         free_capital = max(0.0, account_equity - open_exposure)
 
-        for idx, (sym, sc, side_val, reason, curr_price, sl_price, tp_price) in enumerate(eligible):
+        valid_eligible = []
+        for sym, sc, side_val, reason, curr_price, sl_price, tp_price in eligible:
+            risk_per_share = abs(curr_price - sl_price)
+            reward = abs(tp_price - curr_price)
+            stop_pct = (risk_per_share / curr_price * 100) if curr_price > 0 else 0.0
+            target_pct = (reward / curr_price * 100) if curr_price > 0 else 0.0
+            rr = (reward / risk_per_share) if risk_per_share > 0 else 0.0
+
+            if risk_per_share <= 0:
+                self.logger.info(f"Skipping {sym}: risk per share <= 0")
+                decision = "skipped_risk_per_share_non_positive"
+                self.logger.info(f"Candidate {sym}: score={sc:.2f}, side={side_val}, entry=${curr_price:.2f}, stop=${sl_price:.2f}, target=${tp_price:.2f}, stop_pct={stop_pct:.2f}%, target_pct={target_pct:.2f}%, rr={rr:.2f}, notional_cap=$0.00, qty=0, gross=$0.00, cost=$0.00, decision={decision}")
+                continue
+
+            if settings.min_reward_risk > 0 and rr < settings.min_reward_risk:
+                self.logger.info(f"Skipping {sym}: reward/risk {rr:.2f} below minimum {settings.min_reward_risk}")
+                decision = "skipped_reward_risk"
+                self.logger.info(f"Candidate {sym}: score={sc:.2f}, side={side_val}, entry=${curr_price:.2f}, stop=${sl_price:.2f}, target=${tp_price:.2f}, stop_pct={stop_pct:.2f}%, target_pct={target_pct:.2f}%, rr={rr:.2f}, notional_cap=$0.00, qty=0, gross=$0.00, cost=$0.00, decision={decision}")
+                continue
+
+            if settings.min_target_pct > 0 and target_pct < settings.min_target_pct:
+                self.logger.info(f"Skipping {sym}: target {target_pct:.2f}% below minimum {settings.min_target_pct}%")
+                decision = "skipped_target_pct"
+                self.logger.info(f"Candidate {sym}: score={sc:.2f}, side={side_val}, entry=${curr_price:.2f}, stop=${sl_price:.2f}, target=${tp_price:.2f}, stop_pct={stop_pct:.2f}%, target_pct={target_pct:.2f}%, rr={rr:.2f}, notional_cap=$0.00, qty=0, gross=$0.00, cost=$0.00, decision={decision}")
+                continue
+
+            valid_eligible.append((sym, sc, side_val, reason, curr_price, sl_price, tp_price, risk_per_share, reward, stop_pct, target_pct, rr))
+
+        for idx, (sym, sc, side_val, reason, curr_price, sl_price, tp_price, risk_per_share, reward, stop_pct, target_pct, rr) in enumerate(valid_eligible):
             norm_sym = normalize_symbol(sym)
-            remaining = len(eligible) - idx
+            remaining = len(valid_eligible) - idx
             notional_cap = min(settings.max_single_position_pct * account_equity, free_capital / remaining if remaining > 0 else 0.0)
 
             if notional_cap < curr_price:
                 self.logger.info(f"Skipping {sym}: allocation ${notional_cap:.2f} below one share (${curr_price:.2f})")
-                self.logger.info(f"Candidate {sym}: notional_cap=${notional_cap:.2f}, qty=0, gross=$0.00, cost=$0.00, decision=skipped_allocation_below_one_share")
+                decision = "skipped_allocation_below_one_share"
+                self.logger.info(f"Candidate {sym}: score={sc:.2f}, side={side_val}, entry=${curr_price:.2f}, stop=${sl_price:.2f}, target=${tp_price:.2f}, stop_pct={stop_pct:.2f}%, target_pct={target_pct:.2f}%, rr={rr:.2f}, notional_cap=${notional_cap:.2f}, qty=0, gross=$0.00, cost=$0.00, decision={decision}")
                 continue
 
             pos_pct = min(1.0, max(1e-9, notional_cap / account_equity))
@@ -343,7 +372,7 @@ class LivePortfolioManager:
 
             try:
                 if side_val is Side.BUY:
-                    decision = risk_engine.size_long(
+                    decision_obj = risk_engine.size_long(
                         available_capital=account_equity,
                         entry=curr_price,
                         stop=sl_price,
@@ -352,7 +381,7 @@ class LivePortfolioManager:
                         market_open=True,
                     )
                 else:
-                    decision = risk_engine.size_short(
+                    decision_obj = risk_engine.size_short(
                         available_capital=account_equity,
                         entry=curr_price,
                         stop=sl_price,
@@ -361,15 +390,17 @@ class LivePortfolioManager:
                         market_open=True,
                     )
 
-                if not decision.approved:
-                    self.logger.info(f"Skipping {sym}: RiskEngine rejected trade ({decision.reason})")
-                    self.logger.info(f"Candidate {sym}: notional_cap=${notional_cap:.2f}, qty=0, gross=$0.00, cost=$0.00, decision=rejected_{decision.reason}")
+                if not decision_obj.approved:
+                    self.logger.info(f"Skipping {sym}: RiskEngine rejected trade ({decision_obj.reason})")
+                    decision = f"rejected_{decision_obj.reason}"
+                    self.logger.info(f"Candidate {sym}: score={sc:.2f}, side={side_val}, entry=${curr_price:.2f}, stop=${sl_price:.2f}, target=${tp_price:.2f}, stop_pct={stop_pct:.2f}%, target_pct={target_pct:.2f}%, rr={rr:.2f}, notional_cap=${notional_cap:.2f}, qty=0, gross=$0.00, cost=$0.00, decision={decision}")
                     continue
 
-                qty = int(decision.quantity)
+                qty = int(decision_obj.quantity)
                 if qty < 1:
                     self.logger.info(f"Skipping {sym}: whole share quantity ({qty}) < 1")
-                    self.logger.info(f"Candidate {sym}: notional_cap=${notional_cap:.2f}, qty={qty}, gross=$0.00, cost=$0.00, decision=qty_below_one")
+                    decision = "qty_below_one"
+                    self.logger.info(f"Candidate {sym}: score={sc:.2f}, side={side_val}, entry=${curr_price:.2f}, stop=${sl_price:.2f}, target=${tp_price:.2f}, stop_pct={stop_pct:.2f}%, target_pct={target_pct:.2f}%, rr={rr:.2f}, notional_cap=${notional_cap:.2f}, qty={qty}, gross=$0.00, cost=$0.00, decision={decision}")
                     continue
 
                 gross = qty * abs(tp_price - curr_price)
@@ -378,10 +409,12 @@ class LivePortfolioManager:
 
                 if gross < min_multiple * cost:
                     self.logger.info(f"Skipping {sym}: expected gross ${gross:.2f} below {min_multiple} x round-trip commission ${cost:.2f}")
-                    self.logger.info(f"Candidate {sym}: notional_cap=${notional_cap:.2f}, qty={qty}, gross=${gross:.2f}, cost=${cost:.2f}, decision=skipped_cost_gate")
+                    decision = "skipped_cost_gate"
+                    self.logger.info(f"Candidate {sym}: score={sc:.2f}, side={side_val}, entry=${curr_price:.2f}, stop=${sl_price:.2f}, target=${tp_price:.2f}, stop_pct={stop_pct:.2f}%, target_pct={target_pct:.2f}%, rr={rr:.2f}, notional_cap=${notional_cap:.2f}, qty={qty}, gross=${gross:.2f}, cost=${cost:.2f}, decision={decision}")
                     continue
 
-                self.logger.info(f"Candidate {sym}: notional_cap=${notional_cap:.2f}, qty={qty}, gross=${gross:.2f}, cost=${cost:.2f}, decision=submitted")
+                decision = "submitted"
+                self.logger.info(f"Candidate {sym}: score={sc:.2f}, side={side_val}, entry=${curr_price:.2f}, stop=${sl_price:.2f}, target=${tp_price:.2f}, stop_pct={stop_pct:.2f}%, target_pct={target_pct:.2f}%, rr={rr:.2f}, notional_cap=${notional_cap:.2f}, qty={qty}, gross=${gross:.2f}, cost=${cost:.2f}, decision={decision}")
 
                 alpaca_side = OrderSide.BUY if side_val is Side.BUY else OrderSide.SELL
                 order_req = MarketOrderRequest(
@@ -404,11 +437,11 @@ class LivePortfolioManager:
 
                 if oc_lower is None or legs is None:
                     self.logger.warning("cannot verify order class")
-                    open_risk += decision.capital_at_risk
+                    open_risk += decision_obj.capital_at_risk
                     orders_sent += 1
                 elif oc_lower == "bracket" and isinstance(legs, list) and len(legs) >= 2:
                     self.logger.info(f"ORDER CONFIRMED: {sym} id={getattr(submitted_order, 'id', 'unknown')} class=bracket legs={len(legs)}")
-                    open_risk += decision.capital_at_risk
+                    open_risk += decision_obj.capital_at_risk
                     orders_sent += 1
                 else:
                     reason_msg = f"unprotected order: class={oc_val}, legs={len(legs) if isinstance(legs, list) else legs}"
@@ -471,6 +504,15 @@ class LiveMarketBot:
         load_dotenv()
         self.logger = self.setup_logging()
         self.settings = Settings()
+        self.logger.info(
+            f"[Config] gates: min_reward_risk={self.settings.min_reward_risk}, "
+            f"min_target_pct={self.settings.min_target_pct}, "
+            f"min_gross_to_cost_multiple={self.settings.min_gross_to_cost_multiple}, "
+            f"commission_per_order_usd={self.settings.commission_per_order_usd}, "
+            f"commission_per_share_usd={self.settings.commission_per_share_usd}, "
+            f"max_single_position_pct={self.settings.max_single_position_pct}, "
+            f"risk_per_trade_pct={self.settings.risk_per_trade_pct}"
+        )
 
         api_key = self.settings.alpaca_api_key or os.getenv("APCA_API_KEY_ID", "") or os.getenv("APCA_API_KEY", "")
         secret_key = self.settings.alpaca_secret_key or os.getenv("APCA_SECRET_KEY", "") or os.getenv("APCA_API_SECRET", "")
