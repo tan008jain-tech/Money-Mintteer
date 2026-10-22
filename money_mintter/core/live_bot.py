@@ -30,6 +30,24 @@ BAR_CLOSE_DELAY_SECONDS = 20
 HISTORY_DAYS = 30
 
 
+def apply_default_timeout(client: Any, connect: float, read: float) -> None:
+    if not hasattr(client, "_session") or client._session is None:
+        raise RuntimeError("cannot apply HTTP timeout")
+    session = client._session
+    if not hasattr(session, "request"):
+        raise RuntimeError("cannot apply HTTP timeout")
+    orig_request = session.request
+    if getattr(orig_request, "_mm_timeout_applied", False):
+        return
+
+    def wrapped_request(method, url, **kwargs):
+        kwargs.setdefault("timeout", (connect, read))
+        return orig_request(method, url, **kwargs)
+
+    wrapped_request._mm_timeout_applied = True
+    session.request = wrapped_request
+
+
 def normalize_symbol(sym: str) -> str:
     return sym.upper().replace("/", "").replace("-", "")
 
@@ -211,6 +229,7 @@ class LivePortfolioManager:
         self.last_equity: float | None = None
         self.last_submit_failures = 0
         self._last_equity_date = None
+        self.on_unprotected: Any | None = None
 
     def fetch_account_and_positions(self) -> tuple[float, float, float, list[dict[str, Any]], list[dict[str, Any]], set[str]]:
         account = self.trading_client.get_account()
@@ -279,14 +298,9 @@ class LivePortfolioManager:
         bar_time: datetime | None = None,
         processed_signals: set[tuple[str, datetime]] | None = None,
         locked_normalized: set[str] | None = None,
+        open_exposure: float = 0.0,
     ) -> int:
         active_untraded_slots = max(1, 5 - len(locked_symbols))
-        risk_engine = RiskEngine(
-            risk_per_trade_pct=settings.risk_per_trade_pct,
-            max_position_pct=settings.max_position_pct,
-            max_portfolio_risk_pct=settings.max_portfolio_risk_pct,
-            leverage=1.0,
-        )
         open_risk = len(locked_symbols) * settings.risk_per_trade_pct * account_equity
         orders_sent = 0
         self.last_submit_failures = 0
@@ -294,6 +308,7 @@ class LivePortfolioManager:
         if locked_normalized is None:
             locked_normalized = {normalize_symbol(s) for s in locked_symbols}
 
+        eligible = []
         for sym, sc, side_val, reason, curr_price, sl_price, tp_price in top_new[:active_untraded_slots]:
             norm_sym = normalize_symbol(sym)
             if norm_sym in locked_normalized:
@@ -303,57 +318,125 @@ class LivePortfolioManager:
             if "/" in sym:
                 self.logger.info(f"Skipping {sym}: unsupported slash symbol")
                 continue
-
             if sc >= settings.min_candidate_score and sym not in locked_symbols and side_val is not None:
-                try:
-                    if side_val is Side.BUY:
-                        decision = risk_engine.size_long(
-                            available_capital=account_equity,
-                            entry=curr_price,
-                            stop=sl_price,
-                            open_risk=open_risk,
-                            active_candidates_count=5,
-                            market_open=True,
-                        )
-                    else:
-                        decision = risk_engine.size_short(
-                            available_capital=account_equity,
-                            entry=curr_price,
-                            stop=sl_price,
-                            open_risk=open_risk,
-                            active_candidates_count=5,
-                            market_open=True,
-                        )
+                eligible.append((sym, sc, side_val, reason, curr_price, sl_price, tp_price))
 
-                    if not decision.approved:
-                        self.logger.info(f"Skipping {sym}: RiskEngine rejected trade ({decision.reason})")
-                        continue
+        free_capital = max(0.0, account_equity - open_exposure)
 
-                    qty = int(decision.quantity)
-                    if qty < 1:
-                        self.logger.info(f"Skipping {sym}: whole share quantity ({qty}) < 1")
-                        continue
+        for idx, (sym, sc, side_val, reason, curr_price, sl_price, tp_price) in enumerate(eligible):
+            norm_sym = normalize_symbol(sym)
+            remaining = len(eligible) - idx
+            notional_cap = min(settings.max_single_position_pct * account_equity, free_capital / remaining if remaining > 0 else 0.0)
 
-                    alpaca_side = OrderSide.BUY if side_val is Side.BUY else OrderSide.SELL
-                    order_req = MarketOrderRequest(
-                        symbol=sym,
-                        qty=qty,
-                        side=alpaca_side,
-                        time_in_force=TimeInForce.DAY,
-                        order_class=OrderClass.BRACKET,
-                        take_profit=TakeProfitRequest(limit_price=round(tp_price, 2)),
-                        stop_loss=StopLossRequest(stop_price=round(sl_price, 2))
+            if notional_cap < curr_price:
+                self.logger.info(f"Skipping {sym}: allocation ${notional_cap:.2f} below one share (${curr_price:.2f})")
+                self.logger.info(f"Candidate {sym}: notional_cap=${notional_cap:.2f}, qty=0, gross=$0.00, cost=$0.00, decision=skipped_allocation_below_one_share")
+                continue
+
+            pos_pct = min(1.0, max(1e-9, notional_cap / account_equity))
+            risk_engine = RiskEngine(
+                risk_per_trade_pct=settings.risk_per_trade_pct,
+                max_position_pct=pos_pct,
+                max_portfolio_risk_pct=settings.max_portfolio_risk_pct,
+                leverage=1.0,
+            )
+
+            try:
+                if side_val is Side.BUY:
+                    decision = risk_engine.size_long(
+                        available_capital=account_equity,
+                        entry=curr_price,
+                        stop=sl_price,
+                        open_risk=open_risk,
+                        active_candidates_count=5,
+                        market_open=True,
                     )
-                    submitted_order = self.trading_client.submit_order(order_req)
+                else:
+                    decision = risk_engine.size_short(
+                        available_capital=account_equity,
+                        entry=curr_price,
+                        stop=sl_price,
+                        open_risk=open_risk,
+                        active_candidates_count=5,
+                        market_open=True,
+                    )
+
+                if not decision.approved:
+                    self.logger.info(f"Skipping {sym}: RiskEngine rejected trade ({decision.reason})")
+                    self.logger.info(f"Candidate {sym}: notional_cap=${notional_cap:.2f}, qty=0, gross=$0.00, cost=$0.00, decision=rejected_{decision.reason}")
+                    continue
+
+                qty = int(decision.quantity)
+                if qty < 1:
+                    self.logger.info(f"Skipping {sym}: whole share quantity ({qty}) < 1")
+                    self.logger.info(f"Candidate {sym}: notional_cap=${notional_cap:.2f}, qty={qty}, gross=$0.00, cost=$0.00, decision=qty_below_one")
+                    continue
+
+                gross = qty * abs(tp_price - curr_price)
+                cost = 2 * max(settings.commission_per_order_usd, settings.commission_per_share_usd * qty)
+                min_multiple = settings.min_gross_to_cost_multiple
+
+                if gross < min_multiple * cost:
+                    self.logger.info(f"Skipping {sym}: expected gross ${gross:.2f} below {min_multiple} x round-trip commission ${cost:.2f}")
+                    self.logger.info(f"Candidate {sym}: notional_cap=${notional_cap:.2f}, qty={qty}, gross=${gross:.2f}, cost=${cost:.2f}, decision=skipped_cost_gate")
+                    continue
+
+                self.logger.info(f"Candidate {sym}: notional_cap=${notional_cap:.2f}, qty={qty}, gross=${gross:.2f}, cost=${cost:.2f}, decision=submitted")
+
+                alpaca_side = OrderSide.BUY if side_val is Side.BUY else OrderSide.SELL
+                order_req = MarketOrderRequest(
+                    symbol=sym,
+                    qty=qty,
+                    side=alpaca_side,
+                    time_in_force=TimeInForce.DAY,
+                    order_class=OrderClass.BRACKET,
+                    take_profit=TakeProfitRequest(limit_price=round(tp_price, 2)),
+                    stop_loss=StopLossRequest(stop_price=round(sl_price, 2))
+                )
+                submitted_order = self.trading_client.submit_order(order_req)
+
+                oc = getattr(submitted_order, 'order_class', None)
+                oc_val = oc.value if hasattr(oc, 'value') else str(oc) if oc is not None else None
+                oc_lower = oc_val.lower() if oc_val is not None else None
+                legs = getattr(submitted_order, 'legs', None)
+
+                self.logger.info(f"ORDER SUBMITTED (class={oc_val if oc is not None else 'unknown'}): {alpaca_side.value} {qty} shares of {sym} @ ~${curr_price:.2f} (SL: ${sl_price:.2f}, TP: ${tp_price:.2f}, Score: {sc:.2f})")
+
+                if oc_lower is None or legs is None:
+                    self.logger.warning("cannot verify order class")
                     open_risk += decision.capital_at_risk
                     orders_sent += 1
-                    if bar_time is not None and processed_signals is not None:
-                        processed_signals.add((norm_sym, bar_time))
-
-                    self.logger.info(f">>> BRACKET ORDER SUBMITTED TO ALPACA: {alpaca_side.value} {qty} shares of {sym} @ ~${curr_price:.2f} (SL: ${sl_price:.2f}, TP: ${tp_price:.2f}, Score: {sc:.2f})")
-                except Exception as ord_err:
+                elif oc_lower == "bracket" and isinstance(legs, list) and len(legs) >= 2:
+                    self.logger.info(f"ORDER CONFIRMED: {sym} id={getattr(submitted_order, 'id', 'unknown')} class=bracket legs={len(legs)}")
+                    open_risk += decision.capital_at_risk
+                    orders_sent += 1
+                else:
+                    reason_msg = f"unprotected order: class={oc_val}, legs={len(legs) if isinstance(legs, list) else legs}"
+                    self.logger.critical(f"UNPROTECTED ORDER {sym} id={getattr(submitted_order, 'id', 'unknown')} class={oc_val} legs={len(legs) if isinstance(legs, list) else 0}")
+                    try:
+                        if hasattr(submitted_order, 'id') and submitted_order.id:
+                            self.trading_client.cancel_order_by_id(submitted_order.id)
+                    except Exception as cancel_err:
+                        self.logger.error(f"Failed to cancel unprotected order {sym}: {cancel_err}")
+                    try:
+                        self.trading_client.close_position(sym)
+                    except Exception as close_err:
+                        self.logger.error(f"Failed to close position for unprotected order {sym}: {close_err}")
                     self.last_submit_failures += 1
-                    self.logger.error(f"Failed to submit bracket order for {sym}: {ord_err}")
+                    if self.on_unprotected is not None:
+                        try:
+                            self.on_unprotected(reason_msg)
+                        except Exception as cb_err:
+                            self.logger.error(f"Error in on_unprotected callback: {cb_err}")
+
+                if bar_time is not None and processed_signals is not None:
+                    processed_signals.add((norm_sym, bar_time))
+
+                free_capital = max(0.0, free_capital - qty * curr_price)
+
+            except Exception as ord_err:
+                self.last_submit_failures += 1
+                self.logger.error(f"Failed to submit bracket order for {sym}: {ord_err}")
 
         return orders_sent
 
@@ -399,12 +482,15 @@ class LiveMarketBot:
         try:
             self.trading_client = TradingClient(api_key=api_key or "mock_key", secret_key=secret_key or "mock_secret", paper=True)
             self.stock_client = StockHistoricalDataClient(api_key=api_key or "mock_key", secret_key=secret_key or "mock_secret")
+            apply_default_timeout(self.trading_client, self.settings.http_connect_timeout_seconds, self.settings.http_read_timeout_seconds)
+            apply_default_timeout(self.stock_client, self.settings.http_connect_timeout_seconds, self.settings.http_read_timeout_seconds)
         except Exception as exc:
             self.logger.error(f"Critical initialization error: {exc}")
             sys.exit(1)
 
         self.strategy = LiquiditySweepReversalStrategy(StrategyConfig())
         self.portfolio_manager = LivePortfolioManager(self.trading_client, self.logger)
+        self.portfolio_manager.on_unprotected = lambda reason: self.kill_switch.trip(reason)
         
         self.global_universe = [
             "AAPL", "MSFT", "NVDA", "TSLA", "AMZN", "GOOGL", "META", "AMD", "NFLX", "INTC",
@@ -511,6 +597,8 @@ class LiveMarketBot:
         minute = (now_utc.minute // 5) * 5
         bar_time = now_utc.replace(minute=minute, second=0, microsecond=0)
 
+        open_exposure = sum(p.get("quantity", 0.0) * p.get("current_price", p.get("entry_price", 0.0)) for p in open_positions)
+
         orders_sent = self.portfolio_manager.submit_bracket_orders(
             top_new,
             locked_symbols_raw,
@@ -519,6 +607,7 @@ class LiveMarketBot:
             bar_time=bar_time,
             processed_signals=self.processed_signals,
             locked_normalized=locked_normalized,
+            open_exposure=open_exposure,
         )
 
         if self.portfolio_manager.last_submit_failures > 0 and orders_sent == 0:

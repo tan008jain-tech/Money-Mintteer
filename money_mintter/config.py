@@ -64,6 +64,18 @@ class Settings:
     max_position_pct: float = field(
         default_factory=lambda: _env_percent("MAX_POSITION_PCT", 0.20)
     )
+    max_single_position_pct: float = field(
+        default_factory=lambda: _env_percent("MAX_SINGLE_POSITION_PCT", 0.90)
+    )
+    commission_per_order_usd: float = field(
+        default_factory=lambda: _env_float("COMMISSION_PER_ORDER_USD", 0.35)
+    )
+    commission_per_share_usd: float = field(
+        default_factory=lambda: _env_float("COMMISSION_PER_SHARE_USD", 0.0035)
+    )
+    min_gross_to_cost_multiple: float = field(
+        default_factory=lambda: _env_float("MIN_GROSS_TO_COST_MULTIPLE", 3.0)
+    )
     max_portfolio_risk_pct: float = field(
         default_factory=lambda: _env_percent("MAX_PORTFOLIO_RISK_PCT", 0.02)
     )
@@ -92,6 +104,12 @@ class Settings:
     max_wait_for_open_minutes: int = field(
         default_factory=lambda: _env_int("MAX_WAIT_FOR_OPEN_MINUTES", 45)
     )
+    http_connect_timeout_seconds: float = field(
+        default_factory=lambda: _env_float("ALPACA_HTTP_CONNECT_TIMEOUT", 5.0)
+    )
+    http_read_timeout_seconds: float = field(
+        default_factory=lambda: _env_float("ALPACA_HTTP_READ_TIMEOUT", 20.0)
+    )
 
     def __post_init__(self) -> None:
         feed_lower = self.alpaca_data_feed.strip().lower()
@@ -111,9 +129,21 @@ class Settings:
             raise ValueError("per-trade risk must be positive and <= portfolio risk")
         if not 0 < self.max_position_pct <= 1:
             raise ValueError("max position percentage must be in (0, 1]")
+        if not 0 < self.max_single_position_pct <= 1:
+            raise ValueError("MAX_SINGLE_POSITION_PCT must be in (0, 1]")
+        if self.commission_per_order_usd < 0:
+            raise ValueError("COMMISSION_PER_ORDER_USD must be >= 0")
+        if self.commission_per_share_usd < 0:
+            raise ValueError("COMMISSION_PER_SHARE_USD must be >= 0")
+        if self.min_gross_to_cost_multiple < 0:
+            raise ValueError("MIN_GROSS_TO_COST_MULTIPLE must be >= 0")
         if self.flatten_minutes_before_close < 1:
             raise ValueError("flatten_minutes_before_close must be >= 1")
         if self.no_new_entries_minutes_before_close <= self.flatten_minutes_before_close:
             raise ValueError("no_new_entries_minutes_before_close must be > flatten_minutes_before_close")
         if self.max_wait_for_open_minutes < 0:
             raise ValueError("max_wait_for_open_minutes must be >= 0")
+        if self.http_connect_timeout_seconds <= 0:
+            raise ValueError("http_connect_timeout_seconds must be > 0")
+        if self.http_read_timeout_seconds <= 0:
+            raise ValueError("http_read_timeout_seconds must be > 0")

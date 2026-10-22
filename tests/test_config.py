@@ -62,6 +62,7 @@ def test_max_position_pct_20_conversion(monkeypatch: pytest.MonkeyPatch) -> None
 def test_live_portfolio_manager_bracket_order_allocation(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RISK_PER_TRADE_PCT", "0.5")
     monkeypatch.setenv("MAX_POSITION_PCT", "20")
+    monkeypatch.setenv("MAX_SINGLE_POSITION_PCT", "20")
     monkeypatch.setenv("MAX_PORTFOLIO_RISK_PCT", "2")
     settings = Settings()
 
@@ -86,6 +87,7 @@ def test_live_portfolio_manager_bracket_order_allocation(monkeypatch: pytest.Mon
 def test_live_portfolio_manager_sell_bracket_order_allocation(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RISK_PER_TRADE_PCT", "0.5")
     monkeypatch.setenv("MAX_POSITION_PCT", "20")
+    monkeypatch.setenv("MAX_SINGLE_POSITION_PCT", "20")
     monkeypatch.setenv("MAX_PORTFOLIO_RISK_PCT", "2")
     settings = Settings()
 
@@ -1433,6 +1435,7 @@ def test_submit_bracket_orders_sub_minimum(monkeypatch: pytest.MonkeyPatch) -> N
 def test_submit_bracket_orders_position_cap(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RISK_PER_TRADE_PCT", "0.5")
     monkeypatch.setenv("MAX_POSITION_PCT", "20")
+    monkeypatch.setenv("MAX_SINGLE_POSITION_PCT", "20")
     monkeypatch.setenv("MAX_PORTFOLIO_RISK_PCT", "2")
     settings = Settings()
 

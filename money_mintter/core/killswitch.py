@@ -9,6 +9,10 @@ class KillSwitch:
         self._tripped = False
         self._reason = ""
 
+    def trip(self, reason: str) -> None:
+        self._tripped = True
+        self._reason = reason
+
     def record_success(self) -> None:
         self._consecutive_errors = 0
 
