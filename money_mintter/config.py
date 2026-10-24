@@ -95,6 +95,30 @@ class Settings:
     alpaca_data_feed: str = field(
         default_factory=lambda: _env_text("ALPACA_DATA_FEED", "iex")
     )
+    min_latest_close: float = field(
+        default_factory=lambda: _env_float("MIN_LATEST_CLOSE", 5.0)
+    )
+    min_median_close_5: float = field(
+        default_factory=lambda: _env_float("MIN_MEDIAN_CLOSE_5", 5.0)
+    )
+    min_valid_daily_bars: int = field(
+        default_factory=lambda: _env_int("MIN_VALID_DAILY_BARS", 15)
+    )
+    lookback_sessions: int = field(
+        default_factory=lambda: _env_int("LOOKBACK_SESSIONS", 20)
+    )
+    min_median_dollar_volume: float = field(
+        default_factory=lambda: _env_float("MIN_MEDIAN_DOLLAR_VOLUME", 10_000_000.0)
+    )
+    min_atr_pct: float = field(
+        default_factory=lambda: _env_float("MIN_ATR_PCT", 0.01)
+    )
+    max_atr_pct: float = field(
+        default_factory=lambda: _env_float("MAX_ATR_PCT", 0.10)
+    )
+    max_daily_pool_size: int = field(
+        default_factory=lambda: _env_int("MAX_DAILY_POOL_SIZE", 200)
+    )
     max_daily_loss_pct: float = field(
         default_factory=lambda: _env_percent("MAX_DAILY_LOSS_PCT", 0.02)
     )
@@ -116,6 +140,12 @@ class Settings:
     http_read_timeout_seconds: float = field(
         default_factory=lambda: _env_float("ALPACA_HTTP_READ_TIMEOUT", 20.0)
     )
+    max_outage_minutes: int = field(
+        default_factory=lambda: _env_int("MAX_OUTAGE_MINUTES", 15)
+    )
+    flatten_max_wait_seconds: int = field(
+        default_factory=lambda: _env_int("FLATTEN_MAX_WAIT_SECONDS", 600)
+    )
 
     def __post_init__(self) -> None:
         feed_lower = self.alpaca_data_feed.strip().lower()
@@ -127,6 +157,20 @@ class Settings:
             raise ValueError("max consecutive errors must be positive")
         if self.initial_capital <= 0:
             raise ValueError("initial capital must be positive")
+        if self.min_latest_close < 0:
+            raise ValueError("min_latest_close must be >= 0")
+        if self.min_median_close_5 < 0:
+            raise ValueError("min_median_close_5 must be >= 0")
+        if self.min_valid_daily_bars <= 0:
+            raise ValueError("min_valid_daily_bars must be positive")
+        if self.lookback_sessions <= 0:
+            raise ValueError("lookback_sessions must be positive")
+        if self.min_median_dollar_volume < 0:
+            raise ValueError("min_median_dollar_volume must be >= 0")
+        if not 0 <= self.min_atr_pct <= self.max_atr_pct:
+            raise ValueError("min_atr_pct must be <= max_atr_pct")
+        if self.max_daily_pool_size <= 0:
+            raise ValueError("max_daily_pool_size must be positive")
         if self.max_deep_candidates <= 0:
             raise ValueError("max deep candidates must be positive")
         if not 0 <= self.min_candidate_score <= 1:
@@ -157,3 +201,7 @@ class Settings:
             raise ValueError("http_connect_timeout_seconds must be > 0")
         if self.http_read_timeout_seconds <= 0:
             raise ValueError("http_read_timeout_seconds must be > 0")
+        if self.max_outage_minutes <= 0:
+            raise ValueError("max_outage_minutes must be > 0")
+        if self.flatten_max_wait_seconds < 0:
+            raise ValueError("flatten_max_wait_seconds must be >= 0")

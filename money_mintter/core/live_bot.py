@@ -7,23 +7,61 @@ import time
 from datetime import datetime, timedelta, timezone, time as dt_time
 from typing import Any
 from zoneinfo import ZoneInfo
+import socket
+import requests
 
 from dotenv import load_dotenv
 
 from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import MarketOrderRequest, TakeProfitRequest, StopLossRequest, GetOrdersRequest
-from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus, OrderClass
+from alpaca.trading.requests import MarketOrderRequest, TakeProfitRequest, StopLossRequest, GetOrdersRequest, GetAssetsRequest
+from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus, OrderClass, AssetClass, AssetStatus
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from alpaca.data.enums import DataFeed
+from alpaca.common.exceptions import APIError
 
 from money_mintter.config import Settings
+from money_mintter.core.eligibility import StructuralEligibilityEngine
+from money_mintter.core.suitability import DailySuitabilityEngine
 from money_mintter.core.killswitch import KillSwitch
 from money_mintter.core.risk import RiskEngine
 from money_mintter.core.session_lock import SessionLock
 from money_mintter.domain import Side
 from money_mintter.strategy import Candle, LiquiditySweepReversalStrategy, MultiTimeframeSeries, StrategyConfig, Timeframe
+
+
+class ConnectivityError(RuntimeError):
+    pass
+
+
+def is_connectivity_error(exc: Any, depth: int = 0) -> bool:
+    if depth > 8 or exc is None:
+        return False
+    if isinstance(exc, ConnectivityError):
+        return True
+    if isinstance(exc, (requests.ConnectionError, requests.Timeout, socket.gaierror, TimeoutError, ConnectionError)):
+        return True
+    try:
+        from urllib3.exceptions import NameResolutionError, MaxRetryError
+        if isinstance(exc, (NameResolutionError, MaxRetryError)):
+            return True
+    except ImportError:
+        pass
+    try:
+        from alpaca.common.exceptions import APIError
+        if isinstance(exc, APIError) and hasattr(exc, "status_code") and exc.status_code in (429, 502, 503, 504):
+            return True
+    except ImportError:
+        pass
+
+    if getattr(exc, "__cause__", None) is not None:
+        if is_connectivity_error(exc.__cause__, depth + 1):
+            return True
+    if getattr(exc, "__context__", None) is not None:
+        if is_connectivity_error(exc.__context__, depth + 1):
+            return True
+    return False
 
 
 BAR_CLOSE_DELAY_SECONDS = 20
@@ -64,6 +102,106 @@ def next_bar_boundary(now_utc: datetime, minutes: int = 5, delay_seconds: int = 
     return candidate
 
 
+def discover_universe(trading_client: TradingClient, logger: logging.Logger, api_key: str = "") -> list[str]:
+    engine = StructuralEligibilityEngine()
+    start_time = datetime.now(timezone.utc)
+    assets = None
+    search_params = GetAssetsRequest(
+        status=AssetStatus.ACTIVE,
+        asset_class=AssetClass.US_EQUITY
+    )
+    data_source = "Alpaca Live API"
+    try:
+        if hasattr(trading_client, "get_all_assets"):
+            assets = trading_client.get_all_assets(search_params)
+    except Exception as exc:
+        err_str = str(exc)
+        if ("validation errors" in err_str or "ValidationError" in type(exc).__name__ or "exchange" in err_str) and hasattr(trading_client, "get"):
+            logger.warning(f"[Discovery] SDK asset validation failed ({exc}), falling back to trading_client.get...")
+            try:
+                params = search_params.to_request_fields() if search_params is not None else {}
+                assets = trading_client.get("/assets", params)
+                data_source = "Alpaca REST Fallback"
+            except Exception as get_exc:
+                logger.error(f"[Discovery] trading_client.get fallback failed: {get_exc}")
+                cached_syms, _, _ = engine.load_persisted_cache()
+                if cached_syms:
+                    logger.warning(f"[Discovery] Using persisted cache due to API failure: {len(cached_syms)} assets.")
+                    return cached_syms
+                raise ConnectivityError(f"Asset discovery failed: {get_exc}") from get_exc
+        else:
+            logger.error(f"[Discovery] Failed to fetch assets from Alpaca API: {exc}")
+            cached_syms, _, _ = engine.load_persisted_cache()
+            if cached_syms:
+                logger.warning(f"[Discovery] Using persisted cache due to API error: {len(cached_syms)} assets.")
+                return cached_syms
+            raise ConnectivityError(f"Asset discovery failed: {exc}") from exc
+
+    if assets is None and hasattr(trading_client, "get"):
+        try:
+            params = search_params.to_request_fields() if search_params is not None else {}
+            assets = trading_client.get("/assets", params)
+            data_source = "Alpaca REST Get"
+        except Exception as exc:
+            logger.error(f"[Discovery] Failed to fetch assets via get: {exc}")
+            cached_syms, _, _ = engine.load_persisted_cache()
+            if cached_syms:
+                logger.warning(f"[Discovery] Using persisted cache: {len(cached_syms)} assets.")
+                return cached_syms
+            raise ConnectivityError(f"Asset discovery failed: {exc}") from exc
+
+    if assets is None:
+        cached_syms, _, _ = engine.load_persisted_cache()
+        if cached_syms:
+            logger.warning(f"[Discovery] Assets is None. Using persisted cache: {len(cached_syms)} assets.")
+            return cached_syms
+        raise RuntimeError("trading_client does not support asset retrieval")
+
+    eligible_symbols, metadata_map, exclusion_counts = engine.filter_universe(assets, logger)
+    duration = (datetime.now(timezone.utc) - start_time).total_seconds()
+
+    if not eligible_symbols:
+        logger.error("[Discovery] Discovered asset universe is empty after filtering.")
+        cached_syms, _, _ = engine.load_persisted_cache()
+        if cached_syms:
+            logger.warning(f"[Discovery] Filtered universe empty. Falling back to valid cached universe ({len(cached_syms)} assets).")
+            return cached_syms
+        raise RuntimeError("Discovered asset universe is empty")
+
+    engine.save_persisted_cache(eligible_symbols, metadata_map, start_time)
+
+    # Layer 2 Daily Suitability Filter Integration
+    suitability_engine = DailySuitabilityEngine(logger=logger)
+    try:
+        suitability_result = suitability_engine.evaluate_universe(eligible_symbols, start_time)
+        daily_pool = suitability_result.pool
+        quarantined_count = len(suitability_result.quarantined)
+        actual_feed = suitability_result.actual_feed
+        stale_flag = suitability_result.stale
+    except Exception as exc:
+        logger.error(f"[Universe Layer 2] Evaluation failed: {exc}. Attempting persisted Layer 2 pool fallback...")
+        cached_pool_res = suitability_engine.load_stale_fallback_pool(eligible_symbols=eligible_symbols)
+        if cached_pool_res and cached_pool_res.pool is not None:
+            logger.warning(f"[Universe Layer 2] Using stale persisted Layer 2 pool fallback ({len(cached_pool_res.pool)} assets).")
+            daily_pool = cached_pool_res.pool
+            quarantined_count = len(cached_pool_res.quarantined)
+            actual_feed = cached_pool_res.actual_feed
+            stale_flag = True
+        else:
+            logger.critical("[Universe Layer 2] Layer 2 evaluation failed and no valid stale fallback pool exists. Position-management-only mode active (new entries disabled).")
+            daily_pool = []
+            quarantined_count = 0
+            actual_feed = "SIP"
+            stale_flag = True
+
+    logger.info(
+        f"[Universe Layer 1 & 2] L1 Eligible: {len(eligible_symbols)} | "
+        f"L2 Daily Suitability Pool: {len(daily_pool)} (Quarantined: {quarantined_count}, "
+        f"Feed: {actual_feed}, Stale: {stale_flag})"
+    )
+    return daily_pool
+
+
 class MarketScanner:
     """Object-oriented Market Screener modeled after Freqtrade DataProvider / Lumibot Scanners.
     Responsible for global universe ingestion, session filtering, and candidate scoring.
@@ -74,8 +212,10 @@ class MarketScanner:
         self.logger = logger
         self.data_feed = data_feed
         self.latest_snapshots: dict[str, MultiTimeframeSnapshot] = {}
+        self._candle_cache: dict[str, list[Candle]] = {}
         self.last_scan_attempts = 0
         self.last_scan_errors = 0
+        self.last_scan_connectivity_errors = 0
 
     @staticmethod
     def is_session_open(symbol: str, now_utc: datetime) -> tuple[bool, str]:
@@ -110,12 +250,14 @@ class MarketScanner:
     def scan_universe(self, now_utc: datetime, locked_symbols: set[str], strategy: LiquiditySweepReversalStrategy) -> tuple[list[tuple[str, float, Side | None, str, float, float, float]], list[dict[str, Any]]]:
         self.last_scan_attempts = 0
         self.last_scan_errors = 0
+        self.last_scan_connectivity_errors = 0
         analyzed_candidates: list[tuple[str, float, Side | None, str, float, float, float]] = []
         dashboard_stocks = []
         locked_normalized = {normalize_symbol(s) for s in locked_symbols}
 
         self.logger.info(f"Scanning global asset pool ({len(self.global_universe)} assets) with core trading hours filtration...")
 
+        eligible_symbols = []
         for symbol in self.global_universe:
             clean_symbol = symbol.upper().strip()
             if "/" in clean_symbol:
@@ -130,91 +272,172 @@ class MarketScanner:
             if normalize_symbol(clean_symbol) in locked_normalized:
                 self.logger.info(f"Retaining locked active trade slot for {clean_symbol} (Module 3.2 Slot Freezing)")
                 continue
+            eligible_symbols.append((clean_symbol, session_msg))
 
-            self.last_scan_attempts += 1
+        if now_utc.tzinfo is None:
+            now_utc = now_utc.replace(tzinfo=timezone.utc)
+
+        BATCH_SIZE = 50
+        for i in range(0, len(eligible_symbols), BATCH_SIZE):
+            batch = eligible_symbols[i:i + BATCH_SIZE]
+            batch_symbols = [item[0] for item in batch]
+
+            self.last_scan_attempts += len(batch_symbols)
             try:
-                end_dt = now_utc
-                start_dt = end_dt - timedelta(days=HISTORY_DAYS)
+                self.logger.info(f"Analyzing batch of {len(batch_symbols)} symbols...")
 
-                self.logger.info(f"Analyzing {clean_symbol} | Venue Status: {session_msg}")
+                # Determine incremental start per symbol in batch
+                symbol_start_dts = []
+                for sym, _ in batch:
+                    cached = self._candle_cache.get(sym, [])
+                    if cached:
+                        last_ts = max(c.timestamp for c in cached)
+                        if last_ts.tzinfo is None:
+                            last_ts = last_ts.replace(tzinfo=timezone.utc)
+                        symbol_start_dts.append(last_ts - timedelta(minutes=15))
+                    else:
+                        symbol_start_dts.append(now_utc - timedelta(days=HISTORY_DAYS))
+                
+                batch_start_dt = min(symbol_start_dts) if symbol_start_dts else (now_utc - timedelta(days=HISTORY_DAYS))
+                if batch_start_dt.tzinfo is None:
+                    batch_start_dt = batch_start_dt.replace(tzinfo=timezone.utc)
 
-                bar_request = StockBarsRequest(
-                    symbol_or_symbols=clean_symbol,
-                    timeframe=TimeFrame(5, TimeFrameUnit.Minute),
-                    start=start_dt,
-                    end=end_dt,
-                    feed=self.data_feed,
-                )
-                bars_response = self.stock_client.get_stock_bars(bar_request)
-
-                symbol_bars = bars_response.data.get(clean_symbol, []) if hasattr(bars_response, 'data') else []
-
-                if not symbol_bars:
-                    self.logger.error(f"CRITICAL: Data stream returned empty for ticker {clean_symbol}")
-                    continue
-
-                candles = tuple(
-                    Candle(
-                        timestamp=b.timestamp,
-                        open=float(b.open),
-                        high=float(b.high),
-                        low=float(b.low),
-                        close=float(b.close),
-                        volume=float(b.volume),
-                        symbol=clean_symbol,
+                all_bars_data = {}
+                page_token = None
+                while True:
+                    bar_request = StockBarsRequest(
+                        symbol_or_symbols=batch_symbols[0] if len(batch_symbols) == 1 else batch_symbols,
+                        timeframe=TimeFrame(5, TimeFrameUnit.Minute),
+                        start=batch_start_dt,
+                        end=now_utc,
+                        feed=self.data_feed,
+                        page_token=page_token,
                     )
-                    for b in symbol_bars
-                )
+                    bars_response = self.stock_client.get_stock_bars(bar_request)
+                    resp_data = getattr(bars_response, 'data', {}) or {}
+                    for sym_key, bars in resp_data.items():
+                        if isinstance(sym_key, (list, tuple)):
+                            for s in sym_key:
+                                all_bars_data.setdefault(s, []).extend(bars)
+                        else:
+                            all_bars_data.setdefault(str(sym_key), []).extend(bars)
+                    
+                    page_token = getattr(bars_response, 'next_page_token', None)
+                    if not page_token:
+                        break
 
-                series = MultiTimeframeSeries.from_5m(
-                    list(candles),
-                    entry_timeframe=Timeframe.FIVE_MIN,
-                    timezone_name="America/New_York",
-                    spread_bps=2.0,
-                )
-                snapshot = series.snapshot_at(now_utc)
-
-                minute = (now_utc.minute // 5) * 5
-                bar_time = now_utc.replace(minute=minute, second=0, microsecond=0)
-                expected_last_bar_start = bar_time - timedelta(minutes=5)
-                if expected_last_bar_start.tzinfo is None:
-                    expected_last_bar_start = expected_last_bar_start.replace(tzinfo=timezone.utc)
-
-                if not snapshot.entry:
-                    self.logger.warning(f"stale bars for {clean_symbol}: no entry-timeframe candles in snapshot")
+            except Exception as batch_ex:
+                if is_connectivity_error(batch_ex):
+                    self.last_scan_errors += len(batch_symbols)
+                    self.last_scan_connectivity_errors += len(batch_symbols)
+                    self.logger.error(f"CRITICAL: Connectivity/Auth error for batch {batch_symbols}: {batch_ex}")
                     continue
+                else:
+                    self.logger.warning(f"Batch request failed for {batch_symbols} ({batch_ex}), falling back to symbol-level isolation...")
+                    all_bars_data = {}
+                    for sym, _ in batch:
+                        try:
+                            single_req = StockBarsRequest(
+                                symbol_or_symbols=sym,
+                                timeframe=TimeFrame(5, TimeFrameUnit.Minute),
+                                start=batch_start_dt,
+                                end=now_utc,
+                                feed=self.data_feed,
+                            )
+                            single_resp = self.stock_client.get_stock_bars(single_req)
+                            single_data = getattr(single_resp, 'data', {}) or {}
+                            for sym_key, bars in single_data.items():
+                                all_bars_data.setdefault(str(sym_key), []).extend(bars)
+                        except Exception as single_ex:
+                            self.last_scan_errors += 1
+                            if is_connectivity_error(single_ex):
+                                self.last_scan_connectivity_errors += 1
+                            self.logger.error(f"Failed to fetch bars for symbol {sym}: {single_ex}")
 
-                last_entry = snapshot.entry[-1]
-                last_ts = last_entry.timestamp
-                if last_ts.tzinfo is None:
-                    last_ts = last_ts.replace(tzinfo=timezone.utc)
+            for clean_symbol, session_msg in batch:
+                try:
+                    symbol_bars = all_bars_data.get(clean_symbol, [])
+                    if not symbol_bars:
+                        self.logger.warning(f"Data stream returned empty or missing for ticker {clean_symbol}")
+                        symbol_candles = self._candle_cache.get(clean_symbol, [])
+                    else:
+                        new_candles = [
+                            Candle(
+                                timestamp=b.timestamp.replace(tzinfo=timezone.utc) if b.timestamp.tzinfo is None else b.timestamp,
+                                open=float(b.open),
+                                high=float(b.high),
+                                low=float(b.low),
+                                close=float(b.close),
+                                volume=float(b.volume),
+                                symbol=clean_symbol,
+                            )
+                            for b in symbol_bars
+                        ]
+                        cached = self._candle_cache.get(clean_symbol, [])
+                        combined = {c.timestamp: c for c in cached}
+                        for c in new_candles:
+                            combined[c.timestamp] = c
+                        symbol_candles = sorted(combined.values(), key=lambda x: x.timestamp)
+                        cutoff = now_utc - timedelta(days=HISTORY_DAYS + 2)
+                        symbol_candles = [c for c in symbol_candles if c.timestamp >= cutoff]
+                        self._candle_cache[clean_symbol] = symbol_candles
 
-                if last_ts < expected_last_bar_start:
-                    self.logger.warning(f"stale bars for {clean_symbol}: latest={last_ts}, expected>={expected_last_bar_start}")
-                    continue
-                self.latest_snapshots[clean_symbol] = snapshot
-                self.logger.info(f"[{clean_symbol}] MTF Chart Analysis | {snapshot.candle_bias_summary} | 1H Levels: {snapshot.one_hour_levels} | 15M Levels: {snapshot.fifteen_minute_levels}")
+                    if not symbol_candles:
+                        self.logger.error(f"CRITICAL: Data stream returned empty for ticker {clean_symbol}")
+                        continue
 
-                analysis = strategy.analyze(snapshot)
-                signal = strategy.signal(snapshot)
-                if signal is None:
-                    reason_msg = analysis.reason if analysis else "no signal"
-                    self.logger.info(f"[{clean_symbol}] No signal generated | Reason: {reason_msg}")
-                    continue
+                    candles = tuple(symbol_candles)
 
-                self.logger.info(f"[{clean_symbol}] Signal | Score: {signal.confidence:.2f} | Side: {signal.side} | Entry: ${signal.entry_price:.2f} | SL: ${signal.stop_price:.2f} | TP: ${signal.target_price:.2f} | Reason: {signal.reason}")
+                    series = MultiTimeframeSeries.from_5m(
+                        list(candles),
+                        entry_timeframe=Timeframe.FIVE_MIN,
+                        timezone_name="America/New_York",
+                        spread_bps=2.0,
+                    )
+                    snapshot = series.snapshot_at(now_utc)
 
-                analyzed_candidates.append((clean_symbol, signal.confidence, signal.side, signal.reason, signal.entry_price, signal.stop_price, signal.target_price))
-                dashboard_stocks.append({
-                    "symbol": clean_symbol,
-                    "market": "Global/US",
-                    "current_price": signal.entry_price,
-                    "score": signal.confidence,
-                })
+                    minute = (now_utc.minute // 5) * 5
+                    bar_time = now_utc.replace(minute=minute, second=0, microsecond=0)
+                    expected_last_bar_start = bar_time - timedelta(minutes=5)
+                    if expected_last_bar_start.tzinfo is None:
+                        expected_last_bar_start = expected_last_bar_start.replace(tzinfo=timezone.utc)
 
-            except Exception as ex:
-                self.last_scan_errors += 1
-                self.logger.error(f"CRITICAL: Data stream error for ticker {clean_symbol}: {ex}")
+                    if not snapshot.entry:
+                        self.logger.warning(f"stale bars for {clean_symbol}: no entry-timeframe candles in snapshot")
+                        continue
+
+                    last_entry = snapshot.entry[-1]
+                    last_ts = last_entry.timestamp
+                    if last_ts.tzinfo is None:
+                        last_ts = last_ts.replace(tzinfo=timezone.utc)
+
+                    if last_ts < expected_last_bar_start:
+                        self.logger.warning(f"stale bars for {clean_symbol}: latest={last_ts}, expected>={expected_last_bar_start}")
+                        continue
+                    self.latest_snapshots[clean_symbol] = snapshot
+                    self.logger.info(f"[{clean_symbol}] MTF Chart Analysis | {snapshot.candle_bias_summary} | 1H Levels: {snapshot.one_hour_levels} | 15M Levels: {snapshot.fifteen_minute_levels}")
+
+                    analysis = strategy.analyze(snapshot)
+                    signal = strategy.signal(snapshot)
+                    if signal is None:
+                        reason_msg = analysis.reason if analysis else "no signal"
+                        self.logger.info(f"[{clean_symbol}] No signal generated | Reason: {reason_msg}")
+                        continue
+
+                    self.logger.info(f"[{clean_symbol}] Signal | Score: {signal.confidence:.2f} | Side: {signal.side} | Entry: ${signal.entry_price:.2f} | SL: ${signal.stop_price:.2f} | TP: ${signal.target_price:.2f} | Reason: {signal.reason}")
+
+                    analyzed_candidates.append((clean_symbol, signal.confidence, signal.side, signal.reason, signal.entry_price, signal.stop_price, signal.target_price))
+                    dashboard_stocks.append({
+                        "symbol": clean_symbol,
+                        "market": "Global/US",
+                        "current_price": signal.entry_price,
+                        "score": signal.confidence,
+                    })
+                except Exception as sym_ex:
+                    self.last_scan_errors += 1
+                    if is_connectivity_error(sym_ex):
+                        self.last_scan_connectivity_errors += 1
+                    self.logger.error(f"CRITICAL: Symbol analysis error for {clean_symbol}: {sym_ex}")
 
         return analyzed_candidates, dashboard_stocks
 
@@ -473,29 +696,66 @@ class LivePortfolioManager:
 
         return orders_sent
 
-    def flatten_all(self, sleep_fn=time.sleep, retries: int = 3, retry_delay: int = 5) -> list[str]:
-        try:
-            self.trading_client.cancel_orders()
-        except Exception as exc:
-            self.logger.error(f"Error cancelling orders during flatten_all: {exc}")
+    def flatten_all(self, sleep_fn=time.sleep, retries: int = 3, retry_delay: int = 5, max_wait_seconds: int = 0) -> list[str]:
+        if max_wait_seconds <= 0:
+            try:
+                max_wait_seconds = Settings().flatten_max_wait_seconds
+            except Exception:
+                max_wait_seconds = 600
 
-        try:
-            self.trading_client.close_all_positions(cancel_orders=True)
-        except Exception as exc:
-            self.logger.error(f"Error closing all positions during flatten_all: {exc}")
+        start_time = time.monotonic()
+        total_slept = 0.0
+        effective_delay = min(retry_delay, 15)
+        last_successful_remaining: list[str] | None = None
+        while True:
+            real_elapsed = time.monotonic() - start_time
+            elapsed = max(real_elapsed, total_slept)
+            if elapsed >= max_wait_seconds:
+                break
 
-        remaining = []
-        for attempt in range(retries):
+            try:
+                self.trading_client.cancel_orders()
+            except Exception as exc:
+                self.logger.error(f"Error cancelling orders during flatten_all: {exc}")
+
+            real_elapsed = time.monotonic() - start_time
+            elapsed = max(real_elapsed, total_slept)
+            if elapsed >= max_wait_seconds:
+                break
+
+            try:
+                self.trading_client.close_all_positions(cancel_orders=True)
+            except Exception as exc:
+                self.logger.error(f"Error closing all positions during flatten_all: {exc}")
+
+            real_elapsed = time.monotonic() - start_time
+            elapsed = max(real_elapsed, total_slept)
+            if elapsed >= max_wait_seconds:
+                break
+
             try:
                 _, _, _, open_pos, _, _ = self.fetch_account_and_positions()
                 remaining = [p["symbol"] for p in open_pos]
+                last_successful_remaining = remaining
                 if not remaining:
-                    break
+                    return []
             except Exception as exc:
-                self.logger.error(f"Error fetching open positions during flatten_all verification attempt {attempt+1}: {exc}")
-            if attempt < retries - 1:
-                sleep_fn(retry_delay)
-        return remaining
+                self.logger.error(f"Error fetching open positions during flatten_all verification: {exc}")
+
+            real_elapsed = time.monotonic() - start_time
+            elapsed = max(real_elapsed, total_slept)
+            if elapsed >= max_wait_seconds:
+                break
+
+            remaining_time = max_wait_seconds - elapsed
+            sleep_duration = min(effective_delay, remaining_time)
+            if sleep_duration > 0:
+                sleep_fn(sleep_duration)
+                total_slept += sleep_duration
+
+        if last_successful_remaining is not None:
+            return last_successful_remaining
+        return ["UNKNOWN"]
 
 
 class LiveMarketBot:
@@ -534,11 +794,41 @@ class LiveMarketBot:
         self.portfolio_manager = LivePortfolioManager(self.trading_client, self.logger)
         self.portfolio_manager.on_unprotected = lambda reason: self.kill_switch.trip(reason)
         
-        self.global_universe = [
-            "AAPL", "MSFT", "NVDA", "TSLA", "AMZN", "GOOGL", "META", "AMD", "NFLX", "INTC",
-            "SPY", "QQQ", "IWM", "XLF", "XLE", "XLK", "ARKK", "JPM", "BAC", "DIS",
-            "GLD", "SLV", "USO", "UNG"
-        ]
+        self._cached_universe: list[str] = []
+        self._universe_last_fetched: datetime | None = None
+        self._universe_last_failed: datetime | None = None
+        self._universe_retry_cooldown_minutes = 60
+        self._api_key = api_key or "mock_key"
+
+        # Cache-first startup inspection
+        engine = StructuralEligibilityEngine()
+        cached_syms, cached_meta, cached_fetched = engine.load_persisted_cache()
+        now_utc = datetime.now(timezone.utc)
+
+        if cached_syms and cached_fetched and (now_utc - cached_fetched) <= timedelta(hours=24):
+            self.logger.info(f"[Discovery] Reusing valid fresh persisted Layer 1 cache on startup ({len(cached_syms)} assets, age: {(now_utc - cached_fetched).total_seconds()/3600:.1f}h).")
+            suitability_engine = DailySuitabilityEngine(logger=self.logger)
+            cached_suitability = suitability_engine.load_persisted_pool()
+            if cached_suitability and cached_suitability.pool:
+                self.logger.info(f"[Discovery] Loaded valid persisted Layer 2 pool on startup ({len(cached_suitability.pool)} assets).")
+                self._cached_universe = cached_suitability.pool
+                self._universe_last_fetched = cached_fetched
+            else:
+                try:
+                    suitability_result = suitability_engine.evaluate_universe(cached_syms, now_utc)
+                    self._cached_universe = suitability_result.pool
+                    self._universe_last_fetched = cached_fetched
+                except Exception as l2_exc:
+                    self.logger.error(f"[Discovery] Layer 2 evaluation on startup cache reuse failed: {l2_exc}")
+                    raise RuntimeError(f"Layer 2 daily suitability evaluation failed on startup cache reuse: {l2_exc}") from l2_exc
+        else:
+            try:
+                initial_universe = self._get_or_refresh_universe(now_utc)
+                self._cached_universe = initial_universe
+            except Exception as exc:
+                self.logger.critical(f"[Discovery] Critical startup failure during dynamic universe discovery and no valid Layer 2 pool exists: {exc}")
+                raise
+        self.global_universe = self._cached_universe
 
         feed_val = self.settings.alpaca_data_feed.strip().lower()
         data_feed_enum = DataFeed.SIP if feed_val == "sip" else DataFeed.IEX
@@ -561,6 +851,71 @@ class LiveMarketBot:
         }
 
         self.processed_signals: set[tuple[str, datetime]] = set()
+        self._outage_start: datetime | None = None
+        self._last_outage_log_time: datetime | None = None
+
+    def _get_or_refresh_universe(self, now_utc: datetime) -> list[str]:
+        refresh_interval_expired = (
+            not self._cached_universe or
+            self._universe_last_fetched is None or
+            (now_utc - self._universe_last_fetched) > timedelta(hours=24)
+        )
+
+        in_cooldown = False
+        if self._universe_last_failed is not None and self._cached_universe:
+            cooldown_delta = timedelta(minutes=self._universe_retry_cooldown_minutes)
+            if (now_utc - self._universe_last_failed) < cooldown_delta:
+                in_cooldown = True
+
+        refresh_needed = refresh_interval_expired and not in_cooldown
+
+        if refresh_needed:
+            try:
+                discovered = discover_universe(self.trading_client, self.logger, self._api_key)
+                self._cached_universe = discovered
+                self._universe_last_fetched = now_utc
+                self._universe_last_failed = None
+            except Exception as exc:
+                self._universe_last_failed = now_utc
+                engine = StructuralEligibilityEngine()
+                cached_syms, _, cached_fetched = engine.load_persisted_cache()
+                if cached_syms:
+                    age_hours = (now_utc - (cached_fetched or now_utc)).total_seconds() / 3600.0
+                    self.logger.warning(f"[Discovery] Asset universe refresh failed ({exc}). Using persisted stale cache fallback ({len(cached_syms)} assets, age: {age_hours:.1f}h). Last successful broker refresh timestamp preserved. Entering retry cooldown for {self._universe_retry_cooldown_minutes}m.")
+                    self._cached_universe = cached_syms
+                    self._universe_last_fetched = cached_fetched
+                elif self._cached_universe:
+                    self.logger.warning(f"[Discovery] Asset universe refresh failed ({exc}). Using in-memory cached universe during cooldown.")
+                else:
+                    self.logger.critical(f"[Discovery] Asset universe refresh failed and no valid cache exists: {exc}")
+                    raise
+        elif in_cooldown and self._cached_universe:
+            age_hours = (now_utc - (self._universe_last_fetched or now_utc)).total_seconds() / 3600.0
+            self.logger.info(f"[Discovery] Universe refresh in retry cooldown (failed at {self._universe_last_failed}). Reusing cached universe ({len(self._cached_universe)} assets, age: {age_hours:.1f}h, stale status: active).")
+        return self._cached_universe
+
+    def _note_outage(self, now_utc: datetime) -> None:
+        if self._outage_start is None:
+            self._outage_start = now_utc
+        seconds = int((now_utc - self._outage_start).total_seconds())
+        limit_mins = self.settings.max_outage_minutes
+
+        should_log = False
+        if self._last_outage_log_time is None:
+            should_log = True
+        else:
+            elapsed_log = (now_utc - self._last_outage_log_time).total_seconds()
+            if elapsed_log >= 60:
+                should_log = True
+
+        if should_log:
+            self.logger.warning(f"[Network] outage for {seconds} s (limit {limit_mins} min)")
+            self._last_outage_log_time = now_utc
+
+        if seconds >= limit_mins * 60:
+            reason = f"network outage exceeded {limit_mins} minutes"
+            self.logger.critical(f"Critical: {reason}")
+            self.kill_switch.trip(reason)
 
     def setup_logging(self) -> logging.Logger:
         log_dir_env = os.getenv("MM_LOG_DIR", "logs")
@@ -625,7 +980,10 @@ class LiveMarketBot:
 
         analyzed_candidates, dashboard_stocks = self.scanner.scan_universe(now_utc, locked_symbols_raw, self.strategy)
         if self.scanner.last_scan_attempts > 0 and self.scanner.last_scan_errors == self.scanner.last_scan_attempts:
-            raise RuntimeError("all symbol analyses failed")
+            if self.scanner.last_scan_connectivity_errors == self.scanner.last_scan_errors:
+                raise ConnectivityError("all symbol analyses failed due to connectivity issues")
+            else:
+                raise RuntimeError("all symbol analyses failed")
         signals = len(analyzed_candidates)
 
         analyzed_candidates.sort(key=lambda x: x[1], reverse=True)
@@ -663,11 +1021,21 @@ class LiveMarketBot:
             res = self.run_cycle(now_utc)
             if not res.get("halted", False):
                 self.kill_switch.record_success()
+                if self._outage_start is not None:
+                    seconds = int((now_utc - self._outage_start).total_seconds())
+                    self.logger.info(f"[Network] recovered after {seconds} s")
+                    self._outage_start = None
+                    self._last_outage_log_time = None
             return res
         except Exception as exc:
-            self.kill_switch.record_error()
-            self.logger.error(f"Cycle execution error: {exc}")
-            return {"error": True, "orders_sent": 0}
+            if is_connectivity_error(exc):
+                self._note_outage(now_utc)
+                self.logger.error(f"Cycle connectivity error: {exc}")
+                return {"error": True, "outage": True, "orders_sent": 0}
+            else:
+                self.kill_switch.record_error()
+                self.logger.error(f"Cycle execution error: {exc}")
+                return {"error": True, "orders_sent": 0}
 
     def run(self) -> None:
         self.logger.info("==================================================")
@@ -678,7 +1046,7 @@ class LiveMarketBot:
             while True:
                 now_utc = datetime.now(timezone.utc)
                 res = self.run_once(now_utc)
-                if res.get("error"):
+                if res.get("error") or res.get("outage"):
                     time.sleep(10)
                     continue
 
@@ -707,10 +1075,17 @@ class LiveMarketBot:
 
         def _safe_flatten() -> list[str]:
             try:
-                return self.portfolio_manager.flatten_all(sleep_fn)
+                res_pos = self.portfolio_manager.flatten_all(sleep_fn, max_wait_seconds=self.settings.flatten_max_wait_seconds)
             except Exception as exc:
                 self.logger.critical(f"flatten_all raised exception: {exc}")
-                return ["UNKNOWN"]
+                res_pos = ["UNKNOWN"]
+
+            if res_pos:
+                if res_pos == ["UNKNOWN"]:
+                    self.logger.critical(f"POSITIONS MAY STILL BE OPEN: {res_pos} (position state could not be verified)")
+                else:
+                    self.logger.critical(f"POSITIONS MAY STILL BE OPEN: {res_pos}")
+            return res_pos
 
         try:
             try:
@@ -798,7 +1173,7 @@ class LiveMarketBot:
                         status = "halted" if remaining != ["UNKNOWN"] else "flatten_incomplete"
                         self._log_session_summary(status, cycles, orders_sent_total, errors)
                         return {"status": status, "cycles": cycles, "orders_sent": orders_sent_total, "errors": errors, "remaining": remaining}
-                    if res.get("error"):
+                    if res.get("error") or res.get("outage"):
                         errors += 1
                         sleep_fn(10)
                         continue
@@ -880,6 +1255,13 @@ def main() -> int:
         bot = LiveMarketBot()
         res = bot.run_session()
         status = res.get("status")
+        remaining = res.get("remaining", [])
+        if remaining:
+            print("==================================================")
+            print(f" POSITIONS MAY STILL BE OPEN: {remaining}")
+            print(" CHECK ALPACA AND CLOSE THEM MANUALLY")
+            print("==================================================")
+
         if status in ("completed", "skipped_market_closed"):
             return 0
         elif status == "halted":
