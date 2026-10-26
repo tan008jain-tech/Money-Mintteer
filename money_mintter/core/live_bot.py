@@ -27,8 +27,10 @@ from money_mintter.core.suitability import DailySuitabilityEngine
 from money_mintter.core.killswitch import KillSwitch
 from money_mintter.core.risk import RiskEngine
 from money_mintter.core.session_lock import SessionLock
+from money_mintter.core.selector import select_layer4_candidates
 from money_mintter.domain import Side
 from money_mintter.strategy import Candle, LiquiditySweepReversalStrategy, MultiTimeframeSeries, StrategyConfig, Timeframe
+from money_mintter.strategy.timeframes import _resample
 
 
 class ConnectivityError(RuntimeError):
@@ -247,7 +249,7 @@ class MarketScanner:
         cum_v = sum(c.volume for c in candles)
         return cum_pv / cum_v if cum_v > 0 else candles[-1].close
 
-    def scan_universe(self, now_utc: datetime, locked_symbols: set[str], strategy: LiquiditySweepReversalStrategy) -> tuple[list[tuple[str, float, Side | None, str, float, float, float]], list[dict[str, Any]]]:
+    def scan_universe(self, now_utc: datetime, locked_symbols: set[str], strategy: LiquiditySweepReversalStrategy, daily_pool: list[str] | None = None) -> tuple[list[tuple[str, float, Side | None, str, float, float, float]], list[dict[str, Any]]]:
         self.last_scan_attempts = 0
         self.last_scan_errors = 0
         self.last_scan_connectivity_errors = 0
@@ -255,10 +257,11 @@ class MarketScanner:
         dashboard_stocks = []
         locked_normalized = {normalize_symbol(s) for s in locked_symbols}
 
-        self.logger.info(f"Scanning global asset pool ({len(self.global_universe)} assets) with core trading hours filtration...")
+        pool_input = daily_pool if daily_pool is not None else self.global_universe
+        self.logger.info(f"Scanning Layer 2 daily asset pool ({len(pool_input)} assets) with core trading hours filtration...")
 
         eligible_symbols = []
-        for symbol in self.global_universe:
+        for symbol in pool_input:
             clean_symbol = symbol.upper().strip()
             if "/" in clean_symbol:
                 self.logger.info(f"Skipping {clean_symbol}: Unsupported symbol")
@@ -277,6 +280,7 @@ class MarketScanner:
         if now_utc.tzinfo is None:
             now_utc = now_utc.replace(tzinfo=timezone.utc)
 
+        all_bars_data = {}
         BATCH_SIZE = 50
         for i in range(0, len(eligible_symbols), BATCH_SIZE):
             batch = eligible_symbols[i:i + BATCH_SIZE]
@@ -302,12 +306,11 @@ class MarketScanner:
                 if batch_start_dt.tzinfo is None:
                     batch_start_dt = batch_start_dt.replace(tzinfo=timezone.utc)
 
-                all_bars_data = {}
                 page_token = None
                 while True:
                     bar_request = StockBarsRequest(
                         symbol_or_symbols=batch_symbols[0] if len(batch_symbols) == 1 else batch_symbols,
-                        timeframe=TimeFrame(5, TimeFrameUnit.Minute),
+                        timeframe=TimeFrame(1, TimeFrameUnit.Minute),
                         start=batch_start_dt,
                         end=now_utc,
                         feed=self.data_feed,
@@ -334,12 +337,11 @@ class MarketScanner:
                     continue
                 else:
                     self.logger.warning(f"Batch request failed for {batch_symbols} ({batch_ex}), falling back to symbol-level isolation...")
-                    all_bars_data = {}
                     for sym, _ in batch:
                         try:
                             single_req = StockBarsRequest(
                                 symbol_or_symbols=sym,
-                                timeframe=TimeFrame(5, TimeFrameUnit.Minute),
+                                timeframe=TimeFrame(1, TimeFrameUnit.Minute),
                                 start=batch_start_dt,
                                 end=now_utc,
                                 feed=self.data_feed,
@@ -354,90 +356,118 @@ class MarketScanner:
                                 self.last_scan_connectivity_errors += 1
                             self.logger.error(f"Failed to fetch bars for symbol {sym}: {single_ex}")
 
-            for clean_symbol, session_msg in batch:
-                try:
-                    symbol_bars = all_bars_data.get(clean_symbol, [])
-                    if not symbol_bars:
-                        self.logger.warning(f"Data stream returned empty or missing for ticker {clean_symbol}")
-                        symbol_candles = self._candle_cache.get(clean_symbol, [])
-                    else:
-                        new_candles = [
-                            Candle(
-                                timestamp=b.timestamp.replace(tzinfo=timezone.utc) if b.timestamp.tzinfo is None else b.timestamp,
-                                open=float(b.open),
-                                high=float(b.high),
-                                low=float(b.low),
-                                close=float(b.close),
-                                volume=float(b.volume),
-                                symbol=clean_symbol,
-                            )
-                            for b in symbol_bars
-                        ]
-                        cached = self._candle_cache.get(clean_symbol, [])
-                        combined = {c.timestamp: c for c in cached}
-                        for c in new_candles:
-                            combined[c.timestamp] = c
-                        symbol_candles = sorted(combined.values(), key=lambda x: x.timestamp)
-                        cutoff = now_utc - timedelta(days=HISTORY_DAYS + 2)
-                        symbol_candles = [c for c in symbol_candles if c.timestamp >= cutoff]
-                        self._candle_cache[clean_symbol] = symbol_candles
-
-                    if not symbol_candles:
-                        self.logger.error(f"CRITICAL: Data stream returned empty for ticker {clean_symbol}")
-                        continue
-
-                    candles = tuple(symbol_candles)
-
-                    series = MultiTimeframeSeries.from_5m(
-                        list(candles),
-                        entry_timeframe=Timeframe.FIVE_MIN,
-                        timezone_name="America/New_York",
-                        spread_bps=2.0,
+        bars_dict: dict[str, list[Candle]] = {}
+        for clean_symbol, _ in eligible_symbols:
+            symbol_bars = all_bars_data.get(clean_symbol, [])
+            cached = self._candle_cache.get(clean_symbol, [])
+            if not symbol_bars:
+                completed_cached = [
+                    c for c in cached
+                    if c.timestamp + timedelta(minutes=1) <= now_utc
+                ]
+                self._candle_cache[clean_symbol] = completed_cached
+                symbol_candles = completed_cached
+            else:
+                new_candles = [
+                    Candle(
+                        timestamp=b.timestamp.replace(tzinfo=timezone.utc) if b.timestamp.tzinfo is None else b.timestamp,
+                        open=float(b.open),
+                        high=float(b.high),
+                        low=float(b.low),
+                        close=float(b.close),
+                        volume=float(b.volume),
+                        symbol=clean_symbol,
                     )
-                    snapshot = series.snapshot_at(now_utc)
+                    for b in symbol_bars
+                ]
+                completed_new_candles = [
+                    c for c in new_candles
+                    if c.timestamp + timedelta(minutes=1) <= now_utc
+                ]
+                combined = {c.timestamp: c for c in cached}
+                for c in completed_new_candles:
+                    combined[c.timestamp] = c
+                symbol_candles = sorted(combined.values(), key=lambda x: x.timestamp)
+                cutoff = now_utc - timedelta(days=HISTORY_DAYS + 2)
+                symbol_candles = [
+                    c for c in symbol_candles
+                    if c.timestamp >= cutoff and c.timestamp + timedelta(minutes=1) <= now_utc
+                ]
+                self._candle_cache[clean_symbol] = symbol_candles
 
-                    minute = (now_utc.minute // 5) * 5
-                    bar_time = now_utc.replace(minute=minute, second=0, microsecond=0)
-                    expected_last_bar_start = bar_time - timedelta(minutes=5)
-                    if expected_last_bar_start.tzinfo is None:
-                        expected_last_bar_start = expected_last_bar_start.replace(tzinfo=timezone.utc)
+            if symbol_candles:
+                completed_candles = [
+                    c for c in symbol_candles
+                    if c.timestamp + timedelta(minutes=1) <= now_utc
+                ]
+                if completed_candles:
+                    bars_dict[clean_symbol] = completed_candles
 
-                    if not snapshot.entry:
-                        self.logger.warning(f"stale bars for {clean_symbol}: no entry-timeframe candles in snapshot")
-                        continue
+        layer4_selected = select_layer4_candidates(pool_input, bars_dict, max_candidates=8)
+        self.logger.info(f"[Layer 4 Selector] Selected {len(layer4_selected)} candidates from pool of {len(pool_input)} symbols.")
 
-                    last_entry = snapshot.entry[-1]
-                    last_ts = last_entry.timestamp
-                    if last_ts.tzinfo is None:
-                        last_ts = last_ts.replace(tzinfo=timezone.utc)
+        for item in layer4_selected:
+            clean_symbol = item.symbol
+            try:
+                symbol_candles = self._candle_cache.get(clean_symbol, [])
+                if not symbol_candles:
+                    continue
 
-                    if last_ts < expected_last_bar_start:
-                        self.logger.warning(f"stale bars for {clean_symbol}: latest={last_ts}, expected>={expected_last_bar_start}")
-                        continue
-                    self.latest_snapshots[clean_symbol] = snapshot
-                    self.logger.info(f"[{clean_symbol}] MTF Chart Analysis | {snapshot.candle_bias_summary} | 1H Levels: {snapshot.one_hour_levels} | 15M Levels: {snapshot.fifteen_minute_levels}")
+                timezone_obj = ZoneInfo("America/New_York")
+                resampled_5m = _resample(tuple(symbol_candles), Timeframe.FIVE_MIN, timezone_obj).bars
+                if not resampled_5m:
+                    continue
 
-                    analysis = strategy.analyze(snapshot)
-                    signal = strategy.signal(snapshot)
-                    if signal is None:
-                        reason_msg = analysis.reason if analysis else "no signal"
-                        self.logger.info(f"[{clean_symbol}] No signal generated | Reason: {reason_msg}")
-                        continue
+                series = MultiTimeframeSeries.from_5m(
+                    list(resampled_5m),
+                    entry_timeframe=Timeframe.FIVE_MIN,
+                    timezone_name="America/New_York",
+                    spread_bps=2.0,
+                )
+                snapshot = series.snapshot_at(now_utc)
 
-                    self.logger.info(f"[{clean_symbol}] Signal | Score: {signal.confidence:.2f} | Side: {signal.side} | Entry: ${signal.entry_price:.2f} | SL: ${signal.stop_price:.2f} | TP: ${signal.target_price:.2f} | Reason: {signal.reason}")
+                minute = (now_utc.minute // 5) * 5
+                bar_time = now_utc.replace(minute=minute, second=0, microsecond=0)
+                expected_last_bar_start = bar_time - timedelta(minutes=5)
+                if expected_last_bar_start.tzinfo is None:
+                    expected_last_bar_start = expected_last_bar_start.replace(tzinfo=timezone.utc)
 
-                    analyzed_candidates.append((clean_symbol, signal.confidence, signal.side, signal.reason, signal.entry_price, signal.stop_price, signal.target_price))
-                    dashboard_stocks.append({
-                        "symbol": clean_symbol,
-                        "market": "Global/US",
-                        "current_price": signal.entry_price,
-                        "score": signal.confidence,
-                    })
-                except Exception as sym_ex:
-                    self.last_scan_errors += 1
-                    if is_connectivity_error(sym_ex):
-                        self.last_scan_connectivity_errors += 1
-                    self.logger.error(f"CRITICAL: Symbol analysis error for {clean_symbol}: {sym_ex}")
+                if not snapshot.entry:
+                    self.logger.warning(f"stale bars for {clean_symbol}: no entry-timeframe candles in snapshot")
+                    continue
+
+                last_entry = snapshot.entry[-1]
+                last_ts = last_entry.timestamp
+                if last_ts.tzinfo is None:
+                    last_ts = last_ts.replace(tzinfo=timezone.utc)
+
+                if last_ts < expected_last_bar_start:
+                    self.logger.warning(f"stale bars for {clean_symbol}: latest={last_ts}, expected>={expected_last_bar_start}")
+                    continue
+                self.latest_snapshots[clean_symbol] = snapshot
+                self.logger.info(f"[{clean_symbol}] MTF Chart Analysis | {snapshot.candle_bias_summary}")
+
+                analysis = strategy.analyze(snapshot)
+                signal = strategy.signal(snapshot)
+                if signal is None:
+                    reason_msg = analysis.reason if analysis else "no signal"
+                    self.logger.info(f"[{clean_symbol}] No signal generated | Reason: {reason_msg}")
+                    continue
+
+                self.logger.info(f"[{clean_symbol}] Signal | Score: {signal.confidence:.2f} | Side: {signal.side} | Entry: ${signal.entry_price:.2f}")
+
+                analyzed_candidates.append((clean_symbol, signal.confidence, signal.side, signal.reason, signal.entry_price, signal.stop_price, signal.target_price))
+                dashboard_stocks.append({
+                    "symbol": clean_symbol,
+                    "market": "Global/US",
+                    "current_price": signal.entry_price,
+                    "score": signal.confidence,
+                })
+            except Exception as sym_ex:
+                self.last_scan_errors += 1
+                if is_connectivity_error(sym_ex):
+                    self.last_scan_connectivity_errors += 1
+                self.logger.error(f"CRITICAL: Symbol analysis error for {clean_symbol}: {sym_ex}")
 
         return analyzed_candidates, dashboard_stocks
 

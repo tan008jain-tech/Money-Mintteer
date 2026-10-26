@@ -1,0 +1,47 @@
+{
+  "pool": [],
+  "quarantined": [],
+  "metrics": {
+    "AAPL": {
+      "symbol": "AAPL",
+      "latest_close": 0.0,
+      "median_close_5": 0.0,
+      "median_dollar_volume_20": 0.0,
+      "valid_bar_count": 0,
+      "atr_14": 0.0,
+      "atr_pct": 0.0,
+      "data_source": "SIP",
+      "status": "excluded",
+      "exclusion_reason": "no_bars"
+    },
+    "MSFT": {
+      "symbol": "MSFT",
+      "latest_close": 0.0,
+      "median_close_5": 0.0,
+      "median_dollar_volume_20": 0.0,
+      "valid_bar_count": 0,
+      "atr_14": 0.0,
+      "atr_pct": 0.0,
+      "data_source": "SIP",
+      "status": "excluded",
+      "exclusion_reason": "no_bars"
+    }
+  },
+  "exclusion_counts": {
+    "low_price": 0,
+    "low_median_price": 0,
+    "insufficient_history": 0,
+    "low_liquidity": 0,
+    "low_volatility": 0,
+    "high_volatility_quarantine": 0,
+    "no_bars": 2,
+    "api_error": 0
+  },
+  "requested_feed": "SIP",
+  "actual_feed": "SIP",
+  "data_source": "SIP",
+  "generated_at": "2026-10-24T05:18:10.672784+00:00",
+  "stale": true,
+  "config_signature": "7bbdb23e61830e87",
+  "universe_signature": "e26701621895134c"
+}

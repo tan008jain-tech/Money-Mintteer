@@ -38,6 +38,18 @@ def _env_percent(name: str, default: float) -> float:
     return _env_float(name, default * 100.0) / 100.0
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    val = raw.strip().lower()
+    if val in ("true", "1", "yes", "on"):
+        return True
+    if val in ("false", "0", "no", "off"):
+        return False
+    raise ValueError(f"{name} must be boolean")
+
+
 
 
 

@@ -1,0 +1,10 @@
+{
+  "tools": {
+    "shell": {
+      "enableInteractiveShell": false
+    }
+  },
+  "general": {
+    "enableNotifications": true
+  }
+}

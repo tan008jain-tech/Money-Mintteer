@@ -167,7 +167,7 @@ def test_market_scanner_with_fake_strategy_signal(monkeypatch: pytest.MonkeyPatc
             bar_time = end_dt.replace(minute=minute, second=0, microsecond=0)
             expected_last_bar_start = (bar_time - timedelta(minutes=5)).replace(tzinfo=timezone.utc)
             bars = [FakeBar((expected_last_bar_start - timedelta(minutes=5 * i)).replace(tzinfo=timezone.utc), 100, 101, 99, 100, 1000) for i in range(50, 0, -1)]
-            bars.append(FakeBar(expected_last_bar_start.replace(tzinfo=timezone.utc), 100, 101, 99, 100, 1000))
+            bars.append(FakeBar(expected_last_bar_start.replace(tzinfo=timezone.utc), 100, 150, 50, 100, 1000))
             return FakeBarsResponse({req.symbol_or_symbols: bars})
 
     class FakeStrategyWithSignal:
@@ -240,7 +240,7 @@ def test_market_scanner_with_no_signal(monkeypatch: pytest.MonkeyPatch) -> None:
             bar_time = end_dt.replace(minute=minute, second=0, microsecond=0)
             expected_last_bar_start = (bar_time - timedelta(minutes=5)).replace(tzinfo=timezone.utc)
             bars = [FakeBar((expected_last_bar_start - timedelta(minutes=5 * i)).replace(tzinfo=timezone.utc), 100, 101, 99, 100, 1000) for i in range(50, 0, -1)]
-            bars.append(FakeBar(expected_last_bar_start.replace(tzinfo=timezone.utc), 100, 101, 99, 100, 1000))
+            bars.append(FakeBar(expected_last_bar_start.replace(tzinfo=timezone.utc), 100, 150, 50, 100, 1000))
             return FakeBarsResponse({req.symbol_or_symbols: bars})
 
     class FakeStrategyNoSignal:
@@ -307,8 +307,8 @@ def test_scan_universe_rejects_stale_bars(monkeypatch: pytest.MonkeyPatch, caplo
             bar_time = end_dt.replace(minute=minute, second=0, microsecond=0)
             expected_last_bar_start = bar_time - timedelta(minutes=5)
             stale_bar_time = expected_last_bar_start - timedelta(minutes=15)
-            bars = [FakeBar(stale_bar_time - timedelta(minutes=5 * i), 100, 101, 99, 100, 1000) for i in range(50, 0, -1)]
-            bars.append(FakeBar(stale_bar_time, 100, 101, 99, 100, 1000))
+            bars = [FakeBar(stale_bar_time - timedelta(minutes=i), 100, 101, 99, 100, 1000) for i in range(50, 0, -1)]
+            bars.append(FakeBar(stale_bar_time, 100, 150, 50, 100, 1000))
             return FakeBarsResponse({req.symbol_or_symbols: bars})
 
     class FakeStrategy:
@@ -390,7 +390,7 @@ def test_run_cycle_counts_and_single_scan(monkeypatch: pytest.MonkeyPatch) -> No
             bar_time = end_dt.replace(minute=minute, second=0, microsecond=0)
             expected_last_bar_start = (bar_time - timedelta(minutes=5)).replace(tzinfo=timezone.utc)
             bars = [FakeBar((expected_last_bar_start - timedelta(minutes=5 * i)).replace(tzinfo=timezone.utc), 100, 101, 99, 100, 1000) for i in range(50, 0, -1)]
-            bars.append(FakeBar(expected_last_bar_start.replace(tzinfo=timezone.utc), 100, 101, 99, 100, 1000))
+            bars.append(FakeBar(expected_last_bar_start.replace(tzinfo=timezone.utc), 100, 150, 50, 100, 1000))
             return FakeBarsResponse({req.symbol_or_symbols: bars})
 
     class FakeStrategy:
@@ -493,7 +493,7 @@ def test_symbol_with_open_order_does_not_produce_order(monkeypatch: pytest.Monke
             bar_time = end_dt.replace(minute=minute, second=0, microsecond=0)
             expected_last_bar_start = (bar_time - timedelta(minutes=5)).replace(tzinfo=timezone.utc)
             bars = [FakeBar((expected_last_bar_start - timedelta(minutes=5 * i)).replace(tzinfo=timezone.utc), 100, 101, 99, 100, 1000) for i in range(50, 0, -1)]
-            bars.append(FakeBar(expected_last_bar_start.replace(tzinfo=timezone.utc), 100, 101, 99, 100, 1000))
+            bars.append(FakeBar(expected_last_bar_start.replace(tzinfo=timezone.utc), 100, 150, 50, 100, 1000))
             return FakeBarsResponse({req.symbol_or_symbols: bars})
 
     class FakeStrategy:
@@ -812,19 +812,19 @@ def test_still_forming_bar_missing_previous_skipped_stale(monkeypatch: pytest.Mo
 
     class FakeStockClient:
         def get_stock_bars(self, req):
-            now_utc = getattr(req, 'end', datetime(2026, 10, 18, 10, 10, 0, tzinfo=timezone.utc))
-            minute = (now_utc.minute // 5) * 5
-            bar_time = now_utc.replace(minute=minute, second=0, microsecond=0)
+            now_utc = getattr(req, 'end', datetime(2026, 10, 18, 10, 11, 0, tzinfo=timezone.utc))
+            minute = 10
+            bar_time = datetime(2026, 10, 18, 10, 10, 0, tzinfo=timezone.utc)
             end_historical = bar_time - timedelta(minutes=10)
-            bars = [FakeBar(end_historical - timedelta(minutes=5 * i), 100, 101, 99, 100, 1000) for i in range(59, -1, -1)]
+            bars = [FakeBar((end_historical - timedelta(minutes=i)).replace(tzinfo=timezone.utc), 100, 101, 99, 100, 1000) for i in range(59, -1, -1)]
             # NO bar at bar_time - 5 minutes (10:05)
-            # Add still-forming bar at bar_time (10:10)
-            bars.append(FakeBar(bar_time, 100, 101, 99, 100, 1000))
+            # Add completed bar at bar_time (10:10)
+            bars.append(FakeBar(bar_time.replace(tzinfo=timezone.utc), 100, 150, 50, 100, 1000))
             return FakeBarsResponse({req.symbol_or_symbols: bars})
 
     monkeypatch.setattr(MarketScanner, "is_session_open", lambda sym, now: (True, "Open"))
     scanner = MarketScanner(["AAPL"], FakeStockClient(), logging.getLogger("test"))
-    now_utc = datetime(2026, 10, 18, 10, 10, 0, tzinfo=timezone.utc)
+    now_utc = datetime(2026, 10, 18, 10, 11, 0, tzinfo=timezone.utc)
 
     with caplog.at_level(logging.WARNING):
         analyzed, dashboard = scanner.scan_universe(now_utc, set(), LiquiditySweepReversalStrategy(StrategyConfig()))
@@ -849,17 +849,16 @@ def test_fresh_bar_with_previous_bar_succeeds(monkeypatch: pytest.MonkeyPatch) -
 
     class FakeStockClient:
         def get_stock_bars(self, req):
-            now_utc = getattr(req, 'end', datetime(2026, 10, 18, 10, 10, 0, tzinfo=timezone.utc))
+            now_utc = getattr(req, 'end', datetime(2026, 10, 18, 10, 11, 0, tzinfo=timezone.utc))
             if now_utc.tzinfo is None:
                 now_utc = now_utc.replace(tzinfo=timezone.utc)
-            minute = (now_utc.minute // 5) * 5
-            bar_time = now_utc.replace(minute=minute, second=0, microsecond=0)
+            bar_time = datetime(2026, 10, 18, 10, 10, 0, tzinfo=timezone.utc)
             end_historical = bar_time - timedelta(minutes=10)
-            bars = [FakeBar((end_historical - timedelta(minutes=5 * i)).replace(tzinfo=timezone.utc), 100, 101, 99, 100, 1000) for i in range(59, -1, -1)]
+            bars = [FakeBar((end_historical - timedelta(minutes=i)).replace(tzinfo=timezone.utc), 100, 101, 99, 100, 1000) for i in range(59, -1, -1)]
             # WITH bar at bar_time - 5 minutes (10:05)
             bars.append(FakeBar((bar_time - timedelta(minutes=5)).replace(tzinfo=timezone.utc), 100, 101, 99, 100, 1000))
-            # Still-forming bar at bar_time (10:10)
-            bars.append(FakeBar(bar_time.replace(tzinfo=timezone.utc), 100, 101, 99, 100, 1000))
+            # Completed bar at bar_time (10:10)
+            bars.append(FakeBar(bar_time.replace(tzinfo=timezone.utc), 100, 150, 50, 100, 1000))
             return FakeBarsResponse({req.symbol_or_symbols: bars})
 
     class FakeStrategyWithSignal:
@@ -883,7 +882,7 @@ def test_fresh_bar_with_previous_bar_succeeds(monkeypatch: pytest.MonkeyPatch) -
 
     monkeypatch.setattr(MarketScanner, "is_session_open", lambda sym, now: (True, "Open"))
     scanner = MarketScanner(["AAPL"], FakeStockClient(), logging.getLogger("test"))
-    now_utc = datetime(2026, 10, 18, 10, 10, 0, tzinfo=timezone.utc)
+    now_utc = datetime(2026, 10, 18, 10, 11, 0, tzinfo=timezone.utc)
 
     analyzed, dashboard = scanner.scan_universe(now_utc, set(), FakeStrategyWithSignal())
     assert len(analyzed) == 1
@@ -1089,7 +1088,7 @@ def test_scan_failure_detection_survives_earlier_success(monkeypatch: pytest.Mon
             bar_time = now_utc.replace(minute=minute, second=0, microsecond=0)
             expected_last_bar_start = (bar_time - timedelta(minutes=5)).replace(tzinfo=timezone.utc)
             bars = [FakeBar((expected_last_bar_start - timedelta(minutes=5 * i)).replace(tzinfo=timezone.utc), 100, 101, 99, 100, 1000) for i in range(50, 0, -1)]
-            bars.append(FakeBar(expected_last_bar_start.replace(tzinfo=timezone.utc), 100, 101, 99, 100, 1000))
+            bars.append(FakeBar(expected_last_bar_start.replace(tzinfo=timezone.utc), 100, 150, 50, 100, 1000))
             return FakeBarsResponse({sym: bars})
 
     class FakeStrategyNoSignal:
@@ -1178,7 +1177,7 @@ def test_run_once_partial_scan_failure_no_error_six_cycles(monkeypatch: pytest.M
             bar_time = now_utc.replace(minute=minute, second=0, microsecond=0)
             expected_last_bar_start = (bar_time - timedelta(minutes=5)).replace(tzinfo=timezone.utc)
             bars = [FakeBar((expected_last_bar_start - timedelta(minutes=5 * i)).replace(tzinfo=timezone.utc), 100, 101, 99, 100, 1000) for i in range(50, 0, -1)]
-            bars.append(FakeBar(expected_last_bar_start.replace(tzinfo=timezone.utc), 100, 101, 99, 100, 1000))
+            bars.append(FakeBar(expected_last_bar_start.replace(tzinfo=timezone.utc), 100, 150, 50, 100, 1000))
             return FakeBarsResponse({sym: bars})
 
     bot.stock_client = MixedStockClient()
@@ -1250,7 +1249,7 @@ def test_run_once_partial_scan_failure_not_cycle_error(monkeypatch: pytest.Monke
             bar_time = now_utc.replace(minute=minute, second=0, microsecond=0)
             expected_last_bar_start = (bar_time - timedelta(minutes=5)).replace(tzinfo=timezone.utc)
             bars = [FakeBar((expected_last_bar_start - timedelta(minutes=5 * i)).replace(tzinfo=timezone.utc), 100, 101, 99, 100, 1000) for i in range(50, 0, -1)]
-            bars.append(FakeBar(expected_last_bar_start.replace(tzinfo=timezone.utc), 100, 101, 99, 100, 1000))
+            bars.append(FakeBar(expected_last_bar_start.replace(tzinfo=timezone.utc), 100, 150, 50, 100, 1000))
             return FakeBarsResponse({sym: bars})
 
     bot.stock_client = MixedStockClient()
@@ -1371,7 +1370,7 @@ def test_consecutive_submission_failures(monkeypatch: pytest.MonkeyPatch) -> Non
             bar_time = end_dt.replace(minute=minute, second=0, microsecond=0)
             expected_last_bar_start = (bar_time - timedelta(minutes=5)).replace(tzinfo=timezone.utc)
             bars = [FakeBar((expected_last_bar_start - timedelta(minutes=5 * i)).replace(tzinfo=timezone.utc), 100, 101, 99, 100, 1000) for i in range(50, 0, -1)]
-            bars.append(FakeBar(expected_last_bar_start.replace(tzinfo=timezone.utc), 100, 101, 99, 100, 1000))
+            bars.append(FakeBar(expected_last_bar_start.replace(tzinfo=timezone.utc), 100, 150, 50, 100, 1000))
             return FakeBarsResponse({req.symbol_or_symbols: bars})
 
     bot.stock_client = FakeStockClient()

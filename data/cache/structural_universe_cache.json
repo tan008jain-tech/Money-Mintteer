@@ -1,0 +1,31 @@
+{
+  "symbols": [
+    "AAPL",
+    "MSFT"
+  ],
+  "metadata": {
+    "AAPL": {
+      "symbol": "AAPL",
+      "name": "",
+      "exchange": "",
+      "shortable": false,
+      "fractionable": false,
+      "marginable": false,
+      "asset_class": "us_equity",
+      "status": "active",
+      "tradable": true
+    },
+    "MSFT": {
+      "symbol": "MSFT",
+      "name": "",
+      "exchange": "",
+      "shortable": false,
+      "fractionable": false,
+      "marginable": false,
+      "asset_class": "us_equity",
+      "status": "active",
+      "tradable": true
+    }
+  },
+  "fetched_at": "2026-10-26T08:06:10.470446+00:00"
+}

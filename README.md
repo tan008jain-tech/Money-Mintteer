@@ -4,7 +4,7 @@ Money Mintter is an event-driven market-analysis and paper-trading system design
 
 ## Current system
 
-- FMP coarse universe during temporary development.
+- Alpaca asset discovery with Layer 1 structural eligibility and Layer 2 daily suitability screening (Layer 3 market-cap filtering deferred).
 - Maximum five deep candidates; existing positions managed separately.
 - Daily / 4H broad context and larger-liquidity awareness.
 - 1H primary intraday liquidity map.
@@ -40,9 +40,9 @@ HF Data Library 1M
 
 The presence of a trade signal is not evidence of profitability. Validate across symbols, months, regimes and realistic execution costs.
 
-## Temporary data path
+## Data path
 
-FMP -> universe candidates
+Alpaca asset discovery & Layer 1/2 suitability -> universe candidates
 
 HF Data Library 1M -> multi-timeframe strategy -> 1M execution-aware backtester
 
