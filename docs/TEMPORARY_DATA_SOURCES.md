@@ -1,8 +1,8 @@
-# Temporary Data Sources
+# Data Sources & Providers
 
-## FMP
+## Alpaca Asset Discovery & Market Data
 
-Used only for coarse universe discovery while IBKR is unavailable.
+Used for live asset discovery, structural eligibility (Layer 1), daily suitability (Layer 2), and real-time/historical equity bars (with Layer 3 market-cap filtering deferred).
 
 ## HF Data Library
 

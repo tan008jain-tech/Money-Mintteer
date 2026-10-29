@@ -1,12 +1,8 @@
 from __future__ import annotations
 
-from money_mintter.core.live_bot import LiveMarketBot
-
-
-def main() -> None:
-    bot = LiveMarketBot()
-    bot.run()
+import sys
+from money_mintter.core.live_bot import main
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

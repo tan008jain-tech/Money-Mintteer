@@ -19,7 +19,7 @@ def test_rejects_invalid_short_stop() -> None:
 
 
 def test_fractional_shares_and_leverage_market_open() -> None:
-    risk = RiskEngine(0.005, 0.20, 0.02)
+    risk = RiskEngine(0.005, 0.20, 0.02, leverage=4.0)
     # Market open: 4x leverage, fractional shares allowed.
     decision = risk.size_long(10_000, 150.0, 145.0, 0, active_candidates_count=5, market_open=True)
     assert decision.approved
@@ -30,7 +30,7 @@ def test_fractional_shares_and_leverage_market_open() -> None:
 
 
 def test_whole_shares_and_leverage_market_closed() -> None:
-    risk = RiskEngine(0.005, 0.20, 0.02)
+    risk = RiskEngine(0.005, 0.20, 0.02, leverage=4.0)
     # Market closed: 2x leverage, whole integer shares only.
     decision = risk.size_long(10_000, 150.0, 145.0, 0, active_candidates_count=5, market_open=False)
     assert decision.approved
@@ -38,10 +38,17 @@ def test_whole_shares_and_leverage_market_closed() -> None:
     assert decision.quantity.is_integer()
 
 
-def test_dynamic_capital_scaling_rounds_to_zero() -> None:
+def test_dynamic_capital_scaling_size_below_minimum() -> None:
     risk = RiskEngine(0.005, 0.01, 0.02)
     # Very small capital and strict position cap -> rounds to zero.
     rej = risk.size_long(100.0, 5000.0, 4900.0, 0, active_candidates_count=5, market_open=False)
     assert not rej.approved
-    assert rej.reason == "position size rounds to zero"
+    assert rej.reason == "size_below_minimum"
+
+
+def test_phase5b_market_closed_size_below_minimum() -> None:
+    risk = RiskEngine(risk_per_trade_pct=0.005, max_position_pct=0.20, max_portfolio_risk_pct=0.02, leverage=1.0)
+    decision = risk.size_long(10_000.0, 500.0, 400.0, 0.0, active_candidates_count=5, market_open=False)
+    assert not decision.approved
+    assert decision.reason == "size_below_minimum"
 

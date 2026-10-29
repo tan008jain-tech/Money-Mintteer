@@ -10,6 +10,7 @@ from money_mintter.strategy.candles import Candle
 
 
 class Timeframe(str, Enum):
+    ONE_MIN = "1m"
     THREE_MIN = "3m"
     FIVE_MIN = "5m"
     FIFTEEN_MIN = "15m"
@@ -20,6 +21,7 @@ class Timeframe(str, Enum):
     @property
     def minutes(self) -> int:
         return {
+            Timeframe.ONE_MIN: 1,
             Timeframe.THREE_MIN: 3,
             Timeframe.FIVE_MIN: 5,
             Timeframe.FIFTEEN_MIN: 15,
@@ -51,7 +53,8 @@ class MultiTimeframeSnapshot:
     one_hour: tuple[Candle, ...]
     fifteen_minute: tuple[Candle, ...]
     entry: tuple[Candle, ...]
-    entry_timeframe: Timeframe
+    one_minute: tuple[Candle, ...] = ()
+    entry_timeframe: Timeframe = Timeframe.FIVE_MIN
     spread_bps: float = 0.0
 
     @property
@@ -106,7 +109,8 @@ class MultiTimeframeSeries:
     one_hour: CandleSeries
     fifteen_minute: CandleSeries
     entry: CandleSeries
-    timezone_name: str
+    one_minute: CandleSeries | None = None
+    timezone_name: str = "America/New_York"
     spread_bps: float = 0.0
 
     @classmethod
@@ -118,7 +122,29 @@ class MultiTimeframeSeries:
         timezone_name: str = "America/New_York",
         spread_bps: float = 0.0,
     ) -> "MultiTimeframeSeries":
-        raise ValueError("1-minute timeframe is strictly forbidden due to high noise. Use 5-minute base bars via from_5m.")
+        if not candles:
+            raise ValueError("multi-timeframe series requires 1-minute candles")
+        if entry_timeframe not in (Timeframe.THREE_MIN, Timeframe.FIVE_MIN):
+            raise ValueError("entry timeframe must be 3m or 5m")
+        timezone = ZoneInfo(timezone_name)
+        ordered = tuple(sorted(candles, key=lambda candle: candle.timestamp))
+        resampled_entry = _resample(ordered, entry_timeframe, timezone)
+        one_min_series = CandleSeries(
+            timeframe=Timeframe.ONE_MIN,
+            bars=ordered,
+            close_times=tuple(c.timestamp + timedelta(minutes=1) for c in ordered),
+        )
+        return cls(
+            source_5m=resampled_entry.bars,
+            daily=_resample(ordered, Timeframe.DAILY, timezone),
+            four_hour=_resample(ordered, Timeframe.FOUR_HOUR, timezone),
+            one_hour=_resample(ordered, Timeframe.ONE_HOUR, timezone),
+            fifteen_minute=_resample(ordered, Timeframe.FIFTEEN_MIN, timezone),
+            entry=resampled_entry,
+            one_minute=one_min_series,
+            timezone_name=timezone_name,
+            spread_bps=spread_bps,
+        )
 
     @classmethod
     def from_5m(
@@ -142,6 +168,7 @@ class MultiTimeframeSeries:
             one_hour=_resample(ordered, Timeframe.ONE_HOUR, timezone),
             fifteen_minute=_resample(ordered, Timeframe.FIFTEEN_MIN, timezone),
             entry=_resample(ordered, entry_timeframe, timezone),
+            one_minute=None,
             timezone_name=timezone_name,
             spread_bps=spread_bps,
         )
@@ -172,6 +199,7 @@ class MultiTimeframeSeries:
             one_hour=self.one_hour.closed_at(as_of, limit=lookback_bars),
             fifteen_minute=self.fifteen_minute.closed_at(as_of, limit=lookback_bars),
             entry=self.entry.closed_at(as_of, limit=lookback_bars),
+            one_minute=self.one_minute.closed_at(as_of, limit=lookback_bars * 5) if self.one_minute else (),
             entry_timeframe=self.entry.timeframe,
             spread_bps=self.spread_bps,
         )

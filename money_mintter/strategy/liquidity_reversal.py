@@ -47,8 +47,15 @@ class StrategyConfig:
     max_stop_pct: float = 4.0
     min_strategy_score: float = 0.65
     min_reward_spread_multiple: float = 2.0
+    round_trip_cost_bps: float = 19.0
+    min_net_edge_multiple: float = 2.0
+    min_reward_risk: float | None = None
 
     def __post_init__(self) -> None:
+        if self.round_trip_cost_bps < 0 or self.min_net_edge_multiple < 0:
+            raise ValueError("cost configuration cannot be negative")
+        if self.min_reward_risk is not None and self.min_reward_risk < 0:
+            raise ValueError("min reward risk cannot be negative")
         if self.entry_timeframe not in (Timeframe.THREE_MIN, Timeframe.FIVE_MIN):
             raise ValueError("entry timeframe must be 3m or 5m")
         if self.entry_lookback_bars < self.sweep_search_bars:
@@ -368,7 +375,13 @@ class LiquiditySweepReversalStrategy:
         if target_percent < min_required_target_pct:
             return SetupAnalysis(False, 0.0, "target profit does not sufficiently clear execution spread costs", sweep_index=sweep_index, mss_index=mss_index, trigger_index=trigger_index, vetoes=("spread_friction",), side=side)
 
+        cost_edge_threshold = (c.round_trip_cost_bps / 100.0) * c.min_net_edge_multiple
+        if target_percent < cost_edge_threshold:
+            return SetupAnalysis(False, 0.0, "target profit does not cover round-trip trading costs with required net edge", sweep_index=sweep_index, mss_index=mss_index, trigger_index=trigger_index, vetoes=("cost_edge",), side=side)
+
         reward_risk = abs(target_price - entry_price) / risk
+        if c.min_reward_risk is not None and reward_risk < c.min_reward_risk:
+            return SetupAnalysis(False, 0.0, "reward to risk ratio is below minimum required", sweep_index=sweep_index, mss_index=mss_index, trigger_index=trigger_index, vetoes=("reward_risk",), side=side)
 
         alignment = _alignment_score(side, daily_bias, four_hour_bias, one_hour_bias, fifteen_bias)
         rejection_score = min(
@@ -413,7 +426,7 @@ class LiquiditySweepReversalStrategy:
         )
 
         if score < c.min_strategy_score:
-            return SetupAnalysis(False, score, "setup score below >80% accuracy threshold", vetoes=("low_score",), side=side)
+            return SetupAnalysis(False, score, "setup score below minimum threshold", vetoes=("low_score",), side=side)
 
         if not all(
             isfinite(value)

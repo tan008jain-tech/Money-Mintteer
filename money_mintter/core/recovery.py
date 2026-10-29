@@ -26,6 +26,7 @@ class RecoveryManager:
         broker: Broker,
         wallet: WalletLedger,
         open_trades: dict[str, ManagedTrade],
+        strategy_state: Any = (),
     ) -> RuntimeSnapshot:
         positions = tuple(
             PositionSnapshot(
@@ -53,6 +54,7 @@ class RecoveryManager:
             wallet=wallet.wallet,
             positions=positions,
             open_trades=trades,
+            strategy_state=strategy_state,
         )
 
     @staticmethod
