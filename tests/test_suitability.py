@@ -354,7 +354,7 @@ def test_feed_retry_non_mixing_multibatch(monkeypatch) -> None:
 
 
 def test_stale_session_edge_cases_boundary() -> None:
-    settings = Settings()
+    settings = Settings(alpaca_data_feed="sip")
     with tempfile.TemporaryDirectory() as tmpdir:
         engine = DailySuitabilityEngine(settings=settings, cache_dir=tmpdir)
         # Test handling of generated_at timestamps and max stale sessions
@@ -601,7 +601,7 @@ def test_legitimately_evaluated_empty_pool_accepted() -> None:
 
 
 def test_trading_session_boundary_sessions() -> None:
-    settings = Settings()
+    settings = Settings(alpaca_data_feed="sip")
     with tempfile.TemporaryDirectory() as tmpdir:
         engine = DailySuitabilityEngine(settings=settings, cache_dir=tmpdir)
         
@@ -741,7 +741,7 @@ def test_market_timing_before_after_close_and_holiday() -> None:
 
 
 def test_calendar_failure_72_hour_fallback() -> None:
-    settings = Settings()
+    settings = Settings(alpaca_data_feed="sip")
     with tempfile.TemporaryDirectory() as tmpdir:
         engine = DailySuitabilityEngine(settings=settings, cache_dir=tmpdir)
         now = datetime.now(timezone.utc)
@@ -821,4 +821,101 @@ def test_compatibility_safety_with_calendar_failure() -> None:
             mock_ecs.side_effect = Exception("Calendar service down")
             fallback = engine.load_stale_fallback_pool(eligible_symbols=["AAPL"])
             assert fallback is None
+
+
+def test_stale_cached_empty_pool_triggers_fresh_evaluation() -> None:
+    settings = Settings()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        stock_client = MagicMock()
+        bars = create_bars_for_symbol(base_price=100.0, num_bars=30, daily_volume=500_000.0)
+        stock_client.get_stock_bars.return_value = MagicMock(data={"AAPL": bars}, next_page_token=None)
+
+        engine = DailySuitabilityEngine(settings=settings, stock_client=stock_client, cache_dir=tmpdir, historical_feed="sip")
+        now = datetime.now(timezone.utc)
+        recent_time = now - timedelta(hours=1)
+
+        res_stale_empty = SuitabilityResult(
+            pool=[],
+            quarantined=[],
+            metrics={},
+            exclusion_counts={"no_bars": 1},
+            requested_feed="sip",
+            actual_feed="sip",
+            data_source="sip",
+            generated_at=recent_time.isoformat(),
+            stale=True,
+            cached=False,
+            config_signature=engine._compute_config_signature(),
+            universe_signature=engine._compute_universe_signature(["AAPL"]),
+        )
+        engine.save_persisted_pool(res_stale_empty)
+
+        result = engine.evaluate_universe(["AAPL"], now_utc=now, force_refresh=False)
+        assert result.pool == ["AAPL"]
+        assert result.stale is False
+        stock_client.get_stock_bars.assert_called()
+
+
+def test_stale_cached_non_empty_pool_triggers_fresh_evaluation() -> None:
+    settings = Settings(min_latest_close=1000.0)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        stock_client = MagicMock()
+        bars = create_bars_for_symbol(base_price=50.0, num_bars=30, daily_volume=500_000.0)
+        stock_client.get_stock_bars.return_value = MagicMock(data={"AAPL": bars}, next_page_token=None)
+
+        engine = DailySuitabilityEngine(settings=settings, stock_client=stock_client, cache_dir=tmpdir, historical_feed="sip")
+        now = datetime.now(timezone.utc)
+        recent_time = now - timedelta(hours=1)
+
+        res_stale_non_empty = SuitabilityResult(
+            pool=["AAPL"],
+            quarantined=[],
+            metrics={},
+            exclusion_counts={},
+            requested_feed="sip",
+            actual_feed="sip",
+            data_source="sip",
+            generated_at=recent_time.isoformat(),
+            stale=True,
+            cached=False,
+            config_signature=engine._compute_config_signature(),
+            universe_signature=engine._compute_universe_signature(["AAPL"]),
+        )
+        engine.save_persisted_pool(res_stale_non_empty)
+
+        result = engine.evaluate_universe(["AAPL"], now_utc=now, force_refresh=False)
+        assert result.pool == []
+        assert result.stale is False
+        stock_client.get_stock_bars.assert_called()
+
+
+def test_non_stale_valid_cached_pool_is_reused() -> None:
+    settings = Settings()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        stock_client = MagicMock()
+        engine = DailySuitabilityEngine(settings=settings, stock_client=stock_client, cache_dir=tmpdir, historical_feed="sip")
+        now = datetime.now(timezone.utc)
+        recent_time = now - timedelta(minutes=5)
+
+        res_valid = SuitabilityResult(
+            pool=["AAPL"],
+            quarantined=[],
+            metrics={},
+            exclusion_counts={},
+            requested_feed="sip",
+            actual_feed="sip",
+            data_source="sip",
+            generated_at=recent_time.isoformat(),
+            stale=False,
+            cached=False,
+            config_signature=engine._compute_config_signature(),
+            universe_signature=engine._compute_universe_signature(["AAPL"]),
+        )
+        engine.save_persisted_pool(res_valid)
+
+        result = engine.evaluate_universe(["AAPL"], now_utc=now, force_refresh=False)
+        assert result.pool == ["AAPL"]
+        assert result.stale is False
+        stock_client.get_stock_bars.assert_not_called()
+
 

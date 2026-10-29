@@ -79,11 +79,26 @@ class Settings:
     max_single_position_pct: float = field(
         default_factory=lambda: _env_percent("MAX_SINGLE_POSITION_PCT", 0.90)
     )
+    isolated_opportunity_max_pct: float = field(
+        default_factory=lambda: _env_percent("ISOLATED_OPPORTUNITY_MAX_PCT", 0.65)
+    )
     commission_per_order_usd: float = field(
-        default_factory=lambda: _env_float("COMMISSION_PER_ORDER_USD", 0.35)
+        default_factory=lambda: _env_float("COMMISSION_PER_ORDER_USD", 0.0)
     )
     commission_per_share_usd: float = field(
-        default_factory=lambda: _env_float("COMMISSION_PER_SHARE_USD", 0.0035)
+        default_factory=lambda: _env_float("COMMISSION_PER_SHARE_USD", 0.0)
+    )
+    estimated_regulatory_fee_per_share: float = field(
+        default_factory=lambda: _env_float("ESTIMATED_REGULATORY_FEE_PER_SHARE", 0.000195)
+    )
+    estimated_sec_fee_rate: float = field(
+        default_factory=lambda: _env_float("ESTIMATED_SEC_FEE_RATE", 0.0000206)
+    )
+    estimated_taf_cap_usd: float = field(
+        default_factory=lambda: _env_float("ESTIMATED_TAF_CAP_USD", 9.79)
+    )
+    estimated_cat_fee_per_share: float = field(
+        default_factory=lambda: _env_float("ESTIMATED_CAT_FEE_PER_SHARE", 0.000003)
     )
     min_gross_to_cost_multiple: float = field(
         default_factory=lambda: _env_float("MIN_GROSS_TO_COST_MULTIPLE", 3.0)
@@ -106,6 +121,9 @@ class Settings:
 
     alpaca_data_feed: str = field(
         default_factory=lambda: _env_text("ALPACA_DATA_FEED", "iex")
+    )
+    enable_trend_continuation: bool = field(
+        default_factory=lambda: _env_bool("ENABLE_TREND_CONTINUATION", False)
     )
     min_latest_close: float = field(
         default_factory=lambda: _env_float("MIN_LATEST_CLOSE", 5.0)
@@ -193,10 +211,20 @@ class Settings:
             raise ValueError("max position percentage must be in (0, 1]")
         if not 0 < self.max_single_position_pct <= 1:
             raise ValueError("MAX_SINGLE_POSITION_PCT must be in (0, 1]")
+        if not 0 < self.isolated_opportunity_max_pct <= 1:
+            raise ValueError("ISOLATED_OPPORTUNITY_MAX_PCT must be in (0, 1]")
         if self.commission_per_order_usd < 0:
             raise ValueError("COMMISSION_PER_ORDER_USD must be >= 0")
         if self.commission_per_share_usd < 0:
             raise ValueError("COMMISSION_PER_SHARE_USD must be >= 0")
+        if self.estimated_regulatory_fee_per_share < 0:
+            raise ValueError("ESTIMATED_REGULATORY_FEE_PER_SHARE must be >= 0")
+        if self.estimated_sec_fee_rate < 0:
+            raise ValueError("ESTIMATED_SEC_FEE_RATE must be >= 0")
+        if self.estimated_taf_cap_usd < 0:
+            raise ValueError("ESTIMATED_TAF_CAP_USD must be >= 0")
+        if self.estimated_cat_fee_per_share < 0:
+            raise ValueError("ESTIMATED_CAT_FEE_PER_SHARE must be >= 0")
         if self.min_gross_to_cost_multiple < 0:
             raise ValueError("MIN_GROSS_TO_COST_MULTIPLE must be >= 0")
         if self.min_reward_risk < 0:

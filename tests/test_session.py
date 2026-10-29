@@ -534,4 +534,40 @@ def test_summary_equity_na_zero_cycles(monkeypatch, caplog):
 
     with caplog.at_level(logging.INFO):
         bot.run_session(now_fn=lambda: t_open - timedelta(minutes=5), sleep_fn=fake_sleep)
-    assert "equity=n/a" in caplog.text
+    assert "equity=unavailable" in caplog.text
+
+
+def test_market_open_lag_polling_success(monkeypatch):
+    bot = LiveMarketBot()
+    t0 = datetime(2026, 10, 21, 9, 25, tzinfo=timezone.utc)
+    t_open = datetime(2026, 10, 21, 9, 30, tzinfo=timezone.utc)
+    t_close = datetime(2026, 10, 21, 16, 0, tzinfo=timezone.utc)
+
+    clock_closed = FakeClock(is_open=False, next_open=t_open, next_close=t_close)
+    clock_open = FakeClock(is_open=True, next_open=t_open, next_close=t_close)
+
+    client = FakeTradingClient(clock_closed)
+    bot.trading_client = client
+    bot.portfolio_manager = LivePortfolioManager(client, bot.logger)
+
+    current_time = t0
+    in_polling = False
+    poll_count = 0
+    def fake_sleep(secs):
+        nonlocal current_time, in_polling, poll_count, client
+        current_time += timedelta(seconds=secs)
+        if current_time >= t_open and not in_polling:
+            in_polling = True
+        if in_polling:
+            poll_count += 1
+            if poll_count >= 2:
+                client.clock = clock_open
+            if poll_count >= 3:
+                current_time = t_close - timedelta(minutes=5)
+
+    monkeypatch.setattr(bot, "run_once", lambda now: {"orders_sent": 0})
+
+    res = bot.run_session(now_fn=lambda: current_time, sleep_fn=fake_sleep)
+    assert res["status"] == "completed"
+    assert poll_count >= 2
+

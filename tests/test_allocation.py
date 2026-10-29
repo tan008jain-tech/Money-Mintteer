@@ -56,15 +56,38 @@ def test_allocation_a_single_sell(monkeypatch: pytest.MonkeyPatch) -> None:
     settings = Settings()
 
     client = FakeTradingClient()
+    client._account = type("Account", (), {"cash": 1000.0, "equity": 1000.0, "buying_power": 1000.0, "last_equity": 1000.0})()
     manager = LivePortfolioManager(client, logging.getLogger("test"))
 
     top_new = [("AAPL", 0.9, Side.SELL, "reason", 553.12, 555.62, 548.94)]
-    orders_sent = manager.submit_bracket_orders(top_new, set(), 650.0, settings)
+    orders_sent = manager.submit_bracket_orders(top_new, set(), 1000.0, settings)
 
     assert orders_sent == 1
     assert len(client.submitted_orders) == 1
     assert client.submitted_orders[0].qty == 1
     assert client.submitted_orders[0].side == OrderSide.SELL
+
+
+def test_allocation_opportunity_aware_rules(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RISK_PER_TRADE_PCT", "0.5")
+    monkeypatch.setenv("MAX_PORTFOLIO_RISK_PCT", "2")
+    settings = Settings()
+
+    client = FakeTradingClient()
+    manager = LivePortfolioManager(client, logging.getLogger("test"))
+
+    # Test unknown win probability defaults to strict baseline (no above-baseline exception)
+    top_new = [("AAPL", 0.9, Side.BUY, "reason", 100.0, 98.0, 105.0)]
+    upcoming = [{"required_capital": 200.0, "actionable_mins": 10}]
+    # Win probability unknown (None) -> baseline W / N = 1000 / 2 = 500, but capped at baseline or required.
+    orders_sent = manager.submit_bracket_orders(top_new, set(), 1000.0, settings, upcoming_opportunities=upcoming, win_probabilities={"AAPL": None})
+    assert orders_sent == 1
+
+    # Test candidate affordability check (> 70% of wallet skipped)
+    top_unaffordable = [("GOOG", 0.9, Side.BUY, "reason", 800.0, 790.0, 820.0)]
+    orders_skipped = manager.submit_bracket_orders(top_unaffordable, set(), 1000.0, settings)
+    assert orders_skipped == 0
+
 
 
 def test_allocation_b_two_buy(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -113,7 +136,7 @@ def test_allocation_d_cost_gate(monkeypatch: pytest.MonkeyPatch) -> None:
     client = FakeTradingClient()
     manager = LivePortfolioManager(client, logging.getLogger("test"))
 
-    top_new = [("AAPL", 0.9, Side.BUY, "r", 92.69, 91.47, 93.28)]
+    top_new = [("AAPL", 0.9, Side.BUY, "r", 100.0, 99.0, 100.001)]
     orders_sent = manager.submit_bracket_orders(top_new, set(), 650.0, settings)
 
     assert orders_sent == 0
@@ -145,8 +168,8 @@ def test_allocation_f_settings(monkeypatch: pytest.MonkeyPatch) -> None:
 
     s = Settings()
     assert s.max_single_position_pct == 0.90
-    assert s.commission_per_order_usd == 0.35
-    assert s.commission_per_share_usd == 0.0035
+    assert s.commission_per_order_usd == 0.0
+    assert s.commission_per_share_usd == 0.0
     assert s.min_gross_to_cost_multiple == 3.0
 
     monkeypatch.setenv("MAX_SINGLE_POSITION_PCT", "90")

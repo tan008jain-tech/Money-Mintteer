@@ -71,7 +71,8 @@ class DailySuitabilityEngine:
         self.logger = logger or logging.getLogger("MoneyMintterMasterBlueprint")
         self.historical_feed = (
             historical_feed
-            or os.getenv("ALPACA_HISTORICAL_FEED", "sip")
+            or os.getenv("ALPACA_HISTORICAL_FEED")
+            or getattr(self.settings, "alpaca_data_feed", "iex")
         ).strip().lower()
 
     def _get_stock_client(self) -> StockHistoricalDataClient:
@@ -336,7 +337,7 @@ class DailySuitabilityEngine:
                     act_feed = (cached_result.actual_feed or cached_result.data_source or "").strip().lower()
                     feed_matches = bool(req_feed) and req_feed == feed_policy and bool(act_feed) and act_feed == feed_policy
 
-                    if not session_expired and config_matches and universe_matches and feed_matches:
+                    if not session_expired and config_matches and universe_matches and feed_matches and not cached_result.stale:
                         self.logger.info(
                             f"[Layer 2 Suitability] Reusing cached daily pool (pool size: {len(cached_result.pool)}, "
                             f"stale: {cached_result.stale})"

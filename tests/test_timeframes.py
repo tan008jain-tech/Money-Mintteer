@@ -30,10 +30,16 @@ def test_five_minute_base_aggregation():
     assert first.volume == 100
 
 
-def test_one_minute_forbidden():
-    candles = [candle(i) for i in range(5)]
-    with pytest.raises(ValueError, match="1-minute timeframe is strictly forbidden"):
-        MultiTimeframeSeries.from_1m(candles)
+def test_one_minute_series_creation():
+    candles = [Candle("ABC", datetime(2026, 10, 1, 9, 30, tzinfo=timezone.utc) + timedelta(minutes=i), 100.0+i*0.1, 101.0+i*0.1, 99.0+i*0.1, 100.5+i*0.1, 10) for i in range(30)]
+    series = MultiTimeframeSeries.from_1m(
+        candles,
+        entry_timeframe=Timeframe.FIVE_MIN,
+        timezone_name="UTC",
+    )
+    assert series.one_minute is not None
+    assert len(series.one_minute.bars) == 30
+    assert len(series.entry.bars) > 0
 
 
 def test_mtf_levels_and_bias_summary():

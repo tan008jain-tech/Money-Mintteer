@@ -40,7 +40,7 @@ class StructuralEligibilityEngine:
             symbol = str(asset.get("symbol", "")).upper().strip()
             status = str(asset.get("status", "")).lower()
             tradable = bool(asset.get("tradable", False))
-            asset_class = str(asset.get("asset_class", "")).lower()
+            asset_class = str(asset.get("asset_class", "") or asset.get("class", "")).lower()
             exchange = str(asset.get("exchange", "")).upper().strip()
             name = str(asset.get("name", "")).strip()
             shortable = bool(asset.get("shortable", False))

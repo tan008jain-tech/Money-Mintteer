@@ -30,6 +30,7 @@ class RuntimeSupervisor:
         store: PostgresSnapshotStore,
         health: HealthRegistry,
         execution_guard: ExecutionGuard,
+        strategy: Any | None = None,
     ) -> None:
         self.broker = broker
         self.wallet = wallet
@@ -39,12 +40,19 @@ class RuntimeSupervisor:
         self.watchdog = Watchdog(health)
         self.execution_guard = execution_guard
         self.recovery = RecoveryManager()
+        self.strategy = strategy
 
     def checkpoint(self) -> None:
+        strategy_state = (
+            self.strategy.export_state()
+            if self.strategy and hasattr(self.strategy, "export_state")
+            else ()
+        )
         snapshot = self.recovery.capture(
             broker=self.broker,
             wallet=self.wallet,
             open_trades=self.trade_provider(),
+            strategy_state=strategy_state,
         )
         self.store.save_snapshot(snapshot)
         self.store.append_event("runtime_checkpoint", snapshot.to_dict())
@@ -55,6 +63,8 @@ class RuntimeSupervisor:
             result = ReconciliationResult(False, ("no persisted runtime snapshot",))
         else:
             result = self.recovery.reconcile(snapshot, self.broker)
+            if snapshot.strategy_state and self.strategy and hasattr(self.strategy, "import_state"):
+                self.strategy.import_state(snapshot.strategy_state)
 
         self.health.heartbeat(
             "reconciliation",

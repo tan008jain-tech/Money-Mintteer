@@ -32,7 +32,12 @@ class RuntimeSnapshot:
     wallet: float
     positions: tuple[PositionSnapshot, ...]
     open_trades: tuple[TradeSnapshot, ...]
+    strategy_state: Any = ()
     schema_version: int = 1
+
+    def __post_init__(self) -> None:
+        if isinstance(self.strategy_state, (list, tuple)) and not isinstance(self.strategy_state, dict):
+            object.__setattr__(self, "strategy_state", tuple(self.strategy_state))
 
     @classmethod
     def now(
@@ -42,6 +47,7 @@ class RuntimeSnapshot:
         wallet: float,
         positions: tuple[PositionSnapshot, ...],
         open_trades: tuple[TradeSnapshot, ...],
+        strategy_state: tuple[Any, ...] = (),
     ) -> "RuntimeSnapshot":
         return cls(
             captured_at=datetime.now(timezone.utc).isoformat(),
@@ -49,6 +55,7 @@ class RuntimeSnapshot:
             wallet=wallet,
             positions=positions,
             open_trades=open_trades,
+            strategy_state=strategy_state,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -62,12 +69,14 @@ class RuntimeSnapshot:
         try:
             positions = tuple(PositionSnapshot(**item) for item in payload["positions"])
             open_trades = tuple(TradeSnapshot(**item) for item in payload["open_trades"])
+            strategy_state = payload.get("strategy_state", ())
             return cls(
                 captured_at=str(payload["captured_at"]),
                 broker_cash=float(payload["broker_cash"]),
                 wallet=float(payload.get("wallet", payload.get("trading_wallet", 0.0))),
                 positions=positions,
                 open_trades=open_trades,
+                strategy_state=strategy_state,
                 schema_version=int(payload.get("schema_version", 1)),
             )
         except (KeyError, TypeError, ValueError) as exc:

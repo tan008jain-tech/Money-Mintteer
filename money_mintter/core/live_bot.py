@@ -29,7 +29,7 @@ from money_mintter.core.risk import RiskEngine
 from money_mintter.core.session_lock import SessionLock
 from money_mintter.core.selector import select_layer4_candidates
 from money_mintter.domain import Side
-from money_mintter.strategy import Candle, LiquiditySweepReversalStrategy, MultiTimeframeSeries, StrategyConfig, Timeframe
+from money_mintter.strategy import Candle, ICTStrategy, LiquiditySweepReversalStrategy, MultiTimeframeSeries, StrategyConfig, Timeframe
 from money_mintter.strategy.timeframes import _resample
 
 
@@ -121,7 +121,7 @@ def discover_universe(trading_client: TradingClient, logger: logging.Logger, api
         if ("validation errors" in err_str or "ValidationError" in type(exc).__name__ or "exchange" in err_str) and hasattr(trading_client, "get"):
             logger.warning(f"[Discovery] SDK asset validation failed ({exc}), falling back to trading_client.get...")
             try:
-                params = search_params.to_request_fields() if search_params is not None else {}
+                params = {"status": "active", "asset_class": "us_equity"}
                 assets = trading_client.get("/assets", params)
                 data_source = "Alpaca REST Fallback"
             except Exception as get_exc:
@@ -141,7 +141,7 @@ def discover_universe(trading_client: TradingClient, logger: logging.Logger, api
 
     if assets is None and hasattr(trading_client, "get"):
         try:
-            params = search_params.to_request_fields() if search_params is not None else {}
+            params = {"status": "active", "asset_class": "us_equity"}
             assets = trading_client.get("/assets", params)
             data_source = "Alpaca REST Get"
         except Exception as exc:
@@ -414,12 +414,8 @@ class MarketScanner:
                     continue
 
                 timezone_obj = ZoneInfo("America/New_York")
-                resampled_5m = _resample(tuple(symbol_candles), Timeframe.FIVE_MIN, timezone_obj).bars
-                if not resampled_5m:
-                    continue
-
-                series = MultiTimeframeSeries.from_5m(
-                    list(resampled_5m),
+                series = MultiTimeframeSeries.from_1m(
+                    list(symbol_candles),
                     entry_timeframe=Timeframe.FIVE_MIN,
                     timezone_name="America/New_York",
                     spread_bps=2.0,
@@ -480,58 +476,68 @@ class LivePortfolioManager:
         self.trading_client = trading_client
         self.logger = logger
         self.last_equity: float | None = None
+        self.last_cash: float | None = None
+        self.last_equity_snapshot: float | None = None
+        self.last_snapshot_time: str | None = None
         self.last_submit_failures = 0
         self._last_equity_date = None
         self.on_unprotected: Any | None = None
 
     def fetch_account_and_positions(self) -> tuple[float, float, float, list[dict[str, Any]], list[dict[str, Any]], set[str]]:
-        account = self.trading_client.get_account()
-        account_cash = float(account.cash)
-        account_equity = float(account.equity)
-        buying_power = float(account.buying_power)
+        try:
+            account = self.trading_client.get_account()
+            account_cash = float(account.cash)
+            account_equity = float(account.equity)
+            buying_power = float(account.buying_power)
 
-        if not hasattr(self, 'last_equity') or self.last_equity is None:
-            if hasattr(account, 'last_equity') and account.last_equity is not None:
-                try:
-                    self.last_equity = float(account.last_equity)
-                except (ValueError, TypeError):
+            if not hasattr(self, 'last_equity') or self.last_equity is None:
+                if hasattr(account, 'last_equity') and account.last_equity is not None:
+                    try:
+                        self.last_equity = float(account.last_equity)
+                    except (ValueError, TypeError):
+                        self.last_equity = account_equity
+                else:
                     self.last_equity = account_equity
-            else:
-                self.last_equity = account_equity
 
-        open_positions = []
-        dashboard_positions = []
-        locked_symbols = set()
-        positions_resp = self.trading_client.get_all_positions()
-        for p in positions_resp:
-            sym = p.symbol.upper().strip()
-            locked_symbols.add(sym)
-            qty = float(p.qty)
-            avg_entry = float(p.avg_entry_price)
-            curr_price = float(p.current_price) if hasattr(p, 'current_price') else avg_entry
-            unrealized_pnl = float(p.unrealized_pl) if hasattr(p, 'unrealized_pl') else 0.0
-            side_str = "BUY" if qty > 0 else "SELL"
-            sl_price = avg_entry * 0.98 if qty > 0 else avg_entry * 1.02
-            tp_price = avg_entry * 1.05 if qty > 0 else avg_entry * 0.95
+            open_positions = []
+            dashboard_positions = []
+            locked_symbols = set()
+            positions_resp = self.trading_client.get_all_positions()
+            for p in positions_resp:
+                sym = p.symbol.upper().strip()
+                locked_symbols.add(sym)
+                qty = float(p.qty)
+                avg_entry = float(p.avg_entry_price)
+                curr_price = float(p.current_price) if hasattr(p, 'current_price') else avg_entry
+                unrealized_pnl = float(p.unrealized_pl) if hasattr(p, 'unrealized_pl') else 0.0
+                side_str = "BUY" if qty > 0 else "SELL"
+                sl_price = avg_entry * 0.98 if qty > 0 else avg_entry * 1.02
+                tp_price = avg_entry * 1.05 if qty > 0 else avg_entry * 0.95
 
-            open_positions.append({
-                "symbol": sym,
-                "side": side_str,
-                "quantity": abs(qty),
-                "entry_price": avg_entry,
-                "current_price": curr_price,
-                "unrealized_pnl": unrealized_pnl,
-            })
-            dashboard_positions.append({
-                "symbol": sym,
-                "side": side_str,
-                "quantity": abs(qty),
-                "entry_price": avg_entry,
-                "stop_price": sl_price,
-                "target_price": tp_price,
-            })
+                open_positions.append({
+                    "symbol": sym,
+                    "side": side_str,
+                    "quantity": abs(qty),
+                    "entry_price": avg_entry,
+                    "current_price": curr_price,
+                    "unrealized_pnl": unrealized_pnl,
+                })
+                dashboard_positions.append({
+                    "symbol": sym,
+                    "side": side_str,
+                    "quantity": abs(qty),
+                    "entry_price": avg_entry,
+                    "stop_price": sl_price,
+                    "target_price": tp_price,
+                })
 
-        return account_cash, account_equity, buying_power, open_positions, dashboard_positions, locked_symbols
+            self.last_cash = account_cash
+            self.last_equity_snapshot = account_equity
+            self.last_snapshot_time = datetime.now(timezone.utc).isoformat()
+            return account_cash, account_equity, buying_power, open_positions, dashboard_positions, locked_symbols
+        except Exception as exc:
+            self.logger.error(f"Failed to fetch account and positions from Alpaca API: {exc}")
+            raise
 
     def fetch_open_order_symbols(self) -> set[str]:
         req = GetOrdersRequest(status=QueryOrderStatus.OPEN)
@@ -552,6 +558,8 @@ class LivePortfolioManager:
         processed_signals: set[tuple[str, datetime]] | None = None,
         locked_normalized: set[str] | None = None,
         open_exposure: float = 0.0,
+        upcoming_opportunities: list[Any] | None = None,
+        win_probabilities: dict[str, float] | None = None,
     ) -> int:
         active_untraded_slots = max(1, 5 - len(locked_symbols))
         open_risk = len(locked_symbols) * settings.risk_per_trade_pct * account_equity
@@ -571,10 +579,22 @@ class LivePortfolioManager:
             if "/" in sym:
                 self.logger.info(f"Skipping {sym}: unsupported slash symbol")
                 continue
+            # Candidate affordability check: individual stock price should be within ~60-70% of wallet (distinct from single-opportunity allocation cap)
+            if curr_price > 0.70 * account_equity:
+                self.logger.info(f"Skipping {sym}: candidate price ${curr_price:.2f} exceeds affordability threshold (70% of wallet ${account_equity:.2f})")
+                continue
             if sc >= settings.min_candidate_score and sym not in locked_symbols and side_val is not None:
                 eligible.append((sym, sc, side_val, reason, curr_price, sl_price, tp_price))
 
         free_capital = max(0.0, account_equity - open_exposure)
+        upcoming_ops = upcoming_opportunities or []
+        win_probs = win_probabilities or {}
+
+        # Opportunity-aware allocation model: rolling 30-min horizon opportunity count N
+        total_ops_count = max(1, len(eligible) + len(upcoming_ops))
+        baseline_allocation = free_capital / total_ops_count if total_ops_count > 0 else free_capital
+        is_isolated = (len(eligible) == 1 and len(upcoming_ops) == 0)
+        isolated_cap = settings.isolated_opportunity_max_pct * account_equity
 
         valid_eligible = []
         for sym, sc, side_val, reason, curr_price, sl_price, tp_price in eligible:
@@ -606,8 +626,40 @@ class LivePortfolioManager:
 
         for idx, (sym, sc, side_val, reason, curr_price, sl_price, tp_price, risk_per_share, reward, stop_pct, target_pct, rr) in enumerate(valid_eligible):
             norm_sym = normalize_symbol(sym)
-            remaining = len(valid_eligible) - idx
-            notional_cap = min(settings.max_single_position_pct * account_equity, free_capital / remaining if remaining > 0 else 0.0)
+            win_prob = win_probs.get(sym, None)  # None = unknown / uncalibrated
+
+            if is_isolated:
+                notional_cap = min(isolated_cap, free_capital, settings.max_single_position_pct * account_equity)
+                alloc_mode = "isolated_opportunity_cap"
+            else:
+                required_one_share = curr_price
+                base_notional = max(baseline_allocation, required_one_share)
+
+                # Above-baseline exception rule: win probability > 60% (0.60)
+                if win_prob is not None and win_prob > 0.60:
+                    # Balance against upcoming opportunities (timing, capital needs)
+                    upcoming_demand = sum(
+                        op.get("required_capital", 100.0)
+                        for op in upcoming_ops
+                        if op.get("actionable_mins", 30) <= 15
+                    )
+                    available_for_current = max(0.0, free_capital - upcoming_demand)
+                    notional_cap = min(
+                        settings.max_single_position_pct * account_equity,
+                        free_capital,
+                        max(base_notional, available_for_current)
+                    )
+                    alloc_mode = "above_baseline_approved_win_prob_gt_60"
+                else:
+                    # Unknown or <= 60%: strict baseline allocation (no above-baseline exception)
+                    notional_cap = min(base_notional, free_capital)
+                    alloc_mode = "baseline_allocation_strict"
+
+            self.logger.info(
+                f"[Allocation Model] {sym}: N={total_ops_count}, baseline=${baseline_allocation:.2f}, "
+                f"win_prob={win_prob if win_prob is not None else 'unknown/uncalibrated'}, "
+                f"mode={alloc_mode}, notional_cap=${notional_cap:.2f}"
+            )
 
             if notional_cap < curr_price:
                 self.logger.info(f"Skipping {sym}: allocation ${notional_cap:.2f} below one share (${curr_price:.2f})")
@@ -657,11 +709,17 @@ class LivePortfolioManager:
                     continue
 
                 gross = qty * abs(tp_price - curr_price)
-                cost = 2 * max(settings.commission_per_order_usd, settings.commission_per_share_usd * qty)
+                sale_notional = (qty * tp_price) if side_val is Side.BUY else (qty * curr_price)
+                sec_fee = sale_notional * settings.estimated_sec_fee_rate
+                finra_taf = min(settings.estimated_taf_cap_usd, settings.estimated_regulatory_fee_per_share * qty)
+                cat_fee = settings.estimated_cat_fee_per_share * qty * 2
+                regulatory_fee = sec_fee + finra_taf + cat_fee
+                explicit_commission = max(settings.commission_per_order_usd, settings.commission_per_share_usd * qty)
+                cost = explicit_commission + regulatory_fee
                 min_multiple = settings.min_gross_to_cost_multiple
 
                 if gross < min_multiple * cost:
-                    self.logger.info(f"Skipping {sym}: expected gross ${gross:.2f} below {min_multiple} x round-trip commission ${cost:.2f}")
+                    self.logger.info(f"Skipping {sym}: expected gross ${gross:.2f} below {min_multiple} x round-trip fee estimate ${cost:.2f}")
                     decision = "skipped_cost_gate"
                     self.logger.info(f"Candidate {sym}: score={sc:.2f}, side={side_val}, entry=${curr_price:.2f}, stop=${sl_price:.2f}, target=${tp_price:.2f}, stop_pct={stop_pct:.2f}%, target_pct={target_pct:.2f}%, rr={rr:.2f}, notional_cap=${notional_cap:.2f}, qty={qty}, gross=${gross:.2f}, cost=${cost:.2f}, decision={decision}")
                     continue
@@ -820,7 +878,7 @@ class LiveMarketBot:
             self.logger.error(f"Critical initialization error: {exc}")
             sys.exit(1)
 
-        self.strategy = LiquiditySweepReversalStrategy(StrategyConfig())
+        self.strategy = ICTStrategy()
         self.portfolio_manager = LivePortfolioManager(self.trading_client, self.logger)
         self.portfolio_manager.on_unprotected = lambda reason: self.kill_switch.trip(reason)
         
@@ -1151,8 +1209,35 @@ class LiveMarketBot:
                             self.logger.error(f"Failed to get clock after waiting for open: {exc}")
 
                         if not getattr(clock, 'is_open', False):
-                            self.logger.info("Market still not open after waiting. Skipping session.")
-                            return {"status": "skipped_market_closed", "cycles": 0, "orders_sent": 0, "errors": 0, "remaining": []}
+                            self.logger.info("Market open reached but clock reports closed (possible few-second lag). Polling continuously for up to 2 minutes...")
+                            poll_start_time = now_fn()
+                            poll_timeout_seconds = 120.0
+                            poll_interval = 2.0
+                            opened_detected = False
+                            while True:
+                                sleep_fn(poll_interval)
+                                now = now_fn()
+                                if now.tzinfo is None and poll_start_time.tzinfo is not None:
+                                    now = now.replace(tzinfo=timezone.utc)
+                                elif now.tzinfo is not None and poll_start_time.tzinfo is None:
+                                    poll_start_time = poll_start_time.replace(tzinfo=timezone.utc)
+                                elapsed_seconds = (now - poll_start_time).total_seconds()
+                                if elapsed_seconds >= poll_timeout_seconds:
+                                    break
+                                try:
+                                    clock = self.trading_client.get_clock()
+                                    if getattr(clock, 'is_open', False):
+                                        opened_detected = True
+                                        next_open = getattr(clock, 'next_open', next_open)
+                                        next_close = getattr(clock, 'next_close', next_close)
+                                        self.logger.info("Market open detected during continuous polling grace period! Starting trading phase.")
+                                        break
+                                except Exception as poll_exc:
+                                    self.logger.warning(f"Error fetching clock during open polling: {poll_exc}")
+
+                            if not opened_detected:
+                                self.logger.info("Market still not open after 2-minute polling grace period. Skipping session.")
+                                return {"status": "skipped_market_closed", "cycles": 0, "orders_sent": 0, "errors": 0, "remaining": []}
                 else:
                     return {"status": "skipped_market_closed", "cycles": 0, "orders_sent": 0, "errors": 0, "remaining": []}
 
@@ -1240,19 +1325,22 @@ class LiveMarketBot:
             return {"status": status, "cycles": cycles, "orders_sent": orders_sent_total, "errors": errors, "remaining": remaining}
 
     def _log_session_summary(self, status: str, cycles: int, orders_sent: int, errors: int) -> None:
-        if cycles == 0:
-            self.logger.info(f"[Session Summary] status={status}, cycles={cycles}, orders_sent={orders_sent}, errors={errors}, equity=n/a")
+        snapshot_time = getattr(self.portfolio_manager, 'last_snapshot_time', None)
+        cash = getattr(self.portfolio_manager, 'last_cash', None)
+        equity = getattr(self.portfolio_manager, 'last_equity_snapshot', None)
+
+        if snapshot_time is None or cash is None or equity is None:
+            self.logger.info(f"[Session Summary] source=Alpaca Account API, timestamp=unavailable, status={status}, cycles={cycles}, orders_sent={orders_sent}, errors={errors}, cash=unavailable, equity=unavailable")
         else:
-            equity = self.latest_state.get("equity", 100000.0)
             last_eq = self.portfolio_manager.last_equity
             change_str = ""
             if last_eq is not None and last_eq > 0:
                 diff = equity - last_eq
                 pct = (diff / last_eq) * 100.0
-                change_str = f", equity=${equity:.2f}, change=${diff:+.2f} ({pct:+.2f}%) vs last_equity=${last_eq:.2f}"
+                change_str = f", cash=${cash:.2f}, equity=${equity:.2f}, change=${diff:+.2f} ({pct:+.2f}%) vs baseline_equity=${last_eq:.2f}"
             else:
-                change_str = f", equity=${equity:.2f}"
-            self.logger.info(f"[Session Summary] status={status}, cycles={cycles}, orders_sent={orders_sent}, errors={errors}{change_str}")
+                change_str = f", cash=${cash:.2f}, equity=${equity:.2f}"
+            self.logger.info(f"[Session Summary] source=Alpaca Account API, timestamp={snapshot_time}, status={status}, cycles={cycles}, orders_sent={orders_sent}, errors={errors}{change_str}")
 
 
 def _sleep_until(target_dt: datetime, now_fn, sleep_fn) -> None:
