@@ -409,15 +409,7 @@ class DailySuitabilityEngine:
 
         # If fetch failed or encountered complete communication error across feeds/batches:
         if fetch_failed or (not all_bars_data and len(eligible_symbols) > 0):
-            cached_fallback = self.load_stale_fallback_pool(eligible_symbols=eligible_symbols)
-            if cached_fallback and cached_fallback.pool is not None:
-                self.logger.warning(
-                    "[Layer 2 Suitability] Historical bar fetch failed or incomplete. Retaining valid compatible persisted fallback pool as STALE."
-                )
-                self.save_persisted_pool(cached_fallback)
-                return cached_fallback
-            else:
-                raise RuntimeError("Layer 2 historical bar fetch failed and no valid compatible cached pool exists.")
+            raise RuntimeError("UNIVERSE_DISCOVERY_FAILED: Layer 2 historical bar fetch failed and no valid live pool can be evaluated.")
 
         # Process symbols and evaluate rules
         metrics: dict[str, SymbolSuitabilityMetrics] = {}
@@ -645,30 +637,6 @@ class DailySuitabilityEngine:
             config_signature=current_config_sig,
             universe_signature=current_universe_sig,
         )
-
-        # Reliability guard: if fresh evaluation yields 0 core pool items due to fetch issues, retain cached pool as stale
-        if not core_pool and eligible_symbols and len(eligible_symbols) > 5 and fetch_failed:
-            cached_fallback = self.load_persisted_pool()
-            if cached_fallback and cached_fallback.pool:
-                self.logger.warning(
-                    "[Layer 2 Suitability] Generated pool empty due to fetch failure. Retaining last valid pool as STALE."
-                )
-                stale_fallback = SuitabilityResult(
-                    pool=cached_fallback.pool,
-                    quarantined=cached_fallback.quarantined,
-                    metrics=cached_fallback.metrics,
-                    exclusion_counts=cached_fallback.exclusion_counts,
-                    requested_feed=requested_feed_label,
-                    actual_feed=cached_fallback.actual_feed,
-                    data_source=cached_fallback.data_source,
-                    generated_at=cached_fallback.generated_at,
-                    stale=True,
-                    cached=False,
-                    config_signature=current_config_sig,
-                    universe_signature=current_universe_sig,
-                )
-                self.save_persisted_pool(stale_fallback)
-                return stale_fallback
 
         self.save_persisted_pool(result)
         self.logger.info(

@@ -50,7 +50,8 @@ def _mock_suitability_evaluation(monkeypatch):
     monkeypatch.setattr("money_mintter.core.suitability.DailySuitabilityEngine.evaluate_universe", mock_evaluate)
 
 
-def test_discovery_24_assets():
+def test_discovery_24_assets(monkeypatch):
+    monkeypatch.setenv("MIN_UNIVERSE_SIZE", "10")
     assets = [FakeAsset(f"SYM{i}", AssetStatus.ACTIVE, True) for i in range(24)]
     client = FakeTradingClient(assets)
     logger = logging.getLogger("test_disc")
@@ -66,7 +67,8 @@ def test_discovery_100_assets():
     assert len(universe) == 100
 
 
-def test_discovery_filters_inactive_non_tradable_duplicates_and_slashes():
+def test_discovery_filters_inactive_non_tradable_duplicates_and_slashes(monkeypatch):
+    monkeypatch.setenv("MIN_UNIVERSE_SIZE", "2")
     assets = [
         FakeAsset("AAPL", AssetStatus.ACTIVE, True),
         FakeAsset("AAPL", AssetStatus.ACTIVE, True),  # Duplicate

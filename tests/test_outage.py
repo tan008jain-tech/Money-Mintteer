@@ -343,7 +343,7 @@ def test_mid_session_outage_continuation_and_flatten():
 def test_discover_universe_layer2_failure_integration(monkeypatch) -> None:
     monkeypatch.setattr("money_mintter.core.live_bot.discover_universe", original_discover_universe)
 
-    # Integration test: real discover_universe calling DailySuitabilityEngine where L2 fetch fails and no cache exists -> returns []
+    # Integration test: real discover_universe calling DailySuitabilityEngine where L2 fetch fails and no cache exists -> raises ConnectivityError (fail-closed)
     trading_client = MagicMock()
     class MockAsset:
         def __init__(self, symbol):
@@ -369,18 +369,16 @@ def test_discover_universe_layer2_failure_integration(monkeypatch) -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         monkeypatch.setenv("MONEY_MINTTER_TEMP_DIR", tmpdir)
         monkeypatch.setenv("MM_CACHE_DIR", tmpdir)
-        # Requirement 1: Discovery returns an empty candidate pool through the real discovery and fallback path.
-        pool = original_discover_universe(trading_client, logger)
-        assert pool == []
-        # Confirm that the mocked historical-data client's get_stock_bars() was actually called and raised the intended failure
+        monkeypatch.setenv("MIN_UNIVERSE_SIZE", "1")
+        with pytest.raises(ConnectivityError, match="UNIVERSE_DISCOVERY_FAILED"):
+            original_discover_universe(trading_client, logger)
         assert stock_client.get_stock_bars.called
 
 
 def test_live_market_bot_position_management_continuity_on_l2_failure(monkeypatch):
     monkeypatch.setattr("money_mintter.core.live_bot.discover_universe", original_discover_universe)
 
-    # Integration/runtime test: LiveMarketBot initializes via real discover_universe encountering L2 failure with no cache,
-    # verifying monitoring, risk/safety control execution, new-entry suppression, and existing position management continuity.
+    # Integration/runtime test: LiveMarketBot startup discovery failure raises ConnectivityError (fail-closed)
     trading_client = MagicMock()
     class MockAsset:
         def __init__(self, symbol):
@@ -406,51 +404,9 @@ def test_live_market_bot_position_management_continuity_on_l2_failure(monkeypatc
     with tempfile.TemporaryDirectory() as tmpdir:
         monkeypatch.setenv("MONEY_MINTTER_TEMP_DIR", tmpdir)
         monkeypatch.setenv("MM_CACHE_DIR", tmpdir)
+        monkeypatch.setenv("MIN_UNIVERSE_SIZE", "1")
 
-        # Initialize bot without mocking discover_universe (testing real discovery and startup runtime path)
-        bot = LiveMarketBot()
-        assert bot.global_universe == []
-        # Confirm that the mocked historical-data client's get_stock_bars() was actually called during initialization
-        assert stock_client.get_stock_bars.called
-
-        # Spy on account & position monitoring and risk/safety controls
-        fetch_mock = MagicMock(return_value=(
-            50000.0, 100000.0, 100000.0,
-            [{"symbol": "AAPL", "quantity": 10, "current_price": 150.0}],
-            [{"symbol": "AAPL", "side": "BUY"}],
-            {"AAPL"}
-        ))
-        bot.portfolio_manager.fetch_account_and_positions = fetch_mock
-        bot.portfolio_manager.fetch_open_order_symbols = MagicMock(return_value=set())
-
-        check_daily_loss_mock = MagicMock(wraps=bot.kill_switch.check_daily_loss)
-        bot.kill_switch.check_daily_loss = check_daily_loss_mock
-
-        submit_orders_mock = MagicMock(return_value=0)
-        bot.portfolio_manager.submit_bracket_orders = submit_orders_mock
-
-        bot.portfolio_manager.last_equity = 100000.0
-        now = datetime(2026, 10, 22, 14, 0, tzinfo=timezone.utc)
-        res = bot.run_once(now)
-
-        # Assertions proving all requirements:
-        # 1. Discovery returned empty pool
-        # 2. Bot continues account and existing-position monitoring (fetch_account_and_positions called)
-        fetch_mock.assert_called_once()
-
-        # 3. Relevant risk and safety controls execute (check_daily_loss called)
-        check_daily_loss_mock.assert_called_once()
-
-        # 4. New-entry orders remain disabled (orders_sent == 0, submit_bracket_orders received empty top_new)
-        assert res.get("error") is not True
-        assert res.get("orders_sent", 0) == 0
-        submit_orders_mock.assert_called_once()
-        call_args = submit_orders_mock.call_args[0]
-        top_new_arg = call_args[0]
-        assert top_new_arg == []
-
-        # 5. Legitimate existing-position management and safety actions remain possible (AAPL is locked/managed in position-management-only mode)
-        locked_arg = call_args[1]
-        assert "AAPL" in locked_arg
+        with pytest.raises(ConnectivityError, match="UNIVERSE_DISCOVERY_FAILED"):
+            LiveMarketBot()
 
 

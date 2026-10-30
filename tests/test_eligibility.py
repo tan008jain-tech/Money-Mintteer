@@ -115,7 +115,7 @@ def test_atomic_cache_replacement(tmp_path):
     assert loaded_time is not None
 
 
-def test_cache_first_startup_and_timestamp_preservation(monkeypatch, tmp_path):
+def test_no_cache_first_startup(monkeypatch, tmp_path):
     logger = logging.getLogger("test_elig")
     cache_dir = str(tmp_path)
     engine = StructuralEligibilityEngine(cache_dir=cache_dir)
@@ -125,51 +125,30 @@ def test_cache_first_startup_and_timestamp_preservation(monkeypatch, tmp_path):
     fresh_time = datetime.now(timezone.utc) - timedelta(hours=2)
     engine.save_persisted_cache(["AAPL", "MSFT"], {"AAPL": {}, "MSFT": {}}, fresh_time)
 
-    from money_mintter.core.suitability import DailySuitabilityEngine, SuitabilityResult
-    l2_engine = DailySuitabilityEngine(cache_dir=cache_dir)
-    l2_engine.save_persisted_pool(SuitabilityResult(
-        pool=["AAPL", "MSFT"],
-        quarantined=[],
-        metrics={},
-        exclusion_counts={},
-        requested_feed="SIP",
-        actual_feed="SIP",
-        data_source="SIP",
-        generated_at=fresh_time.isoformat(),
-        stale=False,
-        cached=True,
-        config_signature=l2_engine._compute_config_signature(),
-        universe_signature=l2_engine._compute_universe_signature(["AAPL", "MSFT"]),
+    discovered_called = False
+    def mock_discover(client, logger, api_key=""):
+        nonlocal discovered_called
+        discovered_called = True
+        return ["TSLA", "AMZN"]
+
+    monkeypatch.setattr("money_mintter.core.live_bot.discover_universe", mock_discover)
+    from money_mintter.core.suitability import SuitabilityResult
+    monkeypatch.setattr("money_mintter.core.suitability.DailySuitabilityEngine.evaluate_universe", lambda self, syms, now: SuitabilityResult(
+        pool=["TSLA", "AMZN"], quarantined=[], metrics={}, exclusion_counts={},
+        requested_feed="SIP", actual_feed="SIP", data_source="SIP",
+        generated_at=now.isoformat(), stale=False, cached=False, config_signature="sig", universe_signature="sig"
     ))
 
     bot = LiveMarketBot()
-    assert bot.global_universe == ["AAPL", "MSFT"]
-    assert bot._universe_last_fetched == fresh_time
-
-    stale_time = datetime.now(timezone.utc) - timedelta(hours=30)
-    engine.save_persisted_cache(["AAPL", "MSFT"], {"AAPL": {}, "MSFT": {}}, stale_time)
-    l2_engine.save_persisted_pool(SuitabilityResult(
-        pool=["AAPL", "MSFT"],
-        quarantined=[],
-        metrics={},
-        exclusion_counts={},
-        requested_feed="SIP",
-        actual_feed="SIP",
-        data_source="SIP",
-        generated_at=stale_time.isoformat(),
-        stale=True,
-        cached=True,
-        config_signature=l2_engine._compute_config_signature(),
-        universe_signature=l2_engine._compute_universe_signature(["AAPL", "MSFT"]),
-    ))
+    assert discovered_called is True
+    assert bot.global_universe == ["TSLA", "AMZN"]
 
     monkeypatch.setattr("money_mintter.core.live_bot.discover_universe", lambda client, logger, api_key: (_ for _ in ()).throw(RuntimeError("API down")))
-    bot2 = LiveMarketBot()
-    assert bot2._cached_universe == ["AAPL", "MSFT"]
-    assert bot2._universe_last_fetched == stale_time
+    with pytest.raises(RuntimeError, match="UNIVERSE_DISCOVERY_FAILED"):
+        LiveMarketBot()
 
 
-def test_refresh_cooldown_prevents_repeated_api_retries(monkeypatch, tmp_path):
+def test_refresh_failure_fails_closed(monkeypatch, tmp_path):
     logger = logging.getLogger("test_elig")
     cache_dir = str(tmp_path)
     engine = StructuralEligibilityEngine(cache_dir=cache_dir)
@@ -186,16 +165,5 @@ def test_refresh_cooldown_prevents_repeated_api_retries(monkeypatch, tmp_path):
 
     monkeypatch.setattr("money_mintter.core.live_bot.discover_universe", mock_discover)
 
-    bot = LiveMarketBot()
-    bot._cached_universe = ["AAPL", "MSFT"]
-    bot._universe_last_fetched = stale_time
-
-    now = datetime.now(timezone.utc)
-    univ1 = bot._get_or_refresh_universe(now)
-    assert univ1 == ["AAPL", "MSFT"]
-    assert call_count == 1
-
-    now_soon = now + timedelta(minutes=10)
-    univ2 = bot._get_or_refresh_universe(now_soon)
-    assert univ2 == ["AAPL", "MSFT"]
-    assert call_count == 1
+    with pytest.raises(RuntimeError, match="UNIVERSE_DISCOVERY_FAILED"):
+        LiveMarketBot()

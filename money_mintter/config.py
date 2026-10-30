@@ -170,6 +170,15 @@ class Settings:
     http_read_timeout_seconds: float = field(
         default_factory=lambda: _env_float("ALPACA_HTTP_READ_TIMEOUT", 20.0)
     )
+    discovery_read_timeout_seconds: float = field(
+        default_factory=lambda: _env_float("DISCOVERY_READ_TIMEOUT_SECONDS", 30.0)
+    )
+    discovery_max_attempts: int = field(
+        default_factory=lambda: _env_int("DISCOVERY_MAX_ATTEMPTS", 3)
+    )
+    min_universe_size: int = field(
+        default_factory=lambda: _env_int("MIN_UNIVERSE_SIZE", 50)
+    )
     max_outage_minutes: int = field(
         default_factory=lambda: _env_int("MAX_OUTAGE_MINUTES", 15)
     )
@@ -241,6 +250,12 @@ class Settings:
             raise ValueError("http_connect_timeout_seconds must be > 0")
         if self.http_read_timeout_seconds <= 0:
             raise ValueError("http_read_timeout_seconds must be > 0")
+        if self.discovery_read_timeout_seconds <= 0:
+            raise ValueError("discovery_read_timeout_seconds must be > 0")
+        if self.discovery_max_attempts < 1:
+            raise ValueError("discovery_max_attempts must be >= 1")
+        if self.min_universe_size < 1:
+            raise ValueError("min_universe_size must be >= 1")
         if self.max_outage_minutes <= 0:
             raise ValueError("max_outage_minutes must be > 0")
         if self.flatten_max_wait_seconds < 0:

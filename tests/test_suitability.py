@@ -81,7 +81,7 @@ def test_no_raw_layer1_fallback_on_failure() -> None:
         stock_client.get_stock_bars.side_effect = RuntimeError("API down")
 
         engine = DailySuitabilityEngine(settings=settings, stock_client=stock_client, cache_dir=tmpdir, historical_feed="sip")
-        with pytest.raises(RuntimeError, match="Layer 2 historical bar fetch failed and no valid compatible cached pool exists."):
+        with pytest.raises(RuntimeError, match="UNIVERSE_DISCOVERY_FAILED"):
             engine.evaluate_universe(["FAILSYM"], force_refresh=True)
 
 
@@ -131,11 +131,10 @@ def test_pagination_and_later_batch_failure() -> None:
         r1 = engine.evaluate_universe(["GOOD"], force_refresh=True)
         assert "GOOD" in r1.pool
 
-        # Second evaluation with same universe where batch fails -> should retain last valid pool as stale
+        # Second evaluation with same universe where batch fails -> under no fallback architecture, must raise RuntimeError
         stock_client.get_stock_bars.side_effect = RuntimeError("Batch failure")
-        r2 = engine.evaluate_universe(["GOOD"], force_refresh=True)
-        assert "GOOD" in r2.pool
-        assert r2.stale is True
+        with pytest.raises(RuntimeError, match="UNIVERSE_DISCOVERY_FAILED"):
+            engine.evaluate_universe(["GOOD"], force_refresh=True)
 
 
 def test_batch_bar_retrieval_and_cache_validation() -> None:
@@ -517,7 +516,7 @@ def test_sip_failure_no_fallback_fails_safely(monkeypatch) -> None:
         monkeypatch.setenv("ALPACA_ALLOW_IEX_FALLBACK", "false")
         engine = DailySuitabilityEngine(settings=settings, stock_client=stock_client, cache_dir=tmpdir, historical_feed="sip")
         
-        with pytest.raises(RuntimeError, match="Layer 2 historical bar fetch failed and no valid compatible cached pool exists."):
+        with pytest.raises(RuntimeError, match="UNIVERSE_DISCOVERY_FAILED"):
             engine.evaluate_universe(symbols, force_refresh=True)
 
         # Verify no partial data or successful pool was persisted
