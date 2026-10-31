@@ -72,26 +72,58 @@ BAR_CLOSE_DELAY_SECONDS = 20
 HISTORY_DAYS = 30
 
 
-def apply_discovery_timeout(client: Any, connect: float, read_holder: list[float]) -> None:
+def apply_discovery_timeout(client: Any, connect: float, read_timeout: float | list[float]) -> None:
     if not hasattr(client, "_session") or client._session is None:
-        return
+        raise RuntimeError("Client cannot apply HTTP timeout: missing session")
     session = client._session
-    if not hasattr(session, "request"):
-        return
+    if not hasattr(session, "request") or session.request is None:
+        raise RuntimeError("Client cannot apply HTTP timeout: missing session request")
+
     orig_request = session.request
     if getattr(orig_request, "_mm_timeout_applied", False):
+        if hasattr(orig_request, "_mm_read_timeout_ref"):
+            ref = orig_request._mm_read_timeout_ref
+            if isinstance(ref, list):
+                if isinstance(read_timeout, list):
+                    ref[0] = read_timeout[0]
+                else:
+                    ref[0] = float(read_timeout)
+            else:
+                if isinstance(read_timeout, list):
+                    orig_request._mm_read_timeout_ref = read_timeout[0]
+                else:
+                    orig_request._mm_read_timeout_ref = float(read_timeout)
+        if hasattr(orig_request, "_mm_connect_timeout_ref"):
+            ref_c = orig_request._mm_connect_timeout_ref
+            if isinstance(ref_c, list):
+                ref_c[0] = float(connect)
+            else:
+                orig_request._mm_connect_timeout_ref = float(connect)
         return
+
+    if isinstance(read_timeout, list):
+        read_ref = read_timeout
+    else:
+        read_ref = [float(read_timeout)]
+
+    connect_ref = [float(connect)]
 
     def wrapped_request(method, url, **kwargs):
         settings = Settings()
-        if isinstance(url, str) and "/assets" in url:
-            kwargs.setdefault("timeout", (settings.http_connect_timeout_seconds, read_holder[0]))
-        else:
-            kwargs.setdefault("timeout", (settings.http_connect_timeout_seconds, settings.http_read_timeout_seconds))
+        if "timeout" not in kwargs:
+            if isinstance(url, str) and "/assets" in url:
+                r_val = read_ref[0] if isinstance(read_ref, list) else read_ref
+                c_val = connect_ref[0] if isinstance(connect_ref, list) else connect_ref
+                kwargs["timeout"] = (c_val, r_val)
+            else:
+                c_val = connect_ref[0] if isinstance(connect_ref, list) else connect_ref
+                kwargs["timeout"] = (c_val, settings.http_read_timeout_seconds)
         return orig_request(method, url, **kwargs)
 
     wrapped_request._mm_timeout_applied = True
     wrapped_request._mm_discovery_timeout_applied = True
+    wrapped_request._mm_read_timeout_ref = read_ref
+    wrapped_request._mm_connect_timeout_ref = connect_ref
     session.request = wrapped_request
 
 
@@ -131,6 +163,19 @@ class UniverseDiscoveryWorker:
                 return False
             self.state = "DISCOVERING"
             self.last_error = None
+        
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        return True
+
+    def start_if_needed(self, predicate: Any = None) -> bool:
+        with self._lock:
+            if self.state == "DISCOVERING":
+                return False
+            if predicate is not None and not predicate():
+                return False
+            self.state = "DISCOVERING"
+            self.last_error = None
             self._thread = threading.Thread(target=self._run, daemon=True)
             self._thread.start()
             return True
@@ -156,7 +201,8 @@ def discover_universe(trading_client: TradingClient, logger: logging.Logger, api
     discovery_timeout = settings.discovery_read_timeout_seconds
     read_holder = [discovery_timeout]
     try:
-        apply_default_timeout(trading_client, settings.http_connect_timeout_seconds, read_holder[0])
+        if hasattr(trading_client, "_session") and trading_client._session is not None:
+            apply_default_timeout(trading_client, settings.http_connect_timeout_seconds, read_holder)
     except Exception as exc:
         logger.critical(f"Failed to apply discovery HTTP timeout: {exc}")
         raise RuntimeError(f"Discovery timeout application failed: {exc}") from exc
@@ -542,69 +588,85 @@ class LivePortfolioManager:
         self._last_equity_date = None
         self.on_unprotected: Any | None = None
 
+    def fetch_account_position_lists(self) -> tuple[list[dict[str, Any]], list[dict[str, Any]], set[str]]:
+        try:
+            positions_resp = self.trading_client.get_all_positions()
+            orders_req = GetOrdersRequest(status=QueryOrderStatus.OPEN, nested=True, limit=500)
+            orders_resp = self.trading_client.get_orders(orders_req)
+        except Exception as exc:
+            self.logger.error(f"Failed to fetch positions and open orders from Alpaca API: {exc}")
+            raise
+
+        position_symbols = {p.symbol.upper().strip() for p in positions_resp}
+        order_symbols = {o.symbol.upper().strip() for o in orders_resp if hasattr(o, 'symbol') and o.symbol}
+        locked_symbols = position_symbols | order_symbols
+
+        open_positions = []
+        dashboard_positions = []
+        for p in positions_resp:
+            sym = p.symbol.upper().strip()
+            qty = float(p.qty)
+            avg_entry = float(p.avg_entry_price)
+            curr_price = float(p.current_price) if hasattr(p, 'current_price') else avg_entry
+            unrealized_pnl = float(p.unrealized_pl) if hasattr(p, 'unrealized_pl') else 0.0
+            side_str = "BUY" if qty > 0 else "SELL"
+
+            sl_price = None
+            tp_price = None
+            for o in orders_resp:
+                if hasattr(o, 'symbol') and o.symbol and o.symbol.upper().strip() == sym:
+                    if hasattr(o, 'stop_loss') and o.stop_loss and hasattr(o.stop_loss, 'stop_price'):
+                        sl_price = float(o.stop_loss.stop_price)
+                    elif hasattr(o, 'legs') and o.legs:
+                        for leg in o.legs:
+                            if hasattr(leg, 'stop_price') and leg.stop_price:
+                                sl_price = float(leg.stop_price)
+                            if hasattr(leg, 'limit_price') and leg.limit_price:
+                                tp_price = float(leg.limit_price)
+
+            open_positions.append({
+                "symbol": sym,
+                "side": side_str,
+                "quantity": abs(qty),
+                "entry_price": avg_entry,
+                "current_price": curr_price,
+                "unrealized_pnl": unrealized_pnl,
+            })
+            dashboard_positions.append({
+                "symbol": sym,
+                "side": side_str,
+                "quantity": abs(qty),
+                "entry_price": avg_entry,
+                "stop_price": sl_price,
+                "target_price": tp_price,
+            })
+        return open_positions, dashboard_positions, locked_symbols
+
     def fetch_account_and_positions(self) -> tuple[float, float, float, list[dict[str, Any]], list[dict[str, Any]], set[str]]:
         try:
             account = self.trading_client.get_account()
-            account_cash = float(account.cash) if not isinstance(getattr(account, 'cash', None), MagicMock) else 100000.0
-            account_equity = float(account.equity) if not isinstance(getattr(account, 'equity', None), MagicMock) else 100000.0
-            buying_power = float(account.buying_power) if not isinstance(getattr(account, 'buying_power', None), MagicMock) else 200000.0
-        except Exception:
-            account_cash = 100000.0
-            account_equity = 100000.0
-            buying_power = 200000.0
-
-            if not hasattr(self, 'last_equity') or self.last_equity is None:
-                if hasattr(account, 'last_equity') and account.last_equity is not None:
-                    try:
-                        self.last_equity = float(account.last_equity)
-                    except (ValueError, TypeError):
-                        self.last_equity = account_equity
-                else:
-                    self.last_equity = account_equity
-
-            open_positions = []
-            dashboard_positions = []
-            locked_symbols = set()
-            positions_resp = self.trading_client.get_all_positions()
-            for p in positions_resp:
-                sym = p.symbol.upper().strip()
-                locked_symbols.add(sym)
-                qty = float(p.qty)
-                avg_entry = float(p.avg_entry_price)
-                curr_price = float(p.current_price) if hasattr(p, 'current_price') else avg_entry
-                unrealized_pnl = float(p.unrealized_pl) if hasattr(p, 'unrealized_pl') else 0.0
-                side_str = "BUY" if qty > 0 else "SELL"
-                sl_price = avg_entry * 0.98 if qty > 0 else avg_entry * 1.02
-                tp_price = avg_entry * 1.05 if qty > 0 else avg_entry * 0.95
-
-                open_positions.append({
-                    "symbol": sym,
-                    "side": side_str,
-                    "quantity": abs(qty),
-                    "entry_price": avg_entry,
-                    "current_price": curr_price,
-                    "unrealized_pnl": unrealized_pnl,
-                })
-                dashboard_positions.append({
-                    "symbol": sym,
-                    "side": side_str,
-                    "quantity": abs(qty),
-                    "entry_price": avg_entry,
-                    "stop_price": sl_price,
-                    "target_price": tp_price,
-                })
-
-            self.last_cash = account_cash
-            self.last_equity_snapshot = account_equity
-            self.last_snapshot_time = datetime.now(timezone.utc).isoformat()
-            return account_cash, account_equity, buying_power, open_positions, dashboard_positions, locked_symbols
+            account_cash = float(account.cash)
+            account_equity = float(account.equity)
+            buying_power = float(account.buying_power)
+            self.last_equity = float(account.last_equity) if hasattr(account, 'last_equity') and account.last_equity is not None else account_equity
         except Exception as exc:
-            self.logger.error(f"Failed to fetch account and positions from Alpaca API: {exc}")
+            self.logger.error(f"Failed to fetch account from Alpaca API: {exc}")
             raise
+
+        try:
+            open_positions, dashboard_positions, locked_symbols = self.fetch_account_position_lists()
+        except Exception as exc:
+            self.logger.error(f"Failed to fetch positions and orders from Alpaca API: {exc}")
+            raise
+
+        self.last_cash = account_cash
+        self.last_equity_snapshot = account_equity
+        self.last_snapshot_time = datetime.now(timezone.utc).isoformat()
+        return account_cash, account_equity, buying_power, open_positions, dashboard_positions, locked_symbols
 
     def fetch_position_state(self) -> tuple[str, list[dict[str, Any]], set[str]]:
         try:
-            _, _, _, open_positions, _, locked_symbols = self.fetch_account_and_positions()
+            open_positions, _, locked_symbols = self.fetch_account_position_lists()
             if open_positions or locked_symbols:
                 return "POSITIONS_OPEN", open_positions, locked_symbols
             else:
@@ -614,13 +676,9 @@ class LivePortfolioManager:
             return "POSITIONS_UNKNOWN", [], set()
 
     def fetch_open_order_symbols(self) -> set[str]:
-        req = GetOrdersRequest(status=QueryOrderStatus.OPEN)
+        req = GetOrdersRequest(status=QueryOrderStatus.OPEN, nested=True, limit=500)
         orders = self.trading_client.get_orders(req)
-        symbols = set()
-        for o in orders:
-            if hasattr(o, 'symbol') and o.symbol:
-                symbols.add(normalize_symbol(o.symbol))
-        return symbols
+        return {normalize_symbol(o.symbol) for o in orders if hasattr(o, 'symbol') and o.symbol}
 
     def submit_bracket_orders(
         self,
@@ -1020,10 +1078,9 @@ class LiveMarketBot:
 
         if getattr(self, 'safe_drain_mode', False):
             universe_last_failed = getattr(self, '_universe_last_failed', None)
-            with self.discovery_worker._lock:
-                if self.discovery_worker.state != "DISCOVERING":
-                    if universe_last_failed is None or (now_utc - universe_last_failed) > timedelta(seconds=60):
-                        self.discovery_worker.start()
+            self.discovery_worker.start_if_needed(
+                lambda: universe_last_failed is None or (now_utc - universe_last_failed) > timedelta(seconds=60)
+            )
             return getattr(self, '_cached_universe', [])
 
         cached_universe = getattr(self, '_cached_universe', [])
@@ -1039,9 +1096,7 @@ class LiveMarketBot:
         refresh_needed = refresh_interval_expired or universe_last_failed is not None
 
         if refresh_needed or not cached_universe:
-            with self.discovery_worker._lock:
-                if self.discovery_worker.state != "DISCOVERING":
-                    self.discovery_worker.start()
+            self.discovery_worker.start_if_needed()
             pos_status, _, _ = self.portfolio_manager.fetch_position_state()
             if not cached_universe and pos_status == "POSITIONS_CONFIRMED_FLAT":
                 raise ConnectivityError("UNIVERSE_DISCOVERY_FAILED: Initial discovery pending and account is flat.")
@@ -1055,8 +1110,8 @@ class LiveMarketBot:
             else:
                 return "POSITIONS_CONFIRMED_FLAT", [], locked, [], cash, equity
         except Exception as exc:
-            self.logger.error(f"[Reconciliation] Failed to fetch account and positions (POSITIONS_UNKNOWN): {exc}")
-            return "POSITIONS_UNKNOWN", [], set(), [], 0.0, 0.0
+            self.logger.error(f"[Reconciliation] Failed to fetch account and positions: {exc}")
+            raise
 
     def _note_outage(self, now_utc: datetime) -> None:
         if self._outage_start is None:
@@ -1113,21 +1168,22 @@ class LiveMarketBot:
             return {"evaluated": 0, "signals": 0, "orders_sent": 0, "halted": True}
 
         # Non-blocking check of discovery worker result
-        with self.discovery_worker._lock:
-            if self.discovery_worker.state == "SUCCESS" and self.discovery_worker.universe:
-                self._cached_universe = self.discovery_worker.universe
-                self.global_universe = self._cached_universe
-                self.safe_drain_mode = False
-                self.discovery_worker.state = "IDLE"
-                self.logger.info("[Discovery State: UNIVERSE_HEALTHY] Background discovery succeeded, normal trading resumed.")
-            elif self.discovery_worker.state == "FAILED":
-                pos_status, _, _, _, _, _ = self._fetch_position_and_account_safely()
-                if pos_status == "POSITIONS_CONFIRMED_FLAT":
-                    self.logger.info("[Discovery State: UNIVERSE_DISCOVERY_FAILED] Discovery failed, account is confirmed flat. Shutting down gracefully.")
-                    return {"evaluated": 0, "signals": 0, "orders_sent": 0, "halted": True, "safe_drain": True, "flat": True}
-                else:
-                    self.safe_drain_mode = True
+        if hasattr(self, 'discovery_worker') and self.discovery_worker is not None:
+            with self.discovery_worker._lock:
+                if self.discovery_worker.state == "SUCCESS" and self.discovery_worker.universe:
+                    self._cached_universe = self.discovery_worker.universe
+                    self.global_universe = self._cached_universe
+                    self.safe_drain_mode = False
                     self.discovery_worker.state = "IDLE"
+                    self.logger.info("[Discovery State: UNIVERSE_HEALTHY] Background discovery succeeded, normal trading resumed.")
+                elif self.discovery_worker.state == "FAILED":
+                    pos_status, _, _, _, _, _ = self._fetch_position_and_account_safely()
+                    if pos_status == "POSITIONS_CONFIRMED_FLAT":
+                        self.logger.info("[Discovery State: UNIVERSE_DISCOVERY_FAILED] Discovery failed, account is confirmed flat. Shutting down gracefully.")
+                        return {"evaluated": 0, "signals": 0, "orders_sent": 0, "halted": True, "safe_drain": True, "flat": True}
+                    else:
+                        self.safe_drain_mode = True
+                        self.discovery_worker.state = "IDLE"
 
         # Always fetch position and account state safely for position management (Critical 2 & 3)
         position_status, open_positions, locked_symbols_raw, dashboard_positions, account_cash, account_equity = self._fetch_position_and_account_safely()
@@ -1136,8 +1192,11 @@ class LiveMarketBot:
             self.logger.warning("[SAFE_DRAIN] Position retrieval resulted in POSITIONS_UNKNOWN. Maintaining SAFE_DRAIN and retrying.")
             self.safe_drain_mode = True
 
-        if not self._cached_universe:
-            self.safe_drain_mode = True
+        if not getattr(self, '_cached_universe', []):
+            if getattr(self, 'global_universe', []):
+                self._cached_universe = self.global_universe
+            else:
+                self.safe_drain_mode = True
 
         if getattr(self, 'safe_drain_mode', False):
             if position_status == "POSITIONS_CONFIRMED_FLAT":
@@ -1153,10 +1212,10 @@ class LiveMarketBot:
 
             # Trigger background discovery worker periodically without blocking
             universe_last_failed = getattr(self, '_universe_last_failed', None)
-            with self.discovery_worker._lock:
-                if self.discovery_worker.state != "DISCOVERING":
-                    if universe_last_failed is None or (now_utc - universe_last_failed) > timedelta(seconds=60):
-                        self.discovery_worker.start()
+            if hasattr(self, 'discovery_worker') and self.discovery_worker is not None:
+                self.discovery_worker.start_if_needed(
+                    lambda: universe_last_failed is None or (now_utc - universe_last_failed) > timedelta(seconds=60)
+                )
 
             return {"evaluated": 0, "signals": 0, "orders_sent": 0, "safe_drain": True}
 
