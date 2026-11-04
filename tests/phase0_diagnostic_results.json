@@ -1,0 +1,97 @@
+{
+  "historical_sip": {
+    "status": "VERIFIED",
+    "evidence": "Successfully retrieved bars for ['SPY', 'XLI', 'AAPL', 'BSX', 'MS']. Total bars: 2021",
+    "details": {
+      "SPY": {
+        "bar_count": 421,
+        "latest_timestamp": "2026-11-03T21:00:00+00:00",
+        "latest_close": 754.17,
+        "total_volume": 28813807.0
+      },
+      "XLI": {
+        "bar_count": 395,
+        "latest_timestamp": "2026-11-03T21:00:00+00:00",
+        "latest_close": 171.55,
+        "total_volume": 9768477.0
+      },
+      "AAPL": {
+        "bar_count": 421,
+        "latest_timestamp": "2026-11-03T21:00:00+00:00",
+        "latest_close": 331.66,
+        "total_volume": 57721216.0
+      },
+      "BSX": {
+        "bar_count": 395,
+        "latest_timestamp": "2026-11-03T21:00:00+00:00",
+        "latest_close": 43.5,
+        "total_volume": 18243608.0
+      },
+      "MS": {
+        "bar_count": 389,
+        "latest_timestamp": "2026-11-03T20:59:00+00:00",
+        "latest_close": 186.1,
+        "total_volume": 2856529.0
+      }
+    }
+  },
+  "historical_iex": {
+    "status": "VERIFIED",
+    "evidence": "Successfully retrieved IEX bars. Total bars: 1858",
+    "details": {
+      "SPY": {
+        "bar_count": 391,
+        "latest_timestamp": "2026-11-03T20:59:00+00:00",
+        "total_volume": 1113140.0
+      },
+      "XLI": {
+        "bar_count": 386,
+        "latest_timestamp": "2026-11-03T21:00:00+00:00",
+        "total_volume": 847815.0
+      },
+      "AAPL": {
+        "bar_count": 397,
+        "latest_timestamp": "2026-11-03T20:59:00+00:00",
+        "total_volume": 1812513.0
+      },
+      "BSX": {
+        "bar_count": 388,
+        "latest_timestamp": "2026-11-03T20:59:00+00:00",
+        "total_volume": 1797034.0
+      },
+      "MS": {
+        "bar_count": 296,
+        "latest_timestamp": "2026-11-03T20:59:00+00:00",
+        "total_volume": 230791.0
+      }
+    }
+  },
+  "delayed_sip_latest": {
+    "status": "VERIFIED",
+    "evidence": "Successfully retrieved delayed SIP latest bars: ['AAPL', 'SPY']",
+    "details": {
+      "AAPL": {
+        "timestamp": "2026-11-04T00:59:00+00:00",
+        "close": 329.8248,
+        "volume": 1266
+      },
+      "SPY": {
+        "timestamp": "2026-11-04T00:59:00+00:00",
+        "close": 752.16,
+        "volume": 1091
+      }
+    }
+  },
+  "delayed_sip_ws": {
+    "auth": "VERIFIED",
+    "subscription": "VERIFIED",
+    "messages_received": 0,
+    "error": null
+  },
+  "iex_ws": {
+    "auth": "VERIFIED",
+    "subscription": "VERIFIED",
+    "messages_received": 0,
+    "error": null
+  }
+}

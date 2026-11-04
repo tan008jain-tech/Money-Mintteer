@@ -236,7 +236,26 @@ def discover_universe(trading_client: TradingClient, logger: logging.Logger, api
         try:
             logger.info(f"[Discovery State: DISCOVERY_RETRYING] Attempt {attempt} for GET /v2/assets (remaining budget: {remaining_budget:.1f}s)...")
             if hasattr(trading_client, "get_all_assets"):
-                assets = trading_client.get_all_assets(search_params)
+                try:
+                    from alpaca.trading.enums import AssetExchange
+                    if "TXSE" not in AssetExchange._member_map_:
+                        AssetExchange._add_member_("TXSE", "TXSE")
+                except Exception:
+                    pass
+                try:
+                    assets = trading_client.get_all_assets(search_params)
+                except Exception as val_exc:
+                    err_str = str(val_exc)
+                    if "validation error" in err_str.lower() or "input_value" in err_str.lower() or "ValidationError" in type(val_exc).__name__:
+                        logger.warning(f"[Discovery] Pydantic validation error in get_all_assets: {val_exc}. Falling back to raw assets endpoint query.")
+                        params = search_params.to_request_fields() if search_params is not None else {}
+                        raw_response = trading_client.get("/assets", params)
+                        if isinstance(raw_response, list):
+                            assets = raw_response
+                        else:
+                            raise val_exc
+                    else:
+                        raise val_exc
             break
         except Exception as exc:
             last_exc = exc
@@ -411,28 +430,21 @@ class MarketScanner:
                 if batch_start_dt.tzinfo is None:
                     batch_start_dt = batch_start_dt.replace(tzinfo=timezone.utc)
 
-                page_token = None
-                while True:
-                    bar_request = StockBarsRequest(
-                        symbol_or_symbols=batch_symbols[0] if len(batch_symbols) == 1 else batch_symbols,
-                        timeframe=TimeFrame(1, TimeFrameUnit.Minute),
-                        start=batch_start_dt,
-                        end=now_utc,
-                        feed=self.data_feed,
-                        page_token=page_token,
-                    )
-                    bars_response = self.stock_client.get_stock_bars(bar_request)
-                    resp_data = getattr(bars_response, 'data', {}) or {}
-                    for sym_key, bars in resp_data.items():
-                        if isinstance(sym_key, (list, tuple)):
-                            for s in sym_key:
-                                all_bars_data.setdefault(s, []).extend(bars)
-                        else:
-                            all_bars_data.setdefault(str(sym_key), []).extend(bars)
-                    
-                    page_token = getattr(bars_response, 'next_page_token', None)
-                    if not page_token:
-                        break
+                bar_request = StockBarsRequest(
+                    symbol_or_symbols=batch_symbols[0] if len(batch_symbols) == 1 else batch_symbols,
+                    timeframe=TimeFrame(1, TimeFrameUnit.Minute),
+                    start=batch_start_dt,
+                    end=now_utc,
+                    feed=self.data_feed,
+                )
+                bars_response = self.stock_client.get_stock_bars(bar_request)
+                resp_data = getattr(bars_response, 'data', {}) or {}
+                for sym_key, bars in resp_data.items():
+                    if isinstance(sym_key, (list, tuple)):
+                        for s in sym_key:
+                            all_bars_data.setdefault(s, []).extend(bars)
+                    else:
+                        all_bars_data.setdefault(str(sym_key), []).extend(bars)
 
             except Exception as batch_ex:
                 if is_connectivity_error(batch_ex):
@@ -455,6 +467,7 @@ class MarketScanner:
                             single_data = getattr(single_resp, 'data', {}) or {}
                             for sym_key, bars in single_data.items():
                                 all_bars_data.setdefault(str(sym_key), []).extend(bars)
+
                         except Exception as single_ex:
                             self.last_scan_errors += 1
                             if is_connectivity_error(single_ex):
@@ -508,7 +521,40 @@ class MarketScanner:
                 if completed_candles:
                     bars_dict[clean_symbol] = completed_candles
 
-        layer4_selected = select_layer4_candidates(pool_input, bars_dict, max_candidates=8)
+        filtered_bars_dict: dict[str, list[Candle]] = {}
+        minute = (now_utc.minute // 5) * 5
+        bar_time = now_utc.replace(minute=minute, second=0, microsecond=0)
+        expected_last_bar_start = bar_time - timedelta(minutes=5)
+        if expected_last_bar_start.tzinfo is None:
+            expected_last_bar_start = expected_last_bar_start.replace(tzinfo=timezone.utc)
+
+        for sym, candles in bars_dict.items():
+            if not candles:
+                continue
+            try:
+                series = MultiTimeframeSeries.from_1m(
+                    list(candles),
+                    entry_timeframe=Timeframe.FIVE_MIN,
+                    timezone_name="America/New_York",
+                    spread_bps=2.0,
+                )
+                snapshot = series.snapshot_at(now_utc, lookback_bars=1)
+                if not snapshot.entry:
+                    self.logger.warning(f"stale bars for {sym}: no entry-timeframe candles in snapshot")
+                    continue
+                last_ts = snapshot.entry[-1].timestamp
+                if last_ts.tzinfo is None:
+                    last_ts = last_ts.replace(tzinfo=timezone.utc)
+                if last_ts < expected_last_bar_start:
+                    self.logger.warning(f"stale bars for {sym}: latest={last_ts}, expected>={expected_last_bar_start}")
+                    continue
+                filtered_bars_dict[sym] = candles
+            except Exception as pf_exc:
+                self.logger.error(f"Error checking freshness for {sym}: {pf_exc}")
+                self.last_scan_errors += 1
+                continue
+
+        layer4_selected = select_layer4_candidates(pool_input, filtered_bars_dict, max_candidates=8)
         self.logger.info(f"[Layer 4 Selector] Selected {len(layer4_selected)} candidates from pool of {len(pool_input)} symbols.")
 
         for item in layer4_selected:
@@ -525,7 +571,7 @@ class MarketScanner:
                     timezone_name="America/New_York",
                     spread_bps=2.0,
                 )
-                snapshot = series.snapshot_at(now_utc)
+                snapshot = series.snapshot_at(now_utc, lookback_bars=len(series.entry.bars))
 
                 minute = (now_utc.minute // 5) * 5
                 bar_time = now_utc.replace(minute=minute, second=0, microsecond=0)

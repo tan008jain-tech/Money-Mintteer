@@ -1,0 +1,128 @@
+{
+  "historical_sip": {
+    "AAPL": {
+      "total_records": 390,
+      "unique_timestamps": 390,
+      "duplicate_timestamps": 0,
+      "first_timestamp": "2026-11-03T14:30:00+00:00",
+      "last_timestamp": "2026-11-03T20:59:00+00:00",
+      "out_of_range_count": 0,
+      "total_volume": 46007358.0,
+      "total_trade_count": 906537,
+      "average_vwap": 331.17565795384616
+    },
+    "SPY": {
+      "total_records": 390,
+      "unique_timestamps": 390,
+      "duplicate_timestamps": 0,
+      "first_timestamp": "2026-11-03T14:30:00+00:00",
+      "last_timestamp": "2026-11-03T20:59:00+00:00",
+      "out_of_range_count": 0,
+      "total_volume": 27076204.0,
+      "total_trade_count": 476555,
+      "average_vwap": 755.0428357923076
+    },
+    "MS": {
+      "total_records": 389,
+      "unique_timestamps": 389,
+      "duplicate_timestamps": 0,
+      "first_timestamp": "2026-11-03T14:30:00+00:00",
+      "last_timestamp": "2026-11-03T20:59:00+00:00",
+      "out_of_range_count": 0,
+      "total_volume": 2856529.0,
+      "total_trade_count": 61188,
+      "average_vwap": 185.81085006940876
+    },
+    "XLI": {
+      "total_records": 390,
+      "unique_timestamps": 390,
+      "duplicate_timestamps": 0,
+      "first_timestamp": "2026-11-03T14:30:00+00:00",
+      "last_timestamp": "2026-11-03T20:59:00+00:00",
+      "out_of_range_count": 0,
+      "total_volume": 9550523.0,
+      "total_trade_count": 99608,
+      "average_vwap": 171.58499545641027
+    },
+    "BSX": {
+      "total_records": 390,
+      "unique_timestamps": 390,
+      "duplicate_timestamps": 0,
+      "first_timestamp": "2026-11-03T14:30:00+00:00",
+      "last_timestamp": "2026-11-03T20:59:00+00:00",
+      "out_of_range_count": 0,
+      "total_volume": 15712463.0,
+      "total_trade_count": 147121,
+      "average_vwap": 43.85796797179488
+    }
+  },
+  "historical_iex": {
+    "AAPL": {
+      "total_records": 390,
+      "unique_timestamps": 390,
+      "duplicate_timestamps": 0,
+      "first_timestamp": "2026-11-03T14:30:00+00:00",
+      "last_timestamp": "2026-11-03T20:59:00+00:00",
+      "out_of_range_count": 0,
+      "total_volume": 1811761.0,
+      "total_trade_count": 37510,
+      "average_vwap": 331.1755232
+    },
+    "SPY": {
+      "total_records": 390,
+      "unique_timestamps": 390,
+      "duplicate_timestamps": 0,
+      "first_timestamp": "2026-11-03T14:30:00+00:00",
+      "last_timestamp": "2026-11-03T20:59:00+00:00",
+      "out_of_range_count": 0,
+      "total_volume": 1113082.0,
+      "total_trade_count": 19929,
+      "average_vwap": 755.0411164717949
+    },
+    "MS": {
+      "total_records": 296,
+      "unique_timestamps": 296,
+      "duplicate_timestamps": 0,
+      "first_timestamp": "2026-11-03T14:30:00+00:00",
+      "last_timestamp": "2026-11-03T20:59:00+00:00",
+      "out_of_range_count": 0,
+      "total_volume": 230791.0,
+      "total_trade_count": 4779,
+      "average_vwap": 185.85206810135136
+    },
+    "XLI": {
+      "total_records": 385,
+      "unique_timestamps": 385,
+      "duplicate_timestamps": 0,
+      "first_timestamp": "2026-11-03T14:30:00+00:00",
+      "last_timestamp": "2026-11-03T20:59:00+00:00",
+      "out_of_range_count": 0,
+      "total_volume": 847715.0,
+      "total_trade_count": 7609,
+      "average_vwap": 171.5837712883117
+    },
+    "BSX": {
+      "total_records": 388,
+      "unique_timestamps": 388,
+      "duplicate_timestamps": 0,
+      "first_timestamp": "2026-11-03T14:30:00+00:00",
+      "last_timestamp": "2026-11-03T20:59:00+00:00",
+      "out_of_range_count": 0,
+      "total_volume": 1797034.0,
+      "total_trade_count": 15295,
+      "average_vwap": 43.85996834020619
+    }
+  },
+  "delayed_sip_ws_strict": {
+    "auth": "VERIFIED",
+    "subscription": "VERIFIED",
+    "data_delivery": "PENDING_ACTIVE_SESSION",
+    "error": null
+  },
+  "iex_ws_strict": {
+    "auth": "VERIFIED",
+    "subscription": "VERIFIED",
+    "data_delivery": "PENDING_ACTIVE_SESSION",
+    "error": null
+  }
+}

@@ -1,0 +1,1692 @@
+{
+  "metadata": {
+    "experiment": "Experiment B: Paired Historical SIP vs IEX Intraday 1-Minute Bars",
+    "execution_timestamp": "2026-11-04T05:45:20.814551+00:00",
+    "sessions_count": 10,
+    "start_date": "2026-10-21T13:30:00+00:00",
+    "end_date": "2026-11-03T21:00:00+00:00",
+    "symbols_evaluated": 30
+  },
+  "symbols": [
+    {
+      "symbol": "AAPL",
+      "stratum": "High Liquidity",
+      "total_sip_bars": 8311,
+      "total_iex_bars": 4045,
+      "missing_in_iex": 4266,
+      "missing_in_sip": 0,
+      "timestamp_coverage_pct": 48.67,
+      "sip_full_volume": 475408576,
+      "iex_full_volume": 12369175,
+      "full_session_volume_ratio": 0.026,
+      "common_timestamp_volume_ratio": 0.0364,
+      "sip_session_vwap": 342.8985,
+      "iex_session_vwap": 342.559,
+      "ohlc_divergence": {
+        "open": {
+          "median_abs": 0.02,
+          "p95_abs": 0.09,
+          "max_abs": 5.0912,
+          "median_rel_pct": 0.0057,
+          "p95_rel_pct": 0.0271
+        },
+        "high": {
+          "median_abs": 0.02,
+          "p95_abs": 0.09,
+          "max_abs": 2.99,
+          "median_rel_pct": 0.0058,
+          "p95_rel_pct": 0.0261
+        },
+        "low": {
+          "median_abs": 0.02,
+          "p95_abs": 0.08,
+          "max_abs": 9.33,
+          "median_rel_pct": 0.0058,
+          "p95_rel_pct": 0.0241
+        },
+        "close": {
+          "median_abs": 0.015,
+          "p95_abs": 0.085,
+          "max_abs": 1.07,
+          "median_rel_pct": 0.0044,
+          "p95_rel_pct": 0.025
+        },
+        "vwap": {
+          "median_abs": 0.0129,
+          "p95_abs": 0.0648,
+          "max_abs": 0.9956
+        }
+      },
+      "atr": {
+        "sip_native_1min": 0.4825,
+        "iex_native_1min": 0.4486,
+        "sip_5min_aggregated": 0.7869,
+        "iex_5min_aggregated": 0.8232
+      }
+    },
+    {
+      "symbol": "MSFT",
+      "stratum": "High Liquidity",
+      "total_sip_bars": 7534,
+      "total_iex_bars": 3966,
+      "missing_in_iex": 3568,
+      "missing_in_sip": 0,
+      "timestamp_coverage_pct": 52.64,
+      "sip_full_volume": 244461513,
+      "iex_full_volume": 7383843,
+      "full_session_volume_ratio": 0.0302,
+      "common_timestamp_volume_ratio": 0.0425,
+      "sip_session_vwap": 525.1256,
+      "iex_session_vwap": 524.8113,
+      "ohlc_divergence": {
+        "open": {
+          "median_abs": 0.0366,
+          "p95_abs": 0.2,
+          "max_abs": 5.54,
+          "median_rel_pct": 0.0069,
+          "p95_rel_pct": 0.0379
+        },
+        "high": {
+          "median_abs": 0.045,
+          "p95_abs": 0.195,
+          "max_abs": 13.8,
+          "median_rel_pct": 0.0085,
+          "p95_rel_pct": 0.0374
+        },
+        "low": {
+          "median_abs": 0.0499,
+          "p95_abs": 0.21,
+          "max_abs": 5.54,
+          "median_rel_pct": 0.0094,
+          "p95_rel_pct": 0.0401
+        },
+        "close": {
+          "median_abs": 0.03,
+          "p95_abs": 0.185,
+          "max_abs": 13.3732,
+          "median_rel_pct": 0.0058,
+          "p95_rel_pct": 0.035
+        },
+        "vwap": {
+          "median_abs": 0.0238,
+          "p95_abs": 0.1224,
+          "max_abs": 6.9654
+        }
+      },
+      "atr": {
+        "sip_native_1min": 0.5175,
+        "iex_native_1min": 0.4314,
+        "sip_5min_aggregated": 0.9609,
+        "iex_5min_aggregated": 0.8796
+      }
+    },
+    {
+      "symbol": "NVDA",
+      "stratum": "High Liquidity",
+      "total_sip_bars": 8881,
+      "total_iex_bars": 4018,
+      "missing_in_iex": 4863,
+      "missing_in_sip": 0,
+      "timestamp_coverage_pct": 45.24,
+      "sip_full_volume": 1017969046,
+      "iex_full_volume": 32893428,
+      "full_session_volume_ratio": 0.0323,
+      "common_timestamp_volume_ratio": 0.0409,
+      "sip_session_vwap": 211.7476,
+      "iex_session_vwap": 211.958,
+      "ohlc_divergence": {
+        "open": {
+          "median_abs": 0.015,
+          "p95_abs": 0.07,
+          "max_abs": 0.54,
+          "median_rel_pct": 0.0069,
+          "p95_rel_pct": 0.0339
+        },
+        "high": {
+          "median_abs": 0.0142,
+          "p95_abs": 0.06,
+          "max_abs": 1.325,
+          "median_rel_pct": 0.0067,
+          "p95_rel_pct": 0.029
+        },
+        "low": {
+          "median_abs": 0.015,
+          "p95_abs": 0.06,
+          "max_abs": 0.81,
+          "median_rel_pct": 0.0069,
+          "p95_rel_pct": 0.0282
+        },
+        "close": {
+          "median_abs": 0.0101,
+          "p95_abs": 0.0698,
+          "max_abs": 0.81,
+          "median_rel_pct": 0.0049,
+          "p95_rel_pct": 0.0318
+        },
+        "vwap": {
+          "median_abs": 0.0103,
+          "p95_abs": 0.0467,
+          "max_abs": 0.7317
+        }
+      },
+      "atr": {
+        "sip_native_1min": 0.2737,
+        "iex_native_1min": 0.2454,
+        "sip_5min_aggregated": 0.4189,
+        "iex_5min_aggregated": 0.4168
+      }
+    },
+    {
+      "symbol": "SPY",
+      "stratum": "High Liquidity",
+      "total_sip_bars": 8639,
+      "total_iex_bars": 4004,
+      "missing_in_iex": 4635,
+      "missing_in_sip": 0,
+      "timestamp_coverage_pct": 46.35,
+      "sip_full_volume": 408865395,
+      "iex_full_volume": 12671912,
+      "full_session_volume_ratio": 0.031,
+      "common_timestamp_volume_ratio": 0.037,
+      "sip_session_vwap": 762.6274,
+      "iex_session_vwap": 762.557,
+      "ohlc_divergence": {
+        "open": {
+          "median_abs": 0.02,
+          "p95_abs": 0.1298,
+          "max_abs": 0.75,
+          "median_rel_pct": 0.0027,
+          "p95_rel_pct": 0.0168
+        },
+        "high": {
+          "median_abs": 0.02,
+          "p95_abs": 0.11,
+          "max_abs": 1.09,
+          "median_rel_pct": 0.0026,
+          "p95_rel_pct": 0.0144
+        },
+        "low": {
+          "median_abs": 0.02,
+          "p95_abs": 0.105,
+          "max_abs": 0.77,
+          "median_rel_pct": 0.0027,
+          "p95_rel_pct": 0.0138
+        },
+        "close": {
+          "median_abs": 0.02,
+          "p95_abs": 0.1098,
+          "max_abs": 0.69,
+          "median_rel_pct": 0.0026,
+          "p95_rel_pct": 0.0142
+        },
+        "vwap": {
+          "median_abs": 0.0159,
+          "p95_abs": 0.0716,
+          "max_abs": 0.6812
+        }
+      },
+      "atr": {
+        "sip_native_1min": 0.3316,
+        "iex_native_1min": 0.3104,
+        "sip_5min_aggregated": 0.6296,
+        "iex_5min_aggregated": 0.6139
+      }
+    },
+    {
+      "symbol": "QQQ",
+      "stratum": "High Liquidity",
+      "total_sip_bars": 8914,
+      "total_iex_bars": 4091,
+      "missing_in_iex": 4823,
+      "missing_in_sip": 0,
+      "timestamp_coverage_pct": 45.89,
+      "sip_full_volume": 434250331,
+      "iex_full_volume": 6600067,
+      "full_session_volume_ratio": 0.0152,
+      "common_timestamp_volume_ratio": 0.0174,
+      "sip_session_vwap": 703.7258,
+      "iex_session_vwap": 704.2339,
+      "ohlc_divergence": {
+        "open": {
+          "median_abs": 0.05,
+          "p95_abs": 0.25,
+          "max_abs": 0.96,
+          "median_rel_pct": 0.0069,
+          "p95_rel_pct": 0.035
+        },
+        "high": {
+          "median_abs": 0.05,
+          "p95_abs": 0.235,
+          "max_abs": 0.96,
+          "median_rel_pct": 0.007,
+          "p95_rel_pct": 0.0331
+        },
+        "low": {
+          "median_abs": 0.05,
+          "p95_abs": 0.235,
+          "max_abs": 1.2,
+          "median_rel_pct": 0.0072,
+          "p95_rel_pct": 0.0331
+        },
+        "close": {
+          "median_abs": 0.04,
+          "p95_abs": 0.21,
+          "max_abs": 0.855,
+          "median_rel_pct": 0.0056,
+          "p95_rel_pct": 0.0296
+        },
+        "vwap": {
+          "median_abs": 0.0297,
+          "p95_abs": 0.1386,
+          "max_abs": 0.8645
+        }
+      },
+      "atr": {
+        "sip_native_1min": 0.4444,
+        "iex_native_1min": 0.3536,
+        "sip_5min_aggregated": 0.8008,
+        "iex_5min_aggregated": 0.7268
+      }
+    },
+    {
+      "symbol": "AMZN",
+      "stratum": "High Liquidity",
+      "total_sip_bars": 8098,
+      "total_iex_bars": 4021,
+      "missing_in_iex": 4077,
+      "missing_in_sip": 0,
+      "timestamp_coverage_pct": 49.65,
+      "sip_full_volume": 490328183,
+      "iex_full_volume": 17938023,
+      "full_session_volume_ratio": 0.0366,
+      "common_timestamp_volume_ratio": 0.0455,
+      "sip_session_vwap": 246.756,
+      "iex_session_vwap": 247.7018,
+      "ohlc_divergence": {
+        "open": {
+          "median_abs": 0.02,
+          "p95_abs": 0.105,
+          "max_abs": 17.6,
+          "median_rel_pct": 0.0079,
+          "p95_rel_pct": 0.042
+        },
+        "high": {
+          "median_abs": 0.02,
+          "p95_abs": 0.11,
+          "max_abs": 17.6,
+          "median_rel_pct": 0.008,
+          "p95_rel_pct": 0.044
+        },
+        "low": {
+          "median_abs": 0.02,
+          "p95_abs": 0.11,
+          "max_abs": 2.54,
+          "median_rel_pct": 0.0081,
+          "p95_rel_pct": 0.044
+        },
+        "close": {
+          "median_abs": 0.02,
+          "p95_abs": 0.1041,
+          "max_abs": 4.68,
+          "median_rel_pct": 0.0079,
+          "p95_rel_pct": 0.0416
+        },
+        "vwap": {
+          "median_abs": 0.013,
+          "p95_abs": 0.0697,
+          "max_abs": 3.0105
+        }
+      },
+      "atr": {
+        "sip_native_1min": 0.3396,
+        "iex_native_1min": 0.3186,
+        "sip_5min_aggregated": 0.5573,
+        "iex_5min_aggregated": 0.5514
+      }
+    },
+    {
+      "symbol": "GOOGL",
+      "stratum": "High Liquidity",
+      "total_sip_bars": 8711,
+      "total_iex_bars": 3942,
+      "missing_in_iex": 4769,
+      "missing_in_sip": 0,
+      "timestamp_coverage_pct": 45.25,
+      "sip_full_volume": 478375452,
+      "iex_full_volume": 15456945,
+      "full_session_volume_ratio": 0.0323,
+      "common_timestamp_volume_ratio": 0.0421,
+      "sip_session_vwap": 297.7624,
+      "iex_session_vwap": 298.241,
+      "ohlc_divergence": {
+        "open": {
+          "median_abs": 0.015,
+          "p95_abs": 0.093,
+          "max_abs": 10.24,
+          "median_rel_pct": 0.0051,
+          "p95_rel_pct": 0.0303
+        },
+        "high": {
+          "median_abs": 0.02,
+          "p95_abs": 0.08,
+          "max_abs": 11.59,
+          "median_rel_pct": 0.0062,
+          "p95_rel_pct": 0.0264
+        },
+        "low": {
+          "median_abs": 0.02,
+          "p95_abs": 0.08,
+          "max_abs": 6.17,
+          "median_rel_pct": 0.0061,
+          "p95_rel_pct": 0.0271
+        },
+        "close": {
+          "median_abs": 0.015,
+          "p95_abs": 0.0832,
+          "max_abs": 4.26,
+          "median_rel_pct": 0.0047,
+          "p95_rel_pct": 0.0264
+        },
+        "vwap": {
+          "median_abs": 0.0129,
+          "p95_abs": 0.0613,
+          "max_abs": 2.2875
+        }
+      },
+      "atr": {
+        "sip_native_1min": 0.291,
+        "iex_native_1min": 0.2379,
+        "sip_5min_aggregated": 0.4637,
+        "iex_5min_aggregated": 0.4329
+      }
+    },
+    {
+      "symbol": "META",
+      "stratum": "High Liquidity",
+      "total_sip_bars": 8344,
+      "total_iex_bars": 4012,
+      "missing_in_iex": 4332,
+      "missing_in_sip": 0,
+      "timestamp_coverage_pct": 48.08,
+      "sip_full_volume": 290626260,
+      "iex_full_volume": 10887082,
+      "full_session_volume_ratio": 0.0375,
+      "common_timestamp_volume_ratio": 0.0478,
+      "sip_session_vwap": 636.0043,
+      "iex_session_vwap": 634.0693,
+      "ohlc_divergence": {
+        "open": {
+          "median_abs": 0.05,
+          "p95_abs": 0.31,
+          "max_abs": 18.8,
+          "median_rel_pct": 0.0082,
+          "p95_rel_pct": 0.0483
+        },
+        "high": {
+          "median_abs": 0.0651,
+          "p95_abs": 0.315,
+          "max_abs": 6.2,
+          "median_rel_pct": 0.0105,
+          "p95_rel_pct": 0.0489
+        },
+        "low": {
+          "median_abs": 0.07,
+          "p95_abs": 0.3286,
+          "max_abs": 23.8,
+          "median_rel_pct": 0.0113,
+          "p95_rel_pct": 0.05
+        },
+        "close": {
+          "median_abs": 0.045,
+          "p95_abs": 0.275,
+          "max_abs": 5.2799,
+          "median_rel_pct": 0.0073,
+          "p95_rel_pct": 0.0425
+        },
+        "vwap": {
+          "median_abs": 0.0382,
+          "p95_abs": 0.2015,
+          "max_abs": 7.1695
+        }
+      },
+      "atr": {
+        "sip_native_1min": 0.5453,
+        "iex_native_1min": 0.4686,
+        "sip_5min_aggregated": 0.9769,
+        "iex_5min_aggregated": 0.9193
+      }
+    },
+    {
+      "symbol": "TSLA",
+      "stratum": "High Liquidity",
+      "total_sip_bars": 8866,
+      "total_iex_bars": 3988,
+      "missing_in_iex": 4878,
+      "missing_in_sip": 0,
+      "timestamp_coverage_pct": 44.98,
+      "sip_full_volume": 403370991,
+      "iex_full_volume": 8925981,
+      "full_session_volume_ratio": 0.0221,
+      "common_timestamp_volume_ratio": 0.0253,
+      "sip_session_vwap": 394.1907,
+      "iex_session_vwap": 393.862,
+      "ohlc_divergence": {
+        "open": {
+          "median_abs": 0.0394,
+          "p95_abs": 0.205,
+          "max_abs": 1.96,
+          "median_rel_pct": 0.0098,
+          "p95_rel_pct": 0.0516
+        },
+        "high": {
+          "median_abs": 0.05,
+          "p95_abs": 0.19,
+          "max_abs": 3.52,
+          "median_rel_pct": 0.0125,
+          "p95_rel_pct": 0.0492
+        },
+        "low": {
+          "median_abs": 0.05,
+          "p95_abs": 0.19,
+          "max_abs": 1.96,
+          "median_rel_pct": 0.0125,
+          "p95_rel_pct": 0.0488
+        },
+        "close": {
+          "median_abs": 0.035,
+          "p95_abs": 0.185,
+          "max_abs": 1.31,
+          "median_rel_pct": 0.0087,
+          "p95_rel_pct": 0.0464
+        },
+        "vwap": {
+          "median_abs": 0.0261,
+          "p95_abs": 0.1305,
+          "max_abs": 1.8405
+        }
+      },
+      "atr": {
+        "sip_native_1min": 0.563,
+        "iex_native_1min": 0.4311,
+        "sip_5min_aggregated": 0.8371,
+        "iex_5min_aggregated": 0.7114
+      }
+    },
+    {
+      "symbol": "AMD",
+      "stratum": "High Liquidity",
+      "total_sip_bars": 7786,
+      "total_iex_bars": 3752,
+      "missing_in_iex": 4034,
+      "missing_in_sip": 0,
+      "timestamp_coverage_pct": 48.19,
+      "sip_full_volume": 232656422,
+      "iex_full_volume": 6567886,
+      "full_session_volume_ratio": 0.0282,
+      "common_timestamp_volume_ratio": 0.0356,
+      "sip_session_vwap": 520.207,
+      "iex_session_vwap": 519.4641,
+      "ohlc_divergence": {
+        "open": {
+          "median_abs": 0.1,
+          "p95_abs": 0.5294,
+          "max_abs": 1.8,
+          "median_rel_pct": 0.0197,
+          "p95_rel_pct": 0.0977
+        },
+        "high": {
+          "median_abs": 0.15,
+          "p95_abs": 0.58,
+          "max_abs": 2.75,
+          "median_rel_pct": 0.029,
+          "p95_rel_pct": 0.108
+        },
+        "low": {
+          "median_abs": 0.145,
+          "p95_abs": 0.57,
+          "max_abs": 1.895,
+          "median_rel_pct": 0.0277,
+          "p95_rel_pct": 0.1059
+        },
+        "close": {
+          "median_abs": 0.0907,
+          "p95_abs": 0.4939,
+          "max_abs": 2.13,
+          "median_rel_pct": 0.0177,
+          "p95_rel_pct": 0.0923
+        },
+        "vwap": {
+          "median_abs": 0.0617,
+          "p95_abs": 0.2724,
+          "max_abs": 1.6411
+        }
+      },
+      "atr": {
+        "sip_native_1min": 1.2706,
+        "iex_native_1min": 1.0893,
+        "sip_5min_aggregated": 1.8624,
+        "iex_5min_aggregated": 1.7014
+      }
+    },
+    {
+      "symbol": "INTC",
+      "stratum": "Medium Liquidity",
+      "total_sip_bars": 8985,
+      "total_iex_bars": 4052,
+      "missing_in_iex": 4933,
+      "missing_in_sip": 0,
+      "timestamp_coverage_pct": 45.1,
+      "sip_full_volume": 1514138471,
+      "iex_full_volume": 49846804,
+      "full_session_volume_ratio": 0.0329,
+      "common_timestamp_volume_ratio": 0.0381,
+      "sip_session_vwap": 74.7465,
+      "iex_session_vwap": 74.552,
+      "ohlc_divergence": {
+        "open": {
+          "median_abs": 0.01,
+          "p95_abs": 0.05,
+          "max_abs": 11.59,
+          "median_rel_pct": 0.0108,
+          "p95_rel_pct": 0.0588
+        },
+        "high": {
+          "median_abs": 0.01,
+          "p95_abs": 0.045,
+          "max_abs": 17.25,
+          "median_rel_pct": 0.0107,
+          "p95_rel_pct": 0.0536
+        },
+        "low": {
+          "median_abs": 0.0099,
+          "p95_abs": 0.04,
+          "max_abs": 1.48,
+          "median_rel_pct": 0.0107,
+          "p95_rel_pct": 0.0477
+        },
+        "close": {
+          "median_abs": 0.006,
+          "p95_abs": 0.045,
+          "max_abs": 1.265,
+          "median_rel_pct": 0.0083,
+          "p95_rel_pct": 0.0539
+        },
+        "vwap": {
+          "median_abs": 0.0067,
+          "p95_abs": 0.0358,
+          "max_abs": 3.3724
+        }
+      },
+      "atr": {
+        "sip_native_1min": 0.1368,
+        "iex_native_1min": 0.1186,
+        "sip_5min_aggregated": 0.2209,
+        "iex_5min_aggregated": 0.2054
+      }
+    },
+    {
+      "symbol": "PFE",
+      "stratum": "Medium Liquidity",
+      "total_sip_bars": 5725,
+      "total_iex_bars": 3732,
+      "missing_in_iex": 1993,
+      "missing_in_sip": 0,
+      "timestamp_coverage_pct": 65.19,
+      "sip_full_volume": 316610842,
+      "iex_full_volume": 17698680,
+      "full_session_volume_ratio": 0.0559,
+      "common_timestamp_volume_ratio": 0.0752,
+      "sip_session_vwap": 30.1603,
+      "iex_session_vwap": 30.1453,
+      "ohlc_divergence": {
+        "open": {
+          "median_abs": 0.005,
+          "p95_abs": 0.015,
+          "max_abs": 0.15,
+          "median_rel_pct": 0.0164,
+          "p95_rel_pct": 0.0492
+        },
+        "high": {
+          "median_abs": 0.005,
+          "p95_abs": 0.015,
+          "max_abs": 0.09,
+          "median_rel_pct": 0.0166,
+          "p95_rel_pct": 0.0496
+        },
+        "low": {
+          "median_abs": 0.005,
+          "p95_abs": 0.015,
+          "max_abs": 0.12,
+          "median_rel_pct": 0.0167,
+          "p95_rel_pct": 0.0494
+        },
+        "close": {
+          "median_abs": 0.005,
+          "p95_abs": 0.014,
+          "max_abs": 0.095,
+          "median_rel_pct": 0.0163,
+          "p95_rel_pct": 0.0462
+        },
+        "vwap": {
+          "median_abs": 0.0021,
+          "p95_abs": 0.0086,
+          "max_abs": 0.0779
+        }
+      },
+      "atr": {
+        "sip_native_1min": 0.037,
+        "iex_native_1min": 0.03,
+        "sip_5min_aggregated": 0.0814,
+        "iex_5min_aggregated": 0.0757
+      }
+    },
+    {
+      "symbol": "F",
+      "stratum": "Medium Liquidity",
+      "total_sip_bars": 6603,
+      "total_iex_bars": 3596,
+      "missing_in_iex": 3007,
+      "missing_in_sip": 0,
+      "timestamp_coverage_pct": 54.46,
+      "sip_full_volume": 462591687,
+      "iex_full_volume": 21402227,
+      "full_session_volume_ratio": 0.0463,
+      "common_timestamp_volume_ratio": 0.0584,
+      "sip_session_vwap": 12.0342,
+      "iex_session_vwap": 12.0358,
+      "ohlc_divergence": {
+        "open": {
+          "median_abs": 0.0049,
+          "p95_abs": 0.01,
+          "max_abs": 0.12,
+          "median_rel_pct": 0.0397,
+          "p95_rel_pct": 0.0853
+        },
+        "high": {
+          "median_abs": 0.005,
+          "p95_abs": 0.01,
+          "max_abs": 0.0469,
+          "median_rel_pct": 0.0418,
+          "p95_rel_pct": 0.0862
+        },
+        "low": {
+          "median_abs": 0.005,
+          "p95_abs": 0.01,
+          "max_abs": 0.15,
+          "median_rel_pct": 0.041,
+          "p95_rel_pct": 0.0858
+        },
+        "close": {
+          "median_abs": 0.0027,
+          "p95_abs": 0.01,
+          "max_abs": 0.03,
+          "median_rel_pct": 0.0222,
+          "p95_rel_pct": 0.0838
+        },
+        "vwap": {
+          "median_abs": 0.0017,
+          "p95_abs": 0.0068,
+          "max_abs": 0.0355
+        }
+      },
+      "atr": {
+        "sip_native_1min": 0.0198,
+        "iex_native_1min": 0.0125,
+        "sip_5min_aggregated": 0.0268,
+        "iex_5min_aggregated": 0.0211
+      }
+    },
+    {
+      "symbol": "BAC",
+      "stratum": "Medium Liquidity",
+      "total_sip_bars": 5046,
+      "total_iex_bars": 3861,
+      "missing_in_iex": 1185,
+      "missing_in_sip": 0,
+      "timestamp_coverage_pct": 76.52,
+      "sip_full_volume": 347099323,
+      "iex_full_volume": 24865234,
+      "full_session_volume_ratio": 0.0716,
+      "common_timestamp_volume_ratio": 0.0965,
+      "sip_session_vwap": 50.5115,
+      "iex_session_vwap": 50.4649,
+      "ohlc_divergence": {
+        "open": {
+          "median_abs": 0.005,
+          "p95_abs": 0.015,
+          "max_abs": 0.085,
+          "median_rel_pct": 0.0098,
+          "p95_rel_pct": 0.0302
+        },
+        "high": {
+          "median_abs": 0.005,
+          "p95_abs": 0.015,
+          "max_abs": 0.2566,
+          "median_rel_pct": 0.0098,
+          "p95_rel_pct": 0.0296
+        },
+        "low": {
+          "median_abs": 0.005,
+          "p95_abs": 0.015,
+          "max_abs": 0.1,
+          "median_rel_pct": 0.0098,
+          "p95_rel_pct": 0.0296
+        },
+        "close": {
+          "median_abs": 0.005,
+          "p95_abs": 0.015,
+          "max_abs": 0.075,
+          "median_rel_pct": 0.0097,
+          "p95_rel_pct": 0.0296
+        },
+        "vwap": {
+          "median_abs": 0.0024,
+          "p95_abs": 0.0103,
+          "max_abs": 0.1121
+        }
+      },
+      "atr": {
+        "sip_native_1min": 0.0382,
+        "iex_native_1min": 0.0354,
+        "sip_5min_aggregated": 0.0865,
+        "iex_5min_aggregated": 0.0786
+      }
+    },
+    {
+      "symbol": "T",
+      "stratum": "Medium Liquidity",
+      "total_sip_bars": 6140,
+      "total_iex_bars": 3841,
+      "missing_in_iex": 2299,
+      "missing_in_sip": 0,
+      "timestamp_coverage_pct": 62.56,
+      "sip_full_volume": 567951900,
+      "iex_full_volume": 35087348,
+      "full_session_volume_ratio": 0.0618,
+      "common_timestamp_volume_ratio": 0.0743,
+      "sip_session_vwap": 21.4421,
+      "iex_session_vwap": 21.4159,
+      "ohlc_divergence": {
+        "open": {
+          "median_abs": 0.0049,
+          "p95_abs": 0.01,
+          "max_abs": 0.055,
+          "median_rel_pct": 0.0221,
+          "p95_rel_pct": 0.0478
+        },
+        "high": {
+          "median_abs": 0.005,
+          "p95_abs": 0.01,
+          "max_abs": 0.055,
+          "median_rel_pct": 0.0233,
+          "p95_rel_pct": 0.0479
+        },
+        "low": {
+          "median_abs": 0.005,
+          "p95_abs": 0.01,
+          "max_abs": 0.085,
+          "median_rel_pct": 0.0233,
+          "p95_rel_pct": 0.0483
+        },
+        "close": {
+          "median_abs": 0.0039,
+          "p95_abs": 0.01,
+          "max_abs": 0.04,
+          "median_rel_pct": 0.018,
+          "p95_rel_pct": 0.0475
+        },
+        "vwap": {
+          "median_abs": 0.0021,
+          "p95_abs": 0.0078,
+          "max_abs": 0.1484
+        }
+      },
+      "atr": {
+        "sip_native_1min": 0.0251,
+        "iex_native_1min": 0.0207,
+        "sip_5min_aggregated": 0.041,
+        "iex_5min_aggregated": 0.0382
+      }
+    },
+    {
+      "symbol": "VALE",
+      "stratum": "Medium Liquidity",
+      "total_sip_bars": 4815,
+      "total_iex_bars": 3522,
+      "missing_in_iex": 1293,
+      "missing_in_sip": 0,
+      "timestamp_coverage_pct": 73.15,
+      "sip_full_volume": 438760306,
+      "iex_full_volume": 36939753,
+      "full_session_volume_ratio": 0.0842,
+      "common_timestamp_volume_ratio": 0.0932,
+      "sip_session_vwap": 11.7827,
+      "iex_session_vwap": 11.8489,
+      "ohlc_divergence": {
+        "open": {
+          "median_abs": 0.0042,
+          "p95_abs": 0.01,
+          "max_abs": 0.19,
+          "median_rel_pct": 0.0357,
+          "p95_rel_pct": 0.0876
+        },
+        "high": {
+          "median_abs": 0.005,
+          "p95_abs": 0.01,
+          "max_abs": 0.11,
+          "median_rel_pct": 0.0418,
+          "p95_rel_pct": 0.0894
+        },
+        "low": {
+          "median_abs": 0.005,
+          "p95_abs": 0.01,
+          "max_abs": 0.22,
+          "median_rel_pct": 0.0419,
+          "p95_rel_pct": 0.0891
+        },
+        "close": {
+          "median_abs": 0.0015,
+          "p95_abs": 0.01,
+          "max_abs": 0.19,
+          "median_rel_pct": 0.0129,
+          "p95_rel_pct": 0.085
+        },
+        "vwap": {
+          "median_abs": 0.0015,
+          "p95_abs": 0.0064,
+          "max_abs": 0.1961
+        }
+      },
+      "atr": {
+        "sip_native_1min": 0.0129,
+        "iex_native_1min": 0.0064,
+        "sip_5min_aggregated": 0.0214,
+        "iex_5min_aggregated": 0.0168
+      }
+    },
+    {
+      "symbol": "NIO",
+      "stratum": "Medium Liquidity",
+      "total_sip_bars": 6243,
+      "total_iex_bars": 1968,
+      "missing_in_iex": 4275,
+      "missing_in_sip": 0,
+      "timestamp_coverage_pct": 31.52,
+      "sip_full_volume": 256344456,
+      "iex_full_volume": 13423931,
+      "full_session_volume_ratio": 0.0524,
+      "common_timestamp_volume_ratio": 0.0796,
+      "sip_session_vwap": 3.2725,
+      "iex_session_vwap": 3.2783,
+      "ohlc_divergence": {
+        "open": {
+          "median_abs": 0.0001,
+          "p95_abs": 0.0078,
+          "max_abs": 0.02,
+          "median_rel_pct": 0.0031,
+          "p95_rel_pct": 0.2405
+        },
+        "high": {
+          "median_abs": 0.005,
+          "p95_abs": 0.01,
+          "max_abs": 0.02,
+          "median_rel_pct": 0.1511,
+          "p95_rel_pct": 0.3086
+        },
+        "low": {
+          "median_abs": 0.005,
+          "p95_abs": 0.01,
+          "max_abs": 0.02,
+          "median_rel_pct": 0.1515,
+          "p95_rel_pct": 0.3077
+        },
+        "close": {
+          "median_abs": 0.0005,
+          "p95_abs": 0.0071,
+          "max_abs": 0.02,
+          "median_rel_pct": 0.0152,
+          "p95_rel_pct": 0.2148
+        },
+        "vwap": {
+          "median_abs": 0.0014,
+          "p95_abs": 0.0047,
+          "max_abs": 0.0132
+        }
+      },
+      "atr": {
+        "sip_native_1min": 0.0094,
+        "iex_native_1min": 0.0036,
+        "sip_5min_aggregated": 0.0111,
+        "iex_5min_aggregated": 0.0039
+      }
+    },
+    {
+      "symbol": "PLTR",
+      "stratum": "Medium Liquidity",
+      "total_sip_bars": 7120,
+      "total_iex_bars": 3748,
+      "missing_in_iex": 3372,
+      "missing_in_sip": 0,
+      "timestamp_coverage_pct": 52.64,
+      "sip_full_volume": 250790764,
+      "iex_full_volume": 6325800,
+      "full_session_volume_ratio": 0.0252,
+      "common_timestamp_volume_ratio": 0.033,
+      "sip_session_vwap": 188.6471,
+      "iex_session_vwap": 189.2758,
+      "ohlc_divergence": {
+        "open": {
+          "median_abs": 0.035,
+          "p95_abs": 0.18,
+          "max_abs": 8.38,
+          "median_rel_pct": 0.018,
+          "p95_rel_pct": 0.0926
+        },
+        "high": {
+          "median_abs": 0.045,
+          "p95_abs": 0.18,
+          "max_abs": 1.0969,
+          "median_rel_pct": 0.0243,
+          "p95_rel_pct": 0.0926
+        },
+        "low": {
+          "median_abs": 0.05,
+          "p95_abs": 0.1898,
+          "max_abs": 6.95,
+          "median_rel_pct": 0.0271,
+          "p95_rel_pct": 0.0982
+        },
+        "close": {
+          "median_abs": 0.03,
+          "p95_abs": 0.16,
+          "max_abs": 2.11,
+          "median_rel_pct": 0.0153,
+          "p95_rel_pct": 0.0844
+        },
+        "vwap": {
+          "median_abs": 0.0218,
+          "p95_abs": 0.098,
+          "max_abs": 2.6212
+        }
+      },
+      "atr": {
+        "sip_native_1min": 0.4249,
+        "iex_native_1min": 0.3636,
+        "sip_5min_aggregated": 0.8082,
+        "iex_5min_aggregated": 0.7639
+      }
+    },
+    {
+      "symbol": "SNAP",
+      "stratum": "Medium Liquidity",
+      "total_sip_bars": 5426,
+      "total_iex_bars": 3434,
+      "missing_in_iex": 1992,
+      "missing_in_sip": 0,
+      "timestamp_coverage_pct": 63.29,
+      "sip_full_volume": 389979040,
+      "iex_full_volume": 29970320,
+      "full_session_volume_ratio": 0.0769,
+      "common_timestamp_volume_ratio": 0.0949,
+      "sip_session_vwap": 5.9383,
+      "iex_session_vwap": 5.981,
+      "ohlc_divergence": {
+        "open": {
+          "median_abs": 0.0021,
+          "p95_abs": 0.01,
+          "max_abs": 0.0399,
+          "median_rel_pct": 0.0348,
+          "p95_rel_pct": 0.1695
+        },
+        "high": {
+          "median_abs": 0.005,
+          "p95_abs": 0.01,
+          "max_abs": 0.085,
+          "median_rel_pct": 0.0799,
+          "p95_rel_pct": 0.1818
+        },
+        "low": {
+          "median_abs": 0.005,
+          "p95_abs": 0.01,
+          "max_abs": 0.035,
+          "median_rel_pct": 0.0805,
+          "p95_rel_pct": 0.1835
+        },
+        "close": {
+          "median_abs": 0.0017,
+          "p95_abs": 0.01,
+          "max_abs": 0.0394,
+          "median_rel_pct": 0.0292,
+          "p95_rel_pct": 0.1635
+        },
+        "vwap": {
+          "median_abs": 0.0016,
+          "p95_abs": 0.0059,
+          "max_abs": 0.0394
+        }
+      },
+      "atr": {
+        "sip_native_1min": 0.013,
+        "iex_native_1min": 0.0079,
+        "sip_5min_aggregated": 0.0197,
+        "iex_5min_aggregated": 0.0154
+      }
+    },
+    {
+      "symbol": "SOFI",
+      "stratum": "Medium Liquidity",
+      "total_sip_bars": 7940,
+      "total_iex_bars": 3845,
+      "missing_in_iex": 4095,
+      "missing_in_sip": 0,
+      "timestamp_coverage_pct": 48.43,
+      "sip_full_volume": 632254936,
+      "iex_full_volume": 24376794,
+      "full_session_volume_ratio": 0.0386,
+      "common_timestamp_volume_ratio": 0.0432,
+      "sip_session_vwap": 16.2764,
+      "iex_session_vwap": 16.2463,
+      "ohlc_divergence": {
+        "open": {
+          "median_abs": 0.005,
+          "p95_abs": 0.015,
+          "max_abs": 0.08,
+          "median_rel_pct": 0.0296,
+          "p95_rel_pct": 0.101
+        },
+        "high": {
+          "median_abs": 0.005,
+          "p95_abs": 0.015,
+          "max_abs": 0.06,
+          "median_rel_pct": 0.0334,
+          "p95_rel_pct": 0.1018
+        },
+        "low": {
+          "median_abs": 0.005,
+          "p95_abs": 0.015,
+          "max_abs": 0.06,
+          "median_rel_pct": 0.0333,
+          "p95_rel_pct": 0.1015
+        },
+        "close": {
+          "median_abs": 0.005,
+          "p95_abs": 0.015,
+          "max_abs": 0.06,
+          "median_rel_pct": 0.029,
+          "p95_rel_pct": 0.0898
+        },
+        "vwap": {
+          "median_abs": 0.0025,
+          "p95_abs": 0.01,
+          "max_abs": 0.0527
+        }
+      },
+      "atr": {
+        "sip_native_1min": 0.0315,
+        "iex_native_1min": 0.0236,
+        "sip_5min_aggregated": 0.0525,
+        "iex_5min_aggregated": 0.0454
+      }
+    },
+    {
+      "symbol": "XLI",
+      "stratum": "Borderline/Exile",
+      "total_sip_bars": 4194,
+      "total_iex_bars": 3574,
+      "missing_in_iex": 620,
+      "missing_in_sip": 0,
+      "timestamp_coverage_pct": 85.22,
+      "sip_full_volume": 83453832,
+      "iex_full_volume": 6741006,
+      "full_session_volume_ratio": 0.0808,
+      "common_timestamp_volume_ratio": 0.086,
+      "sip_session_vwap": 168.1408,
+      "iex_session_vwap": 168.2491,
+      "ohlc_divergence": {
+        "open": {
+          "median_abs": 0.01,
+          "p95_abs": 0.07,
+          "max_abs": 0.235,
+          "median_rel_pct": 0.006,
+          "p95_rel_pct": 0.0417
+        },
+        "high": {
+          "median_abs": 0.01,
+          "p95_abs": 0.07,
+          "max_abs": 0.23,
+          "median_rel_pct": 0.0061,
+          "p95_rel_pct": 0.0416
+        },
+        "low": {
+          "median_abs": 0.01,
+          "p95_abs": 0.07,
+          "max_abs": 0.26,
+          "median_rel_pct": 0.0061,
+          "p95_rel_pct": 0.0416
+        },
+        "close": {
+          "median_abs": 0.01,
+          "p95_abs": 0.07,
+          "max_abs": 0.24,
+          "median_rel_pct": 0.006,
+          "p95_rel_pct": 0.0415
+        },
+        "vwap": {
+          "median_abs": 0.0083,
+          "p95_abs": 0.0365,
+          "max_abs": 0.2659
+        }
+      },
+      "atr": {
+        "sip_native_1min": 0.0961,
+        "iex_native_1min": 0.0736,
+        "sip_5min_aggregated": 0.1561,
+        "iex_5min_aggregated": 0.1304
+      }
+    },
+    {
+      "symbol": "MS",
+      "stratum": "Borderline/Exile",
+      "total_sip_bars": 4143,
+      "total_iex_bars": 3523,
+      "missing_in_iex": 620,
+      "missing_in_sip": 0,
+      "timestamp_coverage_pct": 85.03,
+      "sip_full_volume": 60628790,
+      "iex_full_volume": 3832699,
+      "full_session_volume_ratio": 0.0632,
+      "common_timestamp_volume_ratio": 0.0886,
+      "sip_session_vwap": 185.5301,
+      "iex_session_vwap": 185.7344,
+      "ohlc_divergence": {
+        "open": {
+          "median_abs": 0.02,
+          "p95_abs": 0.1217,
+          "max_abs": 0.52,
+          "median_rel_pct": 0.0108,
+          "p95_rel_pct": 0.0657
+        },
+        "high": {
+          "median_abs": 0.03,
+          "p95_abs": 0.1397,
+          "max_abs": 0.8895,
+          "median_rel_pct": 0.0156,
+          "p95_rel_pct": 0.0735
+        },
+        "low": {
+          "median_abs": 0.025,
+          "p95_abs": 0.13,
+          "max_abs": 1.1712,
+          "median_rel_pct": 0.0135,
+          "p95_rel_pct": 0.0704
+        },
+        "close": {
+          "median_abs": 0.02,
+          "p95_abs": 0.12,
+          "max_abs": 1.3462,
+          "median_rel_pct": 0.0105,
+          "p95_rel_pct": 0.0634
+        },
+        "vwap": {
+          "median_abs": 0.0138,
+          "p95_abs": 0.0637,
+          "max_abs": 0.5339
+        }
+      },
+      "atr": {
+        "sip_native_1min": 0.1506,
+        "iex_native_1min": 0.1325,
+        "sip_5min_aggregated": 0.2902,
+        "iex_5min_aggregated": 0.2332
+      }
+    },
+    {
+      "symbol": "BSX",
+      "stratum": "Borderline/Exile",
+      "total_sip_bars": 4562,
+      "total_iex_bars": 3889,
+      "missing_in_iex": 673,
+      "missing_in_sip": 0,
+      "timestamp_coverage_pct": 85.25,
+      "sip_full_volume": 227056235,
+      "iex_full_volume": 22466708,
+      "full_session_volume_ratio": 0.0989,
+      "common_timestamp_volume_ratio": 0.1137,
+      "sip_session_vwap": 43.2994,
+      "iex_session_vwap": 43.3406,
+      "ohlc_divergence": {
+        "open": {
+          "median_abs": 0.005,
+          "p95_abs": 0.025,
+          "max_abs": 0.83,
+          "median_rel_pct": 0.0111,
+          "p95_rel_pct": 0.0586
+        },
+        "high": {
+          "median_abs": 0.005,
+          "p95_abs": 0.025,
+          "max_abs": 1.18,
+          "median_rel_pct": 0.0111,
+          "p95_rel_pct": 0.0551
+        },
+        "low": {
+          "median_abs": 0.005,
+          "p95_abs": 0.02,
+          "max_abs": 0.57,
+          "median_rel_pct": 0.0111,
+          "p95_rel_pct": 0.0476
+        },
+        "close": {
+          "median_abs": 0.005,
+          "p95_abs": 0.025,
+          "max_abs": 0.37,
+          "median_rel_pct": 0.011,
+          "p95_rel_pct": 0.0555
+        },
+        "vwap": {
+          "median_abs": 0.0033,
+          "p95_abs": 0.0185,
+          "max_abs": 0.3974
+        }
+      },
+      "atr": {
+        "sip_native_1min": 0.0511,
+        "iex_native_1min": 0.0482,
+        "sip_5min_aggregated": 0.105,
+        "iex_5min_aggregated": 0.1046
+      }
+    },
+    {
+      "symbol": "AA",
+      "stratum": "Borderline/Exile",
+      "total_sip_bars": 4298,
+      "total_iex_bars": 3107,
+      "missing_in_iex": 1191,
+      "missing_in_sip": 0,
+      "timestamp_coverage_pct": 72.29,
+      "sip_full_volume": 40700880,
+      "iex_full_volume": 2461477,
+      "full_session_volume_ratio": 0.0605,
+      "common_timestamp_volume_ratio": 0.0843,
+      "sip_session_vwap": 39.3264,
+      "iex_session_vwap": 39.2896,
+      "ohlc_divergence": {
+        "open": {
+          "median_abs": 0.01,
+          "p95_abs": 0.045,
+          "max_abs": 0.255,
+          "median_rel_pct": 0.0246,
+          "p95_rel_pct": 0.1133
+        },
+        "high": {
+          "median_abs": 0.01,
+          "p95_abs": 0.05,
+          "max_abs": 0.3,
+          "median_rel_pct": 0.0252,
+          "p95_rel_pct": 0.1257
+        },
+        "low": {
+          "median_abs": 0.01,
+          "p95_abs": 0.05,
+          "max_abs": 0.22,
+          "median_rel_pct": 0.0252,
+          "p95_rel_pct": 0.1249
+        },
+        "close": {
+          "median_abs": 0.005,
+          "p95_abs": 0.04,
+          "max_abs": 0.29,
+          "median_rel_pct": 0.013,
+          "p95_rel_pct": 0.1014
+        },
+        "vwap": {
+          "median_abs": 0.005,
+          "p95_abs": 0.025,
+          "max_abs": 0.1986
+        }
+      },
+      "atr": {
+        "sip_native_1min": 0.0436,
+        "iex_native_1min": 0.0357,
+        "sip_5min_aggregated": 0.0853,
+        "iex_5min_aggregated": 0.0839
+      }
+    },
+    {
+      "symbol": "AAL",
+      "stratum": "Borderline/Exile",
+      "total_sip_bars": 5846,
+      "total_iex_bars": 3635,
+      "missing_in_iex": 2211,
+      "missing_in_sip": 0,
+      "timestamp_coverage_pct": 62.18,
+      "sip_full_volume": 672353022,
+      "iex_full_volume": 25777689,
+      "full_session_volume_ratio": 0.0383,
+      "common_timestamp_volume_ratio": 0.0425,
+      "sip_session_vwap": 12.5665,
+      "iex_session_vwap": 12.5328,
+      "ohlc_divergence": {
+        "open": {
+          "median_abs": 0.005,
+          "p95_abs": 0.0101,
+          "max_abs": 0.12,
+          "median_rel_pct": 0.0385,
+          "p95_rel_pct": 0.0839
+        },
+        "high": {
+          "median_abs": 0.005,
+          "p95_abs": 0.0149,
+          "max_abs": 0.12,
+          "median_rel_pct": 0.0398,
+          "p95_rel_pct": 0.1151
+        },
+        "low": {
+          "median_abs": 0.005,
+          "p95_abs": 0.01,
+          "max_abs": 0.11,
+          "median_rel_pct": 0.0401,
+          "p95_rel_pct": 0.0842
+        },
+        "close": {
+          "median_abs": 0.0049,
+          "p95_abs": 0.01,
+          "max_abs": 0.0351,
+          "median_rel_pct": 0.0375,
+          "p95_rel_pct": 0.0828
+        },
+        "vwap": {
+          "median_abs": 0.002,
+          "p95_abs": 0.0078,
+          "max_abs": 0.0443
+        }
+      },
+      "atr": {
+        "sip_native_1min": 0.0216,
+        "iex_native_1min": 0.015,
+        "sip_5min_aggregated": 0.0304,
+        "iex_5min_aggregated": 0.0261
+      }
+    },
+    {
+      "symbol": "AER",
+      "stratum": "Borderline/Exile",
+      "total_sip_bars": 3652,
+      "total_iex_bars": 1565,
+      "missing_in_iex": 2087,
+      "missing_in_sip": 0,
+      "timestamp_coverage_pct": 42.85,
+      "sip_full_volume": 12537124,
+      "iex_full_volume": 701536,
+      "full_session_volume_ratio": 0.056,
+      "common_timestamp_volume_ratio": 0.1007,
+      "sip_session_vwap": 154.4271,
+      "iex_session_vwap": 154.6949,
+      "ohlc_divergence": {
+        "open": {
+          "median_abs": 0.02,
+          "p95_abs": 0.18,
+          "max_abs": 1.2,
+          "median_rel_pct": 0.0135,
+          "p95_rel_pct": 0.1133
+        },
+        "high": {
+          "median_abs": 0.03,
+          "p95_abs": 0.19,
+          "max_abs": 0.93,
+          "median_rel_pct": 0.0193,
+          "p95_rel_pct": 0.1203
+        },
+        "low": {
+          "median_abs": 0.025,
+          "p95_abs": 0.18,
+          "max_abs": 0.955,
+          "median_rel_pct": 0.0169,
+          "p95_rel_pct": 0.117
+        },
+        "close": {
+          "median_abs": 0.02,
+          "p95_abs": 0.165,
+          "max_abs": 0.76,
+          "median_rel_pct": 0.0122,
+          "p95_rel_pct": 0.1076
+        },
+        "vwap": {
+          "median_abs": 0.0175,
+          "p95_abs": 0.101,
+          "max_abs": 0.6089
+        }
+      },
+      "atr": {
+        "sip_native_1min": 0.1375,
+        "iex_native_1min": 0.1443,
+        "sip_5min_aggregated": 0.2514,
+        "iex_5min_aggregated": 0.1814
+      }
+    },
+    {
+      "symbol": "AFRM",
+      "stratum": "Borderline/Exile",
+      "total_sip_bars": 4213,
+      "total_iex_bars": 2725,
+      "missing_in_iex": 1488,
+      "missing_in_sip": 0,
+      "timestamp_coverage_pct": 64.68,
+      "sip_full_volume": 30467204,
+      "iex_full_volume": 1560423,
+      "full_session_volume_ratio": 0.0512,
+      "common_timestamp_volume_ratio": 0.0743,
+      "sip_session_vwap": 72.9151,
+      "iex_session_vwap": 72.6502,
+      "ohlc_divergence": {
+        "open": {
+          "median_abs": 0.02,
+          "p95_abs": 0.14,
+          "max_abs": 0.6896,
+          "median_rel_pct": 0.0276,
+          "p95_rel_pct": 0.1934
+        },
+        "high": {
+          "median_abs": 0.03,
+          "p95_abs": 0.15,
+          "max_abs": 0.72,
+          "median_rel_pct": 0.0407,
+          "p95_rel_pct": 0.2056
+        },
+        "low": {
+          "median_abs": 0.03,
+          "p95_abs": 0.15,
+          "max_abs": 0.65,
+          "median_rel_pct": 0.0399,
+          "p95_rel_pct": 0.2069
+        },
+        "close": {
+          "median_abs": 0.02,
+          "p95_abs": 0.115,
+          "max_abs": 0.455,
+          "median_rel_pct": 0.026,
+          "p95_rel_pct": 0.1552
+        },
+        "vwap": {
+          "median_abs": 0.0144,
+          "p95_abs": 0.0715,
+          "max_abs": 0.4015
+        }
+      },
+      "atr": {
+        "sip_native_1min": 0.1326,
+        "iex_native_1min": 0.1107,
+        "sip_5min_aggregated": 0.2036,
+        "iex_5min_aggregated": 0.1964
+      }
+    },
+    {
+      "symbol": "AGCO",
+      "stratum": "Borderline/Exile",
+      "total_sip_bars": 2943,
+      "total_iex_bars": 1213,
+      "missing_in_iex": 1730,
+      "missing_in_sip": 0,
+      "timestamp_coverage_pct": 41.22,
+      "sip_full_volume": 9278767,
+      "iex_full_volume": 681069,
+      "full_session_volume_ratio": 0.0734,
+      "common_timestamp_volume_ratio": 0.1246,
+      "sip_session_vwap": 106.4948,
+      "iex_session_vwap": 106.6718,
+      "ohlc_divergence": {
+        "open": {
+          "median_abs": 0.01,
+          "p95_abs": 0.21,
+          "max_abs": 1.28,
+          "median_rel_pct": 0.0093,
+          "p95_rel_pct": 0.2047
+        },
+        "high": {
+          "median_abs": 0.015,
+          "p95_abs": 0.212,
+          "max_abs": 2.21,
+          "median_rel_pct": 0.0145,
+          "p95_rel_pct": 0.2045
+        },
+        "low": {
+          "median_abs": 0.015,
+          "p95_abs": 0.227,
+          "max_abs": 1.14,
+          "median_rel_pct": 0.0145,
+          "p95_rel_pct": 0.2144
+        },
+        "close": {
+          "median_abs": 0.005,
+          "p95_abs": 0.1959,
+          "max_abs": 2.21,
+          "median_rel_pct": 0.0048,
+          "p95_rel_pct": 0.1845
+        },
+        "vwap": {
+          "median_abs": 0.0159,
+          "p95_abs": 0.1331,
+          "max_abs": 0.5758
+        }
+      },
+      "atr": {
+        "sip_native_1min": 0.1259,
+        "iex_native_1min": 0.1118,
+        "sip_5min_aggregated": 0.2546,
+        "iex_5min_aggregated": 0.2086
+      }
+    },
+    {
+      "symbol": "AIG",
+      "stratum": "Borderline/Exile",
+      "total_sip_bars": 3898,
+      "total_iex_bars": 2768,
+      "missing_in_iex": 1130,
+      "missing_in_sip": 0,
+      "timestamp_coverage_pct": 71.01,
+      "sip_full_volume": 38513866,
+      "iex_full_volume": 3237830,
+      "full_session_volume_ratio": 0.0841,
+      "common_timestamp_volume_ratio": 0.1243,
+      "sip_session_vwap": 81.3858,
+      "iex_session_vwap": 81.442,
+      "ohlc_divergence": {
+        "open": {
+          "median_abs": 0.01,
+          "p95_abs": 0.0482,
+          "max_abs": 0.2549,
+          "median_rel_pct": 0.0121,
+          "p95_rel_pct": 0.059
+        },
+        "high": {
+          "median_abs": 0.01,
+          "p95_abs": 0.05,
+          "max_abs": 0.425,
+          "median_rel_pct": 0.0121,
+          "p95_rel_pct": 0.0611
+        },
+        "low": {
+          "median_abs": 0.01,
+          "p95_abs": 0.05,
+          "max_abs": 0.2549,
+          "median_rel_pct": 0.0122,
+          "p95_rel_pct": 0.0613
+        },
+        "close": {
+          "median_abs": 0.005,
+          "p95_abs": 0.045,
+          "max_abs": 0.32,
+          "median_rel_pct": 0.0062,
+          "p95_rel_pct": 0.055
+        },
+        "vwap": {
+          "median_abs": 0.0052,
+          "p95_abs": 0.0259,
+          "max_abs": 0.3099
+        }
+      },
+      "atr": {
+        "sip_native_1min": 0.1361,
+        "iex_native_1min": 0.1107,
+        "sip_5min_aggregated": 0.2052,
+        "iex_5min_aggregated": 0.1843
+      }
+    },
+    {
+      "symbol": "AKAM",
+      "stratum": "Borderline/Exile",
+      "total_sip_bars": 4218,
+      "total_iex_bars": 2972,
+      "missing_in_iex": 1246,
+      "missing_in_sip": 0,
+      "timestamp_coverage_pct": 70.46,
+      "sip_full_volume": 42556826,
+      "iex_full_volume": 2415796,
+      "full_session_volume_ratio": 0.0568,
+      "common_timestamp_volume_ratio": 0.0728,
+      "sip_session_vwap": 92.9016,
+      "iex_session_vwap": 92.967,
+      "ohlc_divergence": {
+        "open": {
+          "median_abs": 0.025,
+          "p95_abs": 0.155,
+          "max_abs": 0.555,
+          "median_rel_pct": 0.0253,
+          "p95_rel_pct": 0.168
+        },
+        "high": {
+          "median_abs": 0.035,
+          "p95_abs": 0.185,
+          "max_abs": 0.6925,
+          "median_rel_pct": 0.0404,
+          "p95_rel_pct": 0.1978
+        },
+        "low": {
+          "median_abs": 0.035,
+          "p95_abs": 0.17,
+          "max_abs": 0.6987,
+          "median_rel_pct": 0.0355,
+          "p95_rel_pct": 0.1802
+        },
+        "close": {
+          "median_abs": 0.02,
+          "p95_abs": 0.15,
+          "max_abs": 0.6925,
+          "median_rel_pct": 0.0205,
+          "p95_rel_pct": 0.1618
+        },
+        "vwap": {
+          "median_abs": 0.0179,
+          "p95_abs": 0.0852,
+          "max_abs": 0.39
+        }
+      },
+      "atr": {
+        "sip_native_1min": 0.2082,
+        "iex_native_1min": 0.175,
+        "sip_5min_aggregated": 0.3214,
+        "iex_5min_aggregated": 0.28
+      }
+    }
+  ]
+}
