@@ -6,5 +6,8 @@
   },
   "general": {
     "enableNotifications": true
+  },
+  "model": {
+    "disableLoopDetection": true
   }
 }

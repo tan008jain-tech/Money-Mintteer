@@ -203,6 +203,14 @@ class ICTStrategy:
         risk = abs(ep - sp)
         target = ep + (risk * rr) if side == Side.BUY else ep - (risk * rr)
 
+        ns_val = best_entry.get("ns")
+        entry_dt = None
+        if ns_val is not None:
+            try:
+                entry_dt = datetime.fromtimestamp(ns_val / 1e9, tz=UTC)
+            except Exception:
+                entry_dt = None
+
         return SetupAnalysis(
             passed=True,
             score=normalized_confidence,
@@ -214,13 +222,15 @@ class ICTStrategy:
             reward_risk=rr,
             side=side,
             confluences=(best_entry['zt'], f"score_{score}"),
+            timestamp=entry_dt,
         )
 
-    def signal(self, snapshot: MultiTimeframeSnapshot) -> TradeSignal | None:
-        result = self.analyze(snapshot)
+    def signal(self, snapshot: MultiTimeframeSnapshot, analysis: SetupAnalysis | None = None) -> TradeSignal | None:
+        result = analysis if analysis is not None else self.analyze(snapshot)
         if not result.passed or result.side is None or result.entry_price is None or result.stop_price is None or result.target_price is None:
             return None
         symbol = snapshot.entry[-1].symbol if snapshot.entry and hasattr(snapshot.entry[-1], "symbol") else "NQ"
+        sig_ts = result.timestamp if result.timestamp is not None else snapshot.as_of
         return TradeSignal(
             symbol=symbol,
             side=result.side,
@@ -228,7 +238,7 @@ class ICTStrategy:
             stop_price=result.stop_price,
             target_price=result.target_price,
             confidence=result.score,
-            timestamp=snapshot.as_of,
+            timestamp=sig_ts,
             reason=result.reason,
             strategy_version=self.VERSION,
         )

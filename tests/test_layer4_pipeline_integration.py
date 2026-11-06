@@ -100,3 +100,99 @@ def test_layer4_in_progress_bar_exclusion(monkeypatch: pytest.MonkeyPatch) -> No
 
     # The in-progress bar at 10:10:00 must be excluded from completed bars
     assert completed_bars[-1].timestamp == datetime(2026, 10, 18, 10, 9, 0, tzinfo=timezone.utc)
+
+
+def test_post_layer4_stale_bar_validation_restoration(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeBar:
+        def __init__(self, ts, o, h, l, c, v):
+            self.timestamp = ts
+            self.open = o
+            self.high = h
+            self.low = l
+            self.close = c
+            self.volume = v
+
+    class FakeBarsResponse:
+        def __init__(self, data):
+            self.data = data
+
+    class FakeStockClient:
+        def get_stock_bars(self, req):
+            end_dt = getattr(req, 'end', datetime.now(timezone.utc))
+            if end_dt.tzinfo is None:
+                end_dt = end_dt.replace(tzinfo=timezone.utc)
+            bar_time = end_dt.replace(second=0, microsecond=0) - timedelta(minutes=1) # 10:09:00
+            symbols = req.symbol_or_symbols if isinstance(req.symbol_or_symbols, list) else [req.symbol_or_symbols]
+            data = {}
+            for sym in symbols:
+                if sym == "FRESH_SYM":
+                    bars = [FakeBar(bar_time - timedelta(minutes=i), 100, 101, 99, 100, 1000) for i in range(50, 0, -1)]
+                    bars.append(FakeBar(bar_time, 100, 150, 50, 100, 1000))
+                elif sym == "STALE_SELECTED_SYM":
+                    stale_time = bar_time - timedelta(minutes=15)
+                    bars = [FakeBar(stale_time - timedelta(minutes=i), 100, 101, 99, 100, 1000) for i in range(50, 0, -1)]
+                    bars.append(FakeBar(stale_time, 100, 190, 10, 100, 5000))
+                else:
+                    stale_time = bar_time - timedelta(minutes=60)
+                    bars = [FakeBar(stale_time - timedelta(minutes=i), 100, 101, 99, 100, 1000) for i in range(50, 0, -1)]
+                    bars.append(FakeBar(stale_time, 100, 101, 99, 100, 100))
+                data[sym] = bars
+            return FakeBarsResponse(data)
+
+    from money_mintter.core import selector as selector_mod
+    original_select = selector_mod.select_layer4_candidates
+    layer4_selector_calls = []
+    layer4_selected_returned = []
+
+    def spy_select(pool, bars_dict, max_candidates=8):
+        layer4_selector_calls.append(list(bars_dict.keys()))
+        res = original_select(pool, bars_dict, max_candidates)
+        layer4_selected_returned.extend(res)
+        return res
+
+    monkeypatch.setattr("money_mintter.core.live_bot.select_layer4_candidates", spy_select)
+
+    from money_mintter.strategy import LiquiditySweepReversalStrategy
+    original_analyze = LiquiditySweepReversalStrategy.analyze
+    analyzed_symbols = []
+
+    def spy_analyze(self, snapshot):
+        if snapshot.entry:
+            analyzed_symbols.append(snapshot.entry[0].symbol)
+        return original_analyze(self, snapshot)
+
+    monkeypatch.setattr(LiquiditySweepReversalStrategy, "analyze", spy_analyze)
+
+    monkeypatch.setattr(MarketScanner, "is_session_open", lambda sym, now: (True, "Open"))
+    pool = ["FRESH_SYM", "STALE_SELECTED_SYM", "STALE_UNSELECTED_SYM"]
+    scanner = MarketScanner(pool, FakeStockClient(), logging.getLogger("test"))
+    now_utc = datetime(2026, 10, 18, 10, 10, 0, tzinfo=timezone.utc)
+
+    analyzed, dashboard = scanner.scan_universe(now_utc, set(), LiquiditySweepReversalStrategy(StrategyConfig()), daily_pool=pool)
+
+    # 1. Verify Layer 4 receives all three symbols, including symbols whose bars are stale.
+    assert len(layer4_selector_calls) > 0
+    assert set(layer4_selector_calls[0]) == {"FRESH_SYM", "STALE_SELECTED_SYM", "STALE_UNSELECTED_SYM"}
+
+    # 2. Verify STALE_SELECTED_SYM is actually returned by Layer 4 selection.
+    returned_symbols = {item.symbol for item in layer4_selected_returned}
+    assert "STALE_SELECTED_SYM" in returned_symbols
+
+    # 3. Verify STALE_SELECTED_SYM is rejected by the post-selection freshness check.
+    analyzed_result_symbols = [item[0] for item in analyzed]
+    assert "STALE_SELECTED_SYM" not in analyzed_result_symbols
+
+    # 4. Verify FRESH_SYM reached analysis.
+    assert "FRESH_SYM" in analyzed_symbols
+
+    # 5. Verify STALE_UNSELECTED_SYM does not reach analysis.
+    assert "STALE_UNSELECTED_SYM" not in analyzed_symbols
+    assert "STALE_UNSELECTED_SYM" not in analyzed_result_symbols
+
+    # 6. Verify Strategy analysis or signal-generation methods are never invoked for STALE_SELECTED_SYM.
+    assert "STALE_SELECTED_SYM" not in analyzed_symbols
+
+    # 7. Verify Fresh candidates proceed normally.
+    assert "FRESH_SYM" in analyzed_symbols
+
+

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import Any
 import pytest
 
@@ -9,6 +10,30 @@ from money_mintter.core.live_bot import LivePortfolioManager, LiveMarketBot
 from money_mintter.domain import Side
 from money_mintter.strategy import LiquiditySweepReversalStrategy, StrategyConfig
 from alpaca.trading.enums import OrderSide, OrderClass
+
+
+class DummyQuote:
+    def __init__(self, bid_price: float, ask_price: float, timestamp: datetime) -> None:
+        self.bid_price = bid_price
+        self.ask_price = ask_price
+        self.timestamp = timestamp
+
+
+class MockStockClient:
+    def __init__(self, quotes: dict[str, Any] | None = None) -> None:
+        self.quotes = quotes or {}
+
+    def get_stock_latest_quote(self, request: Any) -> dict[str, Any]:
+        res = {}
+        syms = request.symbol_or_symbols if hasattr(request, 'symbol_or_symbols') else []
+        for s in syms:
+            q = self.quotes.get(s)
+            if q is not None:
+                res[s] = q
+            else:
+                p = 100.0
+                res[s] = DummyQuote(p - 0.05, p + 0.05, datetime.now(timezone.utc))
+        return res
 
 
 class FakeSubmittedOrder:
@@ -57,9 +82,9 @@ def test_allocation_a_single_sell(monkeypatch: pytest.MonkeyPatch) -> None:
 
     client = FakeTradingClient()
     client._account = type("Account", (), {"cash": 1000.0, "equity": 1000.0, "buying_power": 1000.0, "last_equity": 1000.0})()
-    manager = LivePortfolioManager(client, logging.getLogger("test"))
+    manager = LivePortfolioManager(client, logging.getLogger("test"), stock_client=MockStockClient(quotes={"AAPL": DummyQuote(553.0, 553.25, datetime.now(timezone.utc))}))
 
-    top_new = [("AAPL", 0.9, Side.SELL, "reason", 553.12, 555.62, 548.94)]
+    top_new = [("AAPL", 0.9, Side.SELL, "reason", 553.12, 555.62, 548.94, datetime.now(timezone.utc))]
     orders_sent = manager.submit_bracket_orders(top_new, set(), 1000.0, settings)
 
     assert orders_sent == 1
@@ -74,17 +99,17 @@ def test_allocation_opportunity_aware_rules(monkeypatch: pytest.MonkeyPatch) -> 
     settings = Settings()
 
     client = FakeTradingClient()
-    manager = LivePortfolioManager(client, logging.getLogger("test"))
+    manager = LivePortfolioManager(client, logging.getLogger("test"), stock_client=MockStockClient(quotes={"AAPL": DummyQuote(99.95, 100.05, datetime.now(timezone.utc)), "GOOG": DummyQuote(799.95, 800.05, datetime.now(timezone.utc))}))
 
     # Test unknown win probability defaults to strict baseline (no above-baseline exception)
-    top_new = [("AAPL", 0.9, Side.BUY, "reason", 100.0, 98.0, 105.0)]
+    top_new = [("AAPL", 0.9, Side.BUY, "reason", 100.0, 98.0, 105.0, datetime.now(timezone.utc))]
     upcoming = [{"required_capital": 200.0, "actionable_mins": 10}]
     # Win probability unknown (None) -> baseline W / N = 1000 / 2 = 500, but capped at baseline or required.
     orders_sent = manager.submit_bracket_orders(top_new, set(), 1000.0, settings, upcoming_opportunities=upcoming, win_probabilities={"AAPL": None})
     assert orders_sent == 1
 
     # Test candidate affordability check (> 70% of wallet skipped)
-    top_unaffordable = [("GOOG", 0.9, Side.BUY, "reason", 800.0, 790.0, 820.0)]
+    top_unaffordable = [("GOOG", 0.9, Side.BUY, "reason", 800.0, 790.0, 820.0, datetime.now(timezone.utc))]
     orders_skipped = manager.submit_bracket_orders(top_unaffordable, set(), 1000.0, settings)
     assert orders_skipped == 0
 
@@ -96,11 +121,11 @@ def test_allocation_b_two_buy(monkeypatch: pytest.MonkeyPatch) -> None:
     settings = Settings()
 
     client = FakeTradingClient()
-    manager = LivePortfolioManager(client, logging.getLogger("test"))
+    manager = LivePortfolioManager(client, logging.getLogger("test"), stock_client=MockStockClient(quotes={"A": DummyQuote(99.95, 100.05, datetime.now(timezone.utc)), "B": DummyQuote(199.95, 200.05, datetime.now(timezone.utc))}))
 
     top_new = [
-        ("A", 0.9, Side.BUY, "r", 100.0, 99.0, 102.0),
-        ("B", 0.8, Side.BUY, "r", 200.0, 198.0, 204.0),
+        ("A", 0.9, Side.BUY, "r", 100.0, 99.0, 102.0, datetime.now(timezone.utc)),
+        ("B", 0.8, Side.BUY, "r", 200.0, 198.0, 204.0, datetime.now(timezone.utc)),
     ]
     orders_sent = manager.submit_bracket_orders(top_new, set(), 650.0, settings)
 
@@ -118,9 +143,9 @@ def test_allocation_c_entry_above_equity(monkeypatch: pytest.MonkeyPatch) -> Non
     settings = Settings()
 
     client = FakeTradingClient()
-    manager = LivePortfolioManager(client, logging.getLogger("test"))
+    manager = LivePortfolioManager(client, logging.getLogger("test"), stock_client=MockStockClient(quotes={"AAPL": DummyQuote(699.95, 700.05, datetime.now(timezone.utc))}))
 
-    top_new = [("AAPL", 0.9, Side.BUY, "r", 700.0, 690.0, 720.0)]
+    top_new = [("AAPL", 0.9, Side.BUY, "r", 700.0, 690.0, 720.0, datetime.now(timezone.utc))]
     orders_sent = manager.submit_bracket_orders(top_new, set(), 650.0, settings)
 
     assert orders_sent == 0
@@ -134,9 +159,9 @@ def test_allocation_d_cost_gate(monkeypatch: pytest.MonkeyPatch) -> None:
     settings = Settings()
 
     client = FakeTradingClient()
-    manager = LivePortfolioManager(client, logging.getLogger("test"))
+    manager = LivePortfolioManager(client, logging.getLogger("test"), stock_client=MockStockClient())
 
-    top_new = [("AAPL", 0.9, Side.BUY, "r", 100.0, 99.0, 100.001)]
+    top_new = [("AAPL", 0.9, Side.BUY, "r", 100.0, 99.0, 100.001, datetime.now(timezone.utc))]
     orders_sent = manager.submit_bracket_orders(top_new, set(), 650.0, settings)
 
     assert orders_sent == 0
@@ -150,9 +175,9 @@ def test_allocation_e_open_exposure(monkeypatch: pytest.MonkeyPatch) -> None:
     settings = Settings()
 
     client = FakeTradingClient()
-    manager = LivePortfolioManager(client, logging.getLogger("test"))
+    manager = LivePortfolioManager(client, logging.getLogger("test"), stock_client=MockStockClient())
 
-    top_new = [("AAPL", 0.9, Side.BUY, "r", 100.0, 99.0, 106.0)]
+    top_new = [("AAPL", 0.9, Side.BUY, "r", 100.0, 99.0, 106.0, datetime.now(timezone.utc))]
     orders_sent = manager.submit_bracket_orders(top_new, set(), 650.0, settings, open_exposure=500.0)
 
     assert orders_sent == 1
@@ -208,7 +233,7 @@ def test_allocation_g_run_cycle_open_exposure(monkeypatch: pytest.MonkeyPatch) -
     bot.strategy = LiquiditySweepReversalStrategy(StrategyConfig())
     bot.scanner = type("Scanner", (), {"scan_universe": lambda *args: ([], []), "last_scan_attempts": 1, "last_scan_errors": 0})()
     bot.kill_switch = type("KillSwitch", (), {"tripped": False, "check_daily_loss": lambda *args: None})()
-    bot.portfolio_manager = LivePortfolioManager(client, bot.logger)
+    bot.portfolio_manager = LivePortfolioManager(client, bot.logger, stock_client=MockStockClient())
     bot.global_universe = ["AAPL"]
     bot.latest_state = {}
     bot.processed_signals = set()

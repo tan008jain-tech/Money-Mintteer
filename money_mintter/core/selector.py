@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from math import isfinite
 from typing import Sequence
 
 from money_mintter.strategy.candles import Candle
 from money_mintter.core.movement import compute_q1, compute_q3, is_same_session
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,4 +168,15 @@ def select_layer4_candidates(
     results.sort(key=lambda item: (-item.score, item.symbol))
 
     hard_cap = min(max_candidates, 8)
-    return results[:hard_cap]
+    selected = results[:hard_cap]
+    logger.info(
+        f"[Layer 4 Selector] Pool size={len(unique_pool)}, eligible={len(eligible_records)}, "
+        f"movement_only_fallback_activated={any_missing_activity_baseline}, selected_count={len(selected)}"
+    )
+    for r in selected:
+        logger.info(
+            f"[Layer 4 Selected] {r.symbol}: score={r.score:.3f}, q1={r.q1 if r.q1 is not None else 0.0:.2f}, "
+            f"q3={r.q3 if r.q3 is not None else 0.0:.2f}, s_move={r.s_move:.3f}, "
+            f"has_activity_baseline={r.has_activity_baseline}, s_act={r.s_act if r.s_act is not None else 0.0:.3f}"
+        )
+    return selected

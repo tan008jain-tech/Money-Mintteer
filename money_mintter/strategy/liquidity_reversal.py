@@ -132,6 +132,7 @@ class SetupAnalysis:
     confluences: tuple[str, ...] = ()
     vetoes: tuple[str, ...] = ()
     side: Side | None = None
+    timestamp: datetime | None = None
 
 
 class LiquiditySweepReversalStrategy:

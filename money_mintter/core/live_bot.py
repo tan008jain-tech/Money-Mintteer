@@ -18,7 +18,7 @@ from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import MarketOrderRequest, TakeProfitRequest, StopLossRequest, GetOrdersRequest, GetAssetsRequest
 from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus, OrderClass, AssetClass, AssetStatus
 from alpaca.data.historical import StockHistoricalDataClient
-from alpaca.data.requests import StockBarsRequest
+from alpaca.data.requests import StockBarsRequest, StockLatestQuoteRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from alpaca.data.enums import DataFeed
 from alpaca.common.exceptions import APIError
@@ -521,40 +521,7 @@ class MarketScanner:
                 if completed_candles:
                     bars_dict[clean_symbol] = completed_candles
 
-        filtered_bars_dict: dict[str, list[Candle]] = {}
-        minute = (now_utc.minute // 5) * 5
-        bar_time = now_utc.replace(minute=minute, second=0, microsecond=0)
-        expected_last_bar_start = bar_time - timedelta(minutes=5)
-        if expected_last_bar_start.tzinfo is None:
-            expected_last_bar_start = expected_last_bar_start.replace(tzinfo=timezone.utc)
-
-        for sym, candles in bars_dict.items():
-            if not candles:
-                continue
-            try:
-                series = MultiTimeframeSeries.from_1m(
-                    list(candles),
-                    entry_timeframe=Timeframe.FIVE_MIN,
-                    timezone_name="America/New_York",
-                    spread_bps=2.0,
-                )
-                snapshot = series.snapshot_at(now_utc, lookback_bars=1)
-                if not snapshot.entry:
-                    self.logger.warning(f"stale bars for {sym}: no entry-timeframe candles in snapshot")
-                    continue
-                last_ts = snapshot.entry[-1].timestamp
-                if last_ts.tzinfo is None:
-                    last_ts = last_ts.replace(tzinfo=timezone.utc)
-                if last_ts < expected_last_bar_start:
-                    self.logger.warning(f"stale bars for {sym}: latest={last_ts}, expected>={expected_last_bar_start}")
-                    continue
-                filtered_bars_dict[sym] = candles
-            except Exception as pf_exc:
-                self.logger.error(f"Error checking freshness for {sym}: {pf_exc}")
-                self.last_scan_errors += 1
-                continue
-
-        layer4_selected = select_layer4_candidates(pool_input, filtered_bars_dict, max_candidates=8)
+        layer4_selected = select_layer4_candidates(pool_input, bars_dict, max_candidates=8)
         self.logger.info(f"[Layer 4 Selector] Selected {len(layer4_selected)} candidates from pool of {len(pool_input)} symbols.")
 
         for item in layer4_selected:
@@ -595,7 +562,10 @@ class MarketScanner:
                 self.logger.info(f"[{clean_symbol}] MTF Chart Analysis | {snapshot.candle_bias_summary}")
 
                 analysis = strategy.analyze(snapshot)
-                signal = strategy.signal(snapshot)
+                if isinstance(strategy, ICTStrategy):
+                    signal = strategy.signal(snapshot, analysis=analysis)
+                else:
+                    signal = strategy.signal(snapshot)
                 if signal is None:
                     reason_msg = analysis.reason if analysis else "no signal"
                     self.logger.info(f"[{clean_symbol}] No signal generated | Reason: {reason_msg}")
@@ -603,7 +573,7 @@ class MarketScanner:
 
                 self.logger.info(f"[{clean_symbol}] Signal | Score: {signal.confidence:.2f} | Side: {signal.side} | Entry: ${signal.entry_price:.2f}")
 
-                analyzed_candidates.append((clean_symbol, signal.confidence, signal.side, signal.reason, signal.entry_price, signal.stop_price, signal.target_price))
+                analyzed_candidates.append((clean_symbol, signal.confidence, signal.side, signal.reason, signal.entry_price, signal.stop_price, signal.target_price, signal.timestamp))
                 dashboard_stocks.append({
                     "symbol": clean_symbol,
                     "market": "Global/US",
@@ -623,9 +593,19 @@ class LivePortfolioManager:
     """Portfolio & Position Manager modeled after Freqtrade Trade persistence model.
     Handles order execution, bracket orders, state tracking, and lock protection.
     """
-    def __init__(self, trading_client: TradingClient, logger: logging.Logger) -> None:
+    def __init__(
+        self,
+        trading_client: TradingClient,
+        logger: logging.Logger,
+        stock_client: StockHistoricalDataClient | None = None,
+        data_feed: DataFeed | None = None,
+        settings: Settings | None = None,
+    ) -> None:
         self.trading_client = trading_client
         self.logger = logger
+        self.stock_client = stock_client
+        self.data_feed = data_feed
+        self.settings = settings
         self.last_equity: float | None = None
         self.last_cash: float | None = None
         self.last_equity_snapshot: float | None = None
@@ -633,6 +613,7 @@ class LivePortfolioManager:
         self.last_submit_failures = 0
         self._last_equity_date = None
         self.on_unprotected: Any | None = None
+        self.safe_uncertainty_state = False
 
     def fetch_account_position_lists(self) -> tuple[list[dict[str, Any]], list[dict[str, Any]], set[str]]:
         try:
@@ -728,7 +709,7 @@ class LivePortfolioManager:
 
     def submit_bracket_orders(
         self,
-        top_new: list[tuple[str, float, Side | None, str, float, float, float]],
+        top_new: list[tuple[Any, ...]],
         locked_symbols: set[str],
         account_equity: float,
         settings: Settings,
@@ -748,7 +729,17 @@ class LivePortfolioManager:
             locked_normalized = {normalize_symbol(s) for s in locked_symbols}
 
         eligible = []
-        for sym, sc, side_val, reason, curr_price, sl_price, tp_price in top_new[:active_untraded_slots]:
+        for item in top_new[:active_untraded_slots]:
+            if len(item) >= 8:
+                sym, sc, side_val, reason, curr_price, sl_price, tp_price, signal_ts = item[:8]
+            else:
+                sym, sc, side_val, reason, curr_price, sl_price, tp_price = item[:7]
+                signal_ts = None
+
+            if signal_ts is None:
+                self.logger.info(f"Skipping {sym}: missing signal timestamp (fail-closed freshness requirement)")
+                continue
+
             norm_sym = normalize_symbol(sym)
             if norm_sym in locked_normalized:
                 continue
@@ -757,12 +748,109 @@ class LivePortfolioManager:
             if "/" in sym:
                 self.logger.info(f"Skipping {sym}: unsupported slash symbol")
                 continue
-            # Candidate affordability check: individual stock price should be within ~60-70% of wallet (distinct from single-opportunity allocation cap)
             if curr_price > 0.70 * account_equity:
-                self.logger.info(f"Skipping {sym}: candidate price ${curr_price:.2f} exceeds affordability threshold (70% of wallet ${account_equity:.2f})")
+                self.logger.info(f"Skipping {sym}: candidate price ${curr_price:.2f} exceeds affordability threshold")
                 continue
+
+            # 1. Freshness check using 5-minute bar boundary and scanner latency
+            if signal_ts is not None:
+                if signal_ts.tzinfo is None:
+                    signal_ts = signal_ts.replace(tzinfo=timezone.utc)
+                eval_time = bar_time if bar_time is not None else datetime.now(timezone.utc)
+                if eval_time.tzinfo is None:
+                    eval_time = eval_time.replace(tzinfo=timezone.utc)
+                age = (eval_time - signal_ts).total_seconds()
+                if age > 390:  # 5m bar (300s) + 90s latency tolerance
+                    self.logger.info(f"Skipping {sym}: stale signal (age={age:.1f}s exceeds 390s threshold)")
+                    continue
+
+            # If safe uncertainty state is active, block new entries
+            if getattr(self, 'safe_uncertainty_state', False):
+                self.logger.warning(f"Skipping {sym}: engine in safe uncertainty state due to prior ambiguous order submission.")
+                continue
+
+            # 2. Pre-flight executable price check & max deviation check
+            exec_price = curr_price
+            if self.stock_client is None:
+                self.logger.info(f"Skipping {sym}: stock_client unavailable (fail-closed requirement)")
+                continue
+
+            if hasattr(self.stock_client, 'get_stock_latest_quote'):
+                feed_enum = self.data_feed if self.data_feed is not None else (DataFeed.SIP if self.settings and self.settings.alpaca_data_feed.lower() == "sip" else DataFeed.IEX)
+                feed_label = "SIP NBBO" if feed_enum == DataFeed.SIP else "IEX reference quote"
+                try:
+                    req = StockLatestQuoteRequest(symbol_or_symbols=[sym], feed=feed_enum)
+                    quotes_resp = self.stock_client.get_stock_latest_quote(req)
+                    quote_obj = quotes_resp.get(sym) if isinstance(quotes_resp, dict) else getattr(quotes_resp, sym, None)
+                    if quote_obj is None:
+                        self.logger.info(f"Skipping {sym}: quote retrieval failed (no quote returned from {feed_label})")
+                        continue
+
+                    q_time = getattr(quote_obj, 'timestamp', None)
+                    if q_time is None:
+                        self.logger.info(f"Skipping {sym}: missing quote timestamp from {feed_label}")
+                        continue
+
+                    if q_time.tzinfo is None:
+                        q_time = q_time.replace(tzinfo=timezone.utc)
+                    age = (eval_time - q_time).total_seconds()
+                    max_future_skew = getattr(self.settings, 'quote_max_future_skew_seconds', 2.0) if self.settings else 2.0
+                    if age < -max_future_skew:
+                        self.logger.info(f"Skipping {sym}: future quote timestamp from {feed_label} (age={age:.1f}s violates max future skew -{max_future_skew}s)")
+                        continue
+
+                    max_age = getattr(self.settings, 'quote_max_age_seconds', 10.0) if self.settings else 10.0
+                    if age > max_age:
+                        self.logger.info(f"Skipping {sym}: stale quote from {feed_label} (age={age:.1f}s exceeds {max_age}s threshold)")
+                        continue
+
+                    bid = float(getattr(quote_obj, 'bid_price', 0.0) or 0.0)
+                    ask = float(getattr(quote_obj, 'ask_price', 0.0) or 0.0)
+                    if bid <= 0 or ask <= 0:
+                        self.logger.info(f"Skipping {sym}: invalid quote prices from {feed_label} (bid=${bid:.2f}, ask=${ask:.2f})")
+                        continue
+                    if bid >= ask:
+                        self.logger.info(f"Skipping {sym}: crossed or locked spread from {feed_label} (bid=${bid:.2f} >= ask=${ask:.2f})")
+                        continue
+
+                    exec_price = ask if side_val is Side.BUY else bid
+                    spread = ask - bid
+                    self.logger.info(f"Quote [{feed_label}] {sym}: bid=${bid:.2f}, ask=${ask:.2f}, spread=${spread:.2f}, ref_price=${exec_price:.2f}, age={age:.1f}s")
+                except Exception as q_exc:
+                    self.logger.info(f"Skipping {sym}: quote retrieval/validation failed: {q_exc}")
+                    continue
+            else:
+                self.logger.info(f"Skipping {sym}: stock_client does not implement get_stock_latest_quote (fail-closed requirement)")
+                continue
+
+            deviation = abs(exec_price - curr_price) / curr_price if curr_price > 0 else 0.0
+            if deviation > 0.01:
+                self.logger.info(f"Skipping {sym}: price deviation {deviation*100:.2f}% exceeds 1.0% limit (exec=${exec_price:.2f}, curr=${curr_price:.2f})")
+                continue
+
+            # 3. Directional bracket geometry validation (after rounding to 2 decimals)
+            exec_r = round(exec_price, 2)
+            sl_r = round(sl_price, 2)
+            tp_r = round(tp_price, 2)
+            if side_val is Side.BUY:
+                valid_geometry = (sl_r < exec_r < tp_r)
+            else:
+                valid_geometry = (tp_r < exec_r < sl_r)
+
+            if not valid_geometry:
+                self.logger.info(f"Skipping {sym}: invalid bracket geometry for {side_val}: stop=${sl_r}, entry=${exec_r}, target=${tp_r}")
+                continue
+
+            # 4. Explicit execution minimum RR of 1.10 (signed directional calculation)
+            risk_exec = abs(exec_r - sl_r)
+            reward_exec = abs(tp_r - exec_r)
+            rr_exec = (reward_exec / risk_exec) if risk_exec > 0 else 0.0
+            if rr_exec < 1.10:
+                self.logger.info(f"Skipping {sym}: execution reward/risk {rr_exec:.2f} below minimum 1.10")
+                continue
+
             if sc >= settings.min_candidate_score and sym not in locked_symbols and side_val is not None:
-                eligible.append((sym, sc, side_val, reason, curr_price, sl_price, tp_price))
+                eligible.append((sym, sc, side_val, reason, curr_price, sl_price, tp_price, exec_r, sl_r, tp_r, risk_exec, reward_exec, rr_exec))
 
         free_capital = max(0.0, account_equity - open_exposure)
         upcoming_ops = upcoming_opportunities or []
@@ -775,34 +863,29 @@ class LivePortfolioManager:
         isolated_cap = settings.isolated_opportunity_max_pct * account_equity
 
         valid_eligible = []
-        for sym, sc, side_val, reason, curr_price, sl_price, tp_price in eligible:
-            risk_per_share = abs(curr_price - sl_price)
-            reward = abs(tp_price - curr_price)
-            stop_pct = (risk_per_share / curr_price * 100) if curr_price > 0 else 0.0
-            target_pct = (reward / curr_price * 100) if curr_price > 0 else 0.0
-            rr = (reward / risk_per_share) if risk_per_share > 0 else 0.0
+        for sym, sc, side_val, reason, curr_price, sl_price, tp_price, exec_r, sl_r, tp_r, risk_exec, reward_exec, rr_exec in eligible:
+            stop_pct = (risk_exec / exec_r * 100) if exec_r > 0 else 0.0
+            target_pct = (reward_exec / exec_r * 100) if exec_r > 0 else 0.0
 
-            if risk_per_share <= 0:
+            if risk_exec <= 0:
                 self.logger.info(f"Skipping {sym}: risk per share <= 0")
                 decision = "skipped_risk_per_share_non_positive"
-                self.logger.info(f"Candidate {sym}: score={sc:.2f}, side={side_val}, entry=${curr_price:.2f}, stop=${sl_price:.2f}, target=${tp_price:.2f}, stop_pct={stop_pct:.2f}%, target_pct={target_pct:.2f}%, rr={rr:.2f}, notional_cap=$0.00, qty=0, gross=$0.00, cost=$0.00, decision={decision}")
-                continue
-
-            if settings.min_reward_risk > 0 and rr < settings.min_reward_risk:
-                self.logger.info(f"Skipping {sym}: reward/risk {rr:.2f} below minimum {settings.min_reward_risk}")
-                decision = "skipped_reward_risk"
-                self.logger.info(f"Candidate {sym}: score={sc:.2f}, side={side_val}, entry=${curr_price:.2f}, stop=${sl_price:.2f}, target=${tp_price:.2f}, stop_pct={stop_pct:.2f}%, target_pct={target_pct:.2f}%, rr={rr:.2f}, notional_cap=$0.00, qty=0, gross=$0.00, cost=$0.00, decision={decision}")
+                self.logger.info(f"Candidate {sym}: score={sc:.2f}, side={side_val}, entry=${exec_r:.2f}, stop=${sl_r:.2f}, target=${tp_r:.2f}, stop_pct={stop_pct:.2f}%, target_pct={target_pct:.2f}%, rr={rr_exec:.2f}, notional_cap=$0.00, qty=0, gross=$0.00, cost=$0.00, decision={decision}")
                 continue
 
             if settings.min_target_pct > 0 and target_pct < settings.min_target_pct:
                 self.logger.info(f"Skipping {sym}: target {target_pct:.2f}% below minimum {settings.min_target_pct}%")
                 decision = "skipped_target_pct"
-                self.logger.info(f"Candidate {sym}: score={sc:.2f}, side={side_val}, entry=${curr_price:.2f}, stop=${sl_price:.2f}, target=${tp_price:.2f}, stop_pct={stop_pct:.2f}%, target_pct={target_pct:.2f}%, rr={rr:.2f}, notional_cap=$0.00, qty=0, gross=$0.00, cost=$0.00, decision={decision}")
+                self.logger.info(f"Candidate {sym}: score={sc:.2f}, side={side_val}, entry=${exec_r:.2f}, stop=${sl_r:.2f}, target=${tp_r:.2f}, stop_pct={stop_pct:.2f}%, target_pct={target_pct:.2f}%, rr={rr_exec:.2f}, notional_cap=$0.00, qty=0, gross=$0.00, cost=$0.00, decision={decision}")
                 continue
 
-            valid_eligible.append((sym, sc, side_val, reason, curr_price, sl_price, tp_price, risk_per_share, reward, stop_pct, target_pct, rr))
+            valid_eligible.append((sym, sc, side_val, reason, curr_price, sl_price, tp_price, exec_r, sl_r, tp_r, risk_exec, reward_exec, stop_pct, target_pct, rr_exec))
 
-        for idx, (sym, sc, side_val, reason, curr_price, sl_price, tp_price, risk_per_share, reward, stop_pct, target_pct, rr) in enumerate(valid_eligible):
+        for idx, (sym, sc, side_val, reason, curr_price, sl_price, tp_price, exec_r, sl_r, tp_r, risk_exec, reward_exec, stop_pct, target_pct, rr_exec) in enumerate(valid_eligible):
+            if getattr(self, 'safe_uncertainty_state', False):
+                self.logger.warning("Aborting order submissions in this cycle: engine is in safe_uncertainty_state.")
+                break
+
             norm_sym = normalize_symbol(sym)
             win_prob = win_probs.get(sym, None)  # None = unknown / uncalibrated
 
@@ -810,12 +893,11 @@ class LivePortfolioManager:
                 notional_cap = min(isolated_cap, free_capital, settings.max_single_position_pct * account_equity)
                 alloc_mode = "isolated_opportunity_cap"
             else:
-                required_one_share = curr_price
+                required_one_share = exec_r
                 base_notional = max(baseline_allocation, required_one_share)
 
                 # Above-baseline exception rule: win probability > 60% (0.60)
                 if win_prob is not None and win_prob > 0.60:
-                    # Balance against upcoming opportunities (timing, capital needs)
                     upcoming_demand = sum(
                         op.get("required_capital", 100.0)
                         for op in upcoming_ops
@@ -829,7 +911,6 @@ class LivePortfolioManager:
                     )
                     alloc_mode = "above_baseline_approved_win_prob_gt_60"
                 else:
-                    # Unknown or <= 60%: strict baseline allocation (no above-baseline exception)
                     notional_cap = min(base_notional, free_capital)
                     alloc_mode = "baseline_allocation_strict"
 
@@ -839,10 +920,10 @@ class LivePortfolioManager:
                 f"mode={alloc_mode}, notional_cap=${notional_cap:.2f}"
             )
 
-            if notional_cap < curr_price:
-                self.logger.info(f"Skipping {sym}: allocation ${notional_cap:.2f} below one share (${curr_price:.2f})")
+            if notional_cap < exec_r:
+                self.logger.info(f"Skipping {sym}: allocation ${notional_cap:.2f} below one share (${exec_r:.2f})")
                 decision = "skipped_allocation_below_one_share"
-                self.logger.info(f"Candidate {sym}: score={sc:.2f}, side={side_val}, entry=${curr_price:.2f}, stop=${sl_price:.2f}, target=${tp_price:.2f}, stop_pct={stop_pct:.2f}%, target_pct={target_pct:.2f}%, rr={rr:.2f}, notional_cap=${notional_cap:.2f}, qty=0, gross=$0.00, cost=$0.00, decision={decision}")
+                self.logger.info(f"Candidate {sym}: score={sc:.2f}, side={side_val}, entry=${exec_r:.2f}, stop=${sl_r:.2f}, target=${tp_r:.2f}, stop_pct={stop_pct:.2f}%, target_pct={target_pct:.2f}%, rr={rr_exec:.2f}, notional_cap=${notional_cap:.2f}, qty=0, gross=$0.00, cost=$0.00, decision={decision}")
                 continue
 
             pos_pct = min(1.0, max(1e-9, notional_cap / account_equity))
@@ -857,8 +938,8 @@ class LivePortfolioManager:
                 if side_val is Side.BUY:
                     decision_obj = risk_engine.size_long(
                         available_capital=account_equity,
-                        entry=curr_price,
-                        stop=sl_price,
+                        entry=exec_r,
+                        stop=sl_r,
                         open_risk=open_risk,
                         active_candidates_count=5,
                         market_open=True,
@@ -866,8 +947,8 @@ class LivePortfolioManager:
                 else:
                     decision_obj = risk_engine.size_short(
                         available_capital=account_equity,
-                        entry=curr_price,
-                        stop=sl_price,
+                        entry=exec_r,
+                        stop=sl_r,
                         open_risk=open_risk,
                         active_candidates_count=5,
                         market_open=True,
@@ -876,18 +957,18 @@ class LivePortfolioManager:
                 if not decision_obj.approved:
                     self.logger.info(f"Skipping {sym}: RiskEngine rejected trade ({decision_obj.reason})")
                     decision = f"rejected_{decision_obj.reason}"
-                    self.logger.info(f"Candidate {sym}: score={sc:.2f}, side={side_val}, entry=${curr_price:.2f}, stop=${sl_price:.2f}, target=${tp_price:.2f}, stop_pct={stop_pct:.2f}%, target_pct={target_pct:.2f}%, rr={rr:.2f}, notional_cap=${notional_cap:.2f}, qty=0, gross=$0.00, cost=$0.00, decision={decision}")
+                    self.logger.info(f"Candidate {sym}: score={sc:.2f}, side={side_val}, entry=${exec_r:.2f}, stop=${sl_r:.2f}, target=${tp_r:.2f}, stop_pct={stop_pct:.2f}%, target_pct={target_pct:.2f}%, rr={rr_exec:.2f}, notional_cap=${notional_cap:.2f}, qty=0, gross=$0.00, cost=$0.00, decision={decision}")
                     continue
 
                 qty = int(decision_obj.quantity)
                 if qty < 1:
                     self.logger.info(f"Skipping {sym}: whole share quantity ({qty}) < 1")
                     decision = "qty_below_one"
-                    self.logger.info(f"Candidate {sym}: score={sc:.2f}, side={side_val}, entry=${curr_price:.2f}, stop=${sl_price:.2f}, target=${tp_price:.2f}, stop_pct={stop_pct:.2f}%, target_pct={target_pct:.2f}%, rr={rr:.2f}, notional_cap=${notional_cap:.2f}, qty={qty}, gross=$0.00, cost=$0.00, decision={decision}")
+                    self.logger.info(f"Candidate {sym}: score={sc:.2f}, side={side_val}, entry=${exec_r:.2f}, stop=${sl_r:.2f}, target=${tp_r:.2f}, stop_pct={stop_pct:.2f}%, target_pct={target_pct:.2f}%, rr={rr_exec:.2f}, notional_cap=${notional_cap:.2f}, qty={qty}, gross=$0.00, cost=$0.00, decision={decision}")
                     continue
 
-                gross = qty * abs(tp_price - curr_price)
-                sale_notional = (qty * tp_price) if side_val is Side.BUY else (qty * curr_price)
+                gross = qty * reward_exec
+                sale_notional = (qty * tp_r) if side_val is Side.BUY else (qty * exec_r)
                 sec_fee = sale_notional * settings.estimated_sec_fee_rate
                 finra_taf = min(settings.estimated_taf_cap_usd, settings.estimated_regulatory_fee_per_share * qty)
                 cat_fee = settings.estimated_cat_fee_per_share * qty * 2
@@ -899,12 +980,13 @@ class LivePortfolioManager:
                 if gross < min_multiple * cost:
                     self.logger.info(f"Skipping {sym}: expected gross ${gross:.2f} below {min_multiple} x round-trip fee estimate ${cost:.2f}")
                     decision = "skipped_cost_gate"
-                    self.logger.info(f"Candidate {sym}: score={sc:.2f}, side={side_val}, entry=${curr_price:.2f}, stop=${sl_price:.2f}, target=${tp_price:.2f}, stop_pct={stop_pct:.2f}%, target_pct={target_pct:.2f}%, rr={rr:.2f}, notional_cap=${notional_cap:.2f}, qty={qty}, gross=${gross:.2f}, cost=${cost:.2f}, decision={decision}")
+                    self.logger.info(f"Candidate {sym}: score={sc:.2f}, side={side_val}, entry=${exec_r:.2f}, stop=${sl_r:.2f}, target=${tp_r:.2f}, stop_pct={stop_pct:.2f}%, target_pct={target_pct:.2f}%, rr={rr_exec:.2f}, notional_cap=${notional_cap:.2f}, qty={qty}, gross=${gross:.2f}, cost=${cost:.2f}, decision={decision}")
                     continue
 
                 decision = "submitted"
-                self.logger.info(f"Candidate {sym}: score={sc:.2f}, side={side_val}, entry=${curr_price:.2f}, stop=${sl_price:.2f}, target=${tp_price:.2f}, stop_pct={stop_pct:.2f}%, target_pct={target_pct:.2f}%, rr={rr:.2f}, notional_cap=${notional_cap:.2f}, qty={qty}, gross=${gross:.2f}, cost=${cost:.2f}, decision={decision}")
+                self.logger.info(f"Candidate {sym}: score={sc:.2f}, side={side_val}, entry=${exec_r:.2f}, stop=${sl_r:.2f}, target=${tp_r:.2f}, stop_pct={stop_pct:.2f}%, target_pct={target_pct:.2f}%, rr={rr_exec:.2f}, notional_cap=${notional_cap:.2f}, qty={qty}, gross=${gross:.2f}, cost=${cost:.2f}, decision={decision}")
 
+                client_order_id = f"mm-{norm_sym}-{int(time.time()*1000)}-{random.randint(100,999)}"
                 alpaca_side = OrderSide.BUY if side_val is Side.BUY else OrderSide.SELL
                 order_req = MarketOrderRequest(
                     symbol=sym,
@@ -912,8 +994,9 @@ class LivePortfolioManager:
                     side=alpaca_side,
                     time_in_force=TimeInForce.DAY,
                     order_class=OrderClass.BRACKET,
-                    take_profit=TakeProfitRequest(limit_price=round(tp_price, 2)),
-                    stop_loss=StopLossRequest(stop_price=round(sl_price, 2))
+                    take_profit=TakeProfitRequest(limit_price=tp_r),
+                    stop_loss=StopLossRequest(stop_price=sl_r),
+                    client_order_id=client_order_id
                 )
                 submitted_order = self.trading_client.submit_order(order_req)
 
@@ -922,7 +1005,7 @@ class LivePortfolioManager:
                 oc_lower = oc_val.lower() if oc_val is not None else None
                 legs = getattr(submitted_order, 'legs', None)
 
-                self.logger.info(f"ORDER SUBMITTED (class={oc_val if oc is not None else 'unknown'}): {alpaca_side.value} {qty} shares of {sym} @ ~${curr_price:.2f} (SL: ${sl_price:.2f}, TP: ${tp_price:.2f}, Score: {sc:.2f})")
+                self.logger.info(f"ORDER SUBMITTED (client_order_id={client_order_id}, class={oc_val if oc is not None else 'unknown'}): {alpaca_side.value} {qty} shares of {sym} @ ~${exec_r:.2f} (SL: ${sl_r:.2f}, TP: ${tp_r:.2f}, Score: {sc:.2f})")
 
                 if oc_lower is None or legs is None:
                     self.logger.warning("cannot verify order class")
@@ -954,11 +1037,43 @@ class LivePortfolioManager:
                 if bar_time is not None and processed_signals is not None:
                     processed_signals.add((norm_sym, bar_time))
 
-                free_capital = max(0.0, free_capital - qty * curr_price)
+                free_capital = max(0.0, free_capital - qty * exec_r)
 
             except Exception as ord_err:
                 self.last_submit_failures += 1
-                self.logger.error(f"Failed to submit bracket order for {sym}: {ord_err}")
+                self.logger.error(f"Failed to submit bracket order for {sym} (client_order_id={client_order_id}): {ord_err}")
+                try:
+                    reconciled_order = None
+                    if hasattr(self.trading_client, 'get_order_by_client_id'):
+                        try:
+                            reconciled_order = self.trading_client.get_order_by_client_id(client_order_id)
+                        except Exception:
+                            reconciled_order = None
+
+                    if reconciled_order is not None:
+                        status = getattr(reconciled_order, 'status', None)
+                        status_val = status.value if hasattr(status, 'value') else (str(status).lower() if status is not None else None)
+                        if status_val is not None:
+                            status_val = status_val.lower()
+
+                        active_states = {"filled", "partially_filled", "new", "accepted", "pending_new", "queued", "pending"}
+                        terminal_states = {"canceled", "cancelled", "rejected", "expired", "stopped", "suspended", "done_for_day", "replaced"}
+
+                        if status_val in active_states:
+                            self.logger.warning(f"Reconciliation check: order {client_order_id} found active with status '{status_val}'.")
+                            open_risk += decision_obj.capital_at_risk
+                            orders_sent += 1
+                        elif status_val in terminal_states:
+                            self.logger.info(f"Order {client_order_id} status is terminal ({status_val}); not counting as open risk.")
+                        else:
+                            self.logger.error(f"Ambiguous or unrecognized order status '{status_val}' for client_order_id={client_order_id}. Entering safe uncertainty state.")
+                            self.safe_uncertainty_state = True
+                    else:
+                        self.logger.error(f"Ambiguous submission for {sym} (client_order_id={client_order_id}): order not found via client_order_id lookup. Entering safe uncertainty state.")
+                        self.safe_uncertainty_state = True
+                except Exception as rec_err:
+                    self.logger.error(f"Failed to reconcile order {client_order_id} via client_order_id lookup: {rec_err}")
+                    self.safe_uncertainty_state = True
 
         return orders_sent
 
@@ -1056,9 +1171,20 @@ class LiveMarketBot:
             self.logger.error(f"Critical initialization error: {exc}")
             sys.exit(1)
 
+        feed_val = self.settings.alpaca_data_feed.strip().lower()
+        data_feed_enum = DataFeed.SIP if feed_val == "sip" else DataFeed.IEX
+        if data_feed_enum == DataFeed.IEX:
+            self.logger.warning("IEX feed carries only a fraction of market volume; relative volume confirmation is unreliable.")
+
         self.strategy = ICTStrategy()
-        self.portfolio_manager = LivePortfolioManager(self.trading_client, self.logger)
-        self.portfolio_manager.on_unprotected = lambda reason: self.kill_switch.trip(reason)
+        self.portfolio_manager = LivePortfolioManager(
+            self.trading_client,
+            self.logger,
+            stock_client=self.stock_client,
+            data_feed=data_feed_enum,
+            settings=self.settings,
+        )
+        self.portfolio_manager.on_unprotected = lambda reason: self.kill_switch.trip(reason) if hasattr(self, 'kill_switch') else None
         
         self._cached_universe: list[str] = []
         self._universe_last_fetched: datetime | None = None
@@ -1089,16 +1215,12 @@ class LiveMarketBot:
                 raise ConnectivityError(f"UNIVERSE_DISCOVERY_FAILED: Startup discovery failed: {exc}") from exc
         self.global_universe = self._cached_universe
 
-        feed_val = self.settings.alpaca_data_feed.strip().lower()
-        data_feed_enum = DataFeed.SIP if feed_val == "sip" else DataFeed.IEX
-        if data_feed_enum == DataFeed.IEX:
-            self.logger.warning("IEX feed carries only a fraction of market volume; relative volume confirmation is unreliable.")
-
         self.scanner = MarketScanner(self.global_universe, self.stock_client, self.logger, data_feed=data_feed_enum)
         self.kill_switch = KillSwitch(
             max_consecutive_errors=self.settings.max_consecutive_errors,
             max_daily_loss_pct=self.settings.max_daily_loss_pct,
         )
+        self.portfolio_manager.on_unprotected = lambda reason: self.kill_switch.trip(reason)
 
         self.latest_state = {
             "cash": 100000.0,

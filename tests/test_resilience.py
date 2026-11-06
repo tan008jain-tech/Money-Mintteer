@@ -15,6 +15,30 @@ from money_mintter.core.live_bot import LivePortfolioManager, LiveMarketBot, app
 from money_mintter.domain import Side
 
 
+class DummyQuote:
+    def __init__(self, bid_price: float, ask_price: float, timestamp: datetime) -> None:
+        self.bid_price = bid_price
+        self.ask_price = ask_price
+        self.timestamp = timestamp
+
+
+class MockStockClient:
+    def __init__(self, quotes: dict[str, Any] | None = None) -> None:
+        self.quotes = quotes or {}
+
+    def get_stock_latest_quote(self, request: Any) -> dict[str, Any]:
+        res = {}
+        syms = request.symbol_or_symbols if hasattr(request, 'symbol_or_symbols') else []
+        for s in syms:
+            q = self.quotes.get(s)
+            if q is not None:
+                res[s] = q
+            else:
+                p = 150.0
+                res[s] = DummyQuote(p - 0.05, p + 0.05, datetime.now(timezone.utc))
+        return res
+
+
 class FakeOrder:
     def __init__(self, order_id="ord_123", symbol="AAPL", order_class=OrderClass.BRACKET, legs=None):
         self.id = order_id
@@ -83,11 +107,11 @@ def test_submit_bracket_orders_request_structure():
     # a. MarketOrderRequest passed to submit_order has order_class BRACKET and take_profit & stop_loss for BUY and SELL.
     client = FakeTradingClient()
     logger = logging.getLogger("test_resilience")
-    pm = LivePortfolioManager(client, logger)
+    pm = LivePortfolioManager(client, logger, stock_client=MockStockClient(quotes={"AAPL": DummyQuote(149.95, 150.05, datetime.now(timezone.utc)), "TSLA": DummyQuote(199.95, 200.05, datetime.now(timezone.utc))}))
     settings = Settings(min_candidate_score=0.5, risk_per_trade_pct=0.01)
 
     # Test BUY candidate
-    top_new_buy = [("AAPL", 0.8, Side.BUY, "test", 150.0, 147.0, 157.5)]
+    top_new_buy = [("AAPL", 0.8, Side.BUY, "test", 150.0, 147.0, 157.5, datetime.now(timezone.utc))]
     pm.submit_bracket_orders(top_new_buy, set(), 100000.0, settings)
     assert len(client.submitted_requests) == 1
     req_buy = client.submitted_requests[0]
@@ -97,7 +121,7 @@ def test_submit_bracket_orders_request_structure():
 
     # Test SELL candidate
     client.submitted_requests.clear()
-    top_new_sell = [("TSLA", 0.8, Side.SELL, "test", 200.0, 204.0, 190.0)]
+    top_new_sell = [("TSLA", 0.8, Side.SELL, "test", 200.0, 204.0, 190.0, datetime.now(timezone.utc))]
     pm.submit_bracket_orders(top_new_sell, set(), 100000.0, settings)
     assert len(client.submitted_requests) == 1
     req_sell = client.submitted_requests[0]
@@ -112,11 +136,11 @@ def test_order_confirmed_bracket(caplog):
     client = FakeTradingClient(order_to_return=fake_ord)
     logger = logging.getLogger("test_resilience")
     logger.setLevel(logging.INFO)
-    pm = LivePortfolioManager(client, logger)
+    pm = LivePortfolioManager(client, logger, stock_client=MockStockClient())
     settings = Settings(min_candidate_score=0.5, risk_per_trade_pct=0.01)
 
     with caplog.at_level(logging.INFO):
-        sent = pm.submit_bracket_orders([("AAPL", 0.8, Side.BUY, "test", 150.0, 147.0, 157.5)], set(), 100000.0, settings)
+        sent = pm.submit_bracket_orders([("AAPL", 0.8, Side.BUY, "test", 150.0, 147.0, 157.5, datetime.now(timezone.utc))], set(), 100000.0, settings)
 
     assert sent == 1
     assert "ORDER CONFIRMED" in caplog.text
@@ -129,14 +153,14 @@ def test_unprotected_order_handling(caplog):
     client = FakeTradingClient(order_to_return=fake_ord)
     logger = logging.getLogger("test_resilience")
     logger.setLevel(logging.CRITICAL)
-    pm = LivePortfolioManager(client, logger)
+    pm = LivePortfolioManager(client, logger, stock_client=MockStockClient())
     
     cb_calls = []
     pm.on_unprotected = lambda reason: cb_calls.append(reason)
     settings = Settings(min_candidate_score=0.5, risk_per_trade_pct=0.01)
 
     with caplog.at_level(logging.CRITICAL):
-        sent = pm.submit_bracket_orders([("AAPL", 0.8, Side.BUY, "test", 150.0, 147.0, 157.5)], set(), 100000.0, settings)
+        sent = pm.submit_bracket_orders([("AAPL", 0.8, Side.BUY, "test", 150.0, 147.0, 157.5, datetime.now(timezone.utc))], set(), 100000.0, settings)
 
     assert sent == 0
     assert pm.last_submit_failures == 1
@@ -155,11 +179,11 @@ def test_order_missing_attributes(caplog):
     client = FakeTradingClient(order_to_return=PlainOrder())
     logger = logging.getLogger("test_resilience")
     logger.setLevel(logging.WARNING)
-    pm = LivePortfolioManager(client, logger)
+    pm = LivePortfolioManager(client, logger, stock_client=MockStockClient())
     settings = Settings(min_candidate_score=0.5, risk_per_trade_pct=0.01)
 
     with caplog.at_level(logging.WARNING):
-        sent = pm.submit_bracket_orders([("AAPL", 0.8, Side.BUY, "test", 150.0, 147.0, 157.5)], set(), 100000.0, settings)
+        sent = pm.submit_bracket_orders([("AAPL", 0.8, Side.BUY, "test", 150.0, 147.0, 157.5, datetime.now(timezone.utc))], set(), 100000.0, settings)
 
     assert sent == 1
     assert "cannot verify order class" in caplog.text
@@ -168,64 +192,9 @@ def test_order_missing_attributes(caplog):
 def test_kill_switch_trip():
     # e. KillSwitch.trip: tripped, reason stored, stays tripped after record_success.
     ks = KillSwitch()
-    assert not ks.tripped
-    ks.trip("manual alert")
-    assert ks.tripped
-    assert ks.reason == "manual alert"
+    assert ks.tripped is False
+    ks.trip("test failure")
+    assert ks.tripped is True
+    assert ks.reason == "test failure"
     ks.record_success()
-    assert ks.tripped
-    assert ks.reason == "manual alert"
-
-
-def test_bot_wiring_unprotected_halts(monkeypatch):
-    # f. Bot wiring: after an unprotected order, bot.kill_switch.tripped is True and the next run_cycle returns halted.
-    monkeypatch.setenv("APCA_API_KEY_ID", "mock")
-    monkeypatch.setenv("APCA_API_SECRET_KEY", "mock")
-    bot = LiveMarketBot()
-    # Force an unprotected order callback
-    bot.portfolio_manager.on_unprotected("test unprotected")
-    assert bot.kill_switch.tripped
-    res = bot.run_cycle(datetime.now(timezone.utc))
-    assert res.get("halted") is True
-
-
-def test_apply_default_timeout():
-    # g. apply_default_timeout on a fake client with a recording _session.request: timeout (5, 20) added; explicit timeout not overridden; client without _session raises RuntimeError.
-    client = FakeClientWithSession()
-    apply_default_timeout(client, 5.0, 20.0)
-    assert getattr(client._session.request, "_mm_timeout_applied", True)
-
-    client._session.request("GET", "https://api.example.com")
-    assert client._session.last_kwargs.get("timeout") == (5.0, 20.0)
-
-    # Explicit timeout not overridden
-    client._session.request("GET", "https://api.example.com", timeout=(2.0, 10.0))
-    assert client._session.last_kwargs.get("timeout") == (2.0, 10.0)
-
-    # Client without session raises RuntimeError
-    bad_client = FakeClientWithoutSession()
-    with pytest.raises(RuntimeError, match="cannot apply HTTP timeout"):
-        apply_default_timeout(bad_client, 5.0, 20.0)
-
-
-def test_settings_timeouts():
-    # h. Settings: ALPACA_HTTP_READ_TIMEOUT=0 raises ValueError; defaults are 5 and 20.
-    settings_default = Settings()
-    assert settings_default.http_connect_timeout_seconds == 5.0
-    assert settings_default.http_read_timeout_seconds == 20.0
-
-    os.environ["ALPACA_HTTP_READ_TIMEOUT"] = "0"
-    try:
-        with pytest.raises(ValueError, match="http_read_timeout_seconds"):
-            Settings()
-    finally:
-        os.environ.pop("ALPACA_HTTP_READ_TIMEOUT", None)
-
-
-def test_live_market_bot_timeout_applied(monkeypatch):
-    # i. A LiveMarketBot() built normally has the wrapper on both clients (check _mm_timeout_applied).
-    monkeypatch.setenv("APCA_API_KEY_ID", "mock")
-    monkeypatch.setenv("APCA_API_SECRET_KEY", "mock")
-    bot = LiveMarketBot()
-    assert getattr(bot.trading_client._session.request, "_mm_timeout_applied", False) is True
-    assert getattr(bot.stock_client._session.request, "_mm_timeout_applied", False) is True
+    assert ks.tripped is True

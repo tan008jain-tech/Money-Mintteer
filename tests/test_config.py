@@ -14,6 +14,30 @@ from money_mintter.domain import Side, TradeSignal
 from money_mintter.strategy import LiquiditySweepReversalStrategy, StrategyConfig
 
 
+class DummyQuote:
+    def __init__(self, bid_price: float, ask_price: float, timestamp: datetime) -> None:
+        self.bid_price = bid_price
+        self.ask_price = ask_price
+        self.timestamp = timestamp
+
+
+class MockStockClient:
+    def __init__(self, quotes: dict[str, Any] | None = None) -> None:
+        self.quotes = quotes or {}
+
+    def get_stock_latest_quote(self, request: Any) -> dict[str, Any]:
+        res = {}
+        syms = request.symbol_or_symbols if hasattr(request, 'symbol_or_symbols') else []
+        for s in syms:
+            q = self.quotes.get(s)
+            if q is not None:
+                res[s] = q
+            else:
+                p = 100.0
+                res[s] = DummyQuote(p - 0.05, p + 0.05, datetime.now(timezone.utc))
+        return res
+
+
 def test_settings_keep_existing_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     for key in (
         "INITIAL_CAPITAL",
@@ -75,13 +99,13 @@ def test_live_portfolio_manager_bracket_order_allocation(monkeypatch: pytest.Mon
             return object()
 
     fake_client = FakeTradingClient()
-    manager = LivePortfolioManager(fake_client, logging.getLogger("test"))
+    manager = LivePortfolioManager(fake_client, logging.getLogger("test"), stock_client=MockStockClient(quotes={"TEST": DummyQuote(99.95, 100.05, datetime.now(timezone.utc))}))
 
-    top_new = [("TEST", 0.9, Side.BUY, "r", 100.0, 99.0, 103.0)]
+    top_new = [("TEST", 0.9, Side.BUY, "r", 100.0, 99.0, 103.0, datetime.now(timezone.utc))]
     manager.submit_bracket_orders(top_new, set(), 100_000.0, settings)
 
     assert len(fake_client.submitted_orders) == 1
-    assert fake_client.submitted_orders[0].qty == 200
+    assert fake_client.submitted_orders[0].qty == 199.0
 
 
 def test_live_portfolio_manager_sell_bracket_order_allocation(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -100,13 +124,13 @@ def test_live_portfolio_manager_sell_bracket_order_allocation(monkeypatch: pytes
             return object()
 
     fake_client = FakeTradingClient()
-    manager = LivePortfolioManager(fake_client, logging.getLogger("test"))
+    manager = LivePortfolioManager(fake_client, logging.getLogger("test"), stock_client=MockStockClient(quotes={"TEST": DummyQuote(99.95, 100.05, datetime.now(timezone.utc))}))
 
-    top_new = [("TEST", 0.9, Side.SELL, "r", 100.0, 101.0, 97.0)]
+    top_new = [("TEST", 0.9, Side.SELL, "r", 100.0, 101.0, 97.0, datetime.now(timezone.utc))]
     manager.submit_bracket_orders(top_new, set(), 100_000.0, settings)
 
     assert len(fake_client.submitted_orders) == 1
-    assert fake_client.submitted_orders[0].qty == 200
+    assert fake_client.submitted_orders[0].qty == 200.0
     assert fake_client.submitted_orders[0].side == OrderSide.SELL
 
 
@@ -183,7 +207,7 @@ def test_market_scanner_with_fake_strategy_signal(monkeypatch: pytest.MonkeyPatc
                 side=Side.BUY,
                 entry_price=100.0,
                 stop_price=98.0,
-                target_price=101.0,
+                target_price=103.0,
                 confidence=0.85,
                 timestamp=snapshot.as_of,
                 reason="test signal",
@@ -204,15 +228,15 @@ def test_market_scanner_with_fake_strategy_signal(monkeypatch: pytest.MonkeyPatc
 
     assert len(analyzed) == 1
     assert analyzed[0][5] == 98.0  # stop_price
-    assert analyzed[0][6] == 101.0 # target_price
+    assert analyzed[0][6] == 103.0 # target_price
 
     fake_client = FakeTradingClient()
-    portfolio_manager = LivePortfolioManager(fake_client, logging.getLogger("test"))
-    portfolio_manager.submit_bracket_orders(analyzed, set(), 100_000.0, settings)
+    portfolio_manager = LivePortfolioManager(fake_client, logging.getLogger("test"), stock_client=MockStockClient(quotes={"AAPL": DummyQuote(99.95, 100.05, datetime(2026, 10, 18, 10, 10, 0, tzinfo=timezone.utc))}))
+    portfolio_manager.submit_bracket_orders(analyzed, set(), 100_000.0, settings, bar_time=now_utc)
 
     assert len(fake_client.submitted_orders) == 1
     assert fake_client.submitted_orders[0].stop_loss.stop_price == 98.0
-    assert fake_client.submitted_orders[0].take_profit.limit_price == 101.0
+    assert fake_client.submitted_orders[0].take_profit.limit_price == 103.0
 
 
 def test_market_scanner_with_no_signal(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -412,11 +436,30 @@ def test_run_cycle_counts_and_single_scan(monkeypatch: pytest.MonkeyPatch) -> No
                 reason="signal",
             )
 
+    class FakeStockClient:
+        def get_stock_bars(self, req):
+            end_dt = getattr(req, 'end', datetime(2026, 10, 18, 10, 10, 0, tzinfo=timezone.utc))
+            if end_dt.tzinfo is None:
+                end_dt = end_dt.replace(tzinfo=timezone.utc)
+            minute = (end_dt.minute // 5) * 5
+            bar_time = end_dt.replace(minute=minute, second=0, microsecond=0)
+            expected_last_bar_start = (bar_time - timedelta(minutes=5)).replace(tzinfo=timezone.utc)
+            bars = [FakeBar((expected_last_bar_start - timedelta(minutes=5 * i)).replace(tzinfo=timezone.utc), 100, 101, 99, 100, 1000) for i in range(50, 0, -1)]
+            bars.append(FakeBar(expected_last_bar_start.replace(tzinfo=timezone.utc), 100, 150, 50, 100, 1000))
+            return FakeBarsResponse({req.symbol_or_symbols: bars})
+
+        def get_stock_latest_quote(self, req):
+            syms = req.symbol_or_symbols if hasattr(req, 'symbol_or_symbols') else [req]
+            if isinstance(syms, str):
+                syms = [syms]
+            return {s: DummyQuote(99.95, 100.05, datetime(2026, 10, 18, 10, 10, 0, tzinfo=timezone.utc)) for s in syms}
+
     bot = LiveMarketBot()
     bot.global_universe = ["AAPL"]
     bot.trading_client = FakeTradingClient()
-    bot.portfolio_manager = LivePortfolioManager(bot.trading_client, bot.logger)
-    bot.scanner = MarketScanner(bot.global_universe, FakeStockClient(), bot.logger)
+    bot.stock_client = FakeStockClient()
+    bot.portfolio_manager = LivePortfolioManager(bot.trading_client, bot.logger, stock_client=bot.stock_client)
+    bot.scanner = MarketScanner(bot.global_universe, bot.stock_client, bot.logger)
     bot.strategy = FakeStrategy()
 
     scan_calls = 0
@@ -1323,6 +1366,10 @@ def test_consecutive_submission_failures(monkeypatch: pytest.MonkeyPatch) -> Non
             return []
         def submit_order(self, req):
             raise RuntimeError("submit error")
+        def get_order_by_client_id(self, client_id: str):
+            class Queried:
+                status = "canceled"
+            return Queried()
 
     bot.trading_client = FailingTradingClient()
     bot.portfolio_manager = LivePortfolioManager(bot.trading_client, bot.logger)
@@ -1373,8 +1420,15 @@ def test_consecutive_submission_failures(monkeypatch: pytest.MonkeyPatch) -> Non
             bars.append(FakeBar(expected_last_bar_start.replace(tzinfo=timezone.utc), 100, 150, 50, 100, 1000))
             return FakeBarsResponse({req.symbol_or_symbols: bars})
 
+        def get_stock_latest_quote(self, req):
+            syms = req.symbol_or_symbols if hasattr(req, 'symbol_or_symbols') else [req]
+            if isinstance(syms, str):
+                syms = [syms]
+            return {s: DummyQuote(99.95, 100.05, datetime(2026, 10, 18, 10, 10, 0, tzinfo=timezone.utc)) for s in syms}
+
     bot.stock_client = FakeStockClient()
     bot.scanner = MarketScanner(bot.global_universe, bot.stock_client, bot.logger)
+    bot.portfolio_manager = LivePortfolioManager(bot.trading_client, bot.logger, stock_client=bot.stock_client)
 
     now_utc = datetime(2026, 10, 18, 10, 10, 0, tzinfo=timezone.utc)
 
@@ -1423,9 +1477,9 @@ def test_submit_bracket_orders_sub_minimum(monkeypatch: pytest.MonkeyPatch) -> N
             return object()
 
     fake_client = FakeTradingClient()
-    manager = LivePortfolioManager(fake_client, logging.getLogger("test"))
+    manager = LivePortfolioManager(fake_client, logging.getLogger("test"), stock_client=MockStockClient(quotes={"AAPL": DummyQuote(499.95, 500.05, datetime.now(timezone.utc))}))
 
-    top_skip = [("AAPL", 0.9, Side.BUY, "r", 500.0, 400.0, 600.0)]
+    top_skip = [("AAPL", 0.9, Side.BUY, "r", 500.0, 400.0, 600.0, datetime.now(timezone.utc))]
     manager.submit_bracket_orders(top_skip, set(), 10_000.0, settings)
     assert len(fake_client.submitted_orders) == 0
     assert manager.last_submit_failures == 0
@@ -1447,12 +1501,12 @@ def test_submit_bracket_orders_position_cap(monkeypatch: pytest.MonkeyPatch) -> 
             return object()
 
     fake_client = FakeTradingClient()
-    manager = LivePortfolioManager(fake_client, logging.getLogger("test"))
+    manager = LivePortfolioManager(fake_client, logging.getLogger("test"), stock_client=MockStockClient(quotes={"AAPL": DummyQuote(499.95, 500.05, datetime.now(timezone.utc))}))
 
-    top_cap = [("AAPL", 0.9, Side.BUY, "r", 500.0, 495.0, 520.0)]
+    top_cap = [("AAPL", 0.9, Side.BUY, "r", 500.0, 495.0, 520.0, datetime.now(timezone.utc))]
     manager.submit_bracket_orders(top_cap, set(), 10_000.0, settings)
     assert len(fake_client.submitted_orders) == 1
-    assert fake_client.submitted_orders[0].qty == 4
+    assert fake_client.submitted_orders[0].qty == 3
 
 
 def test_kill_switch_daily_loss() -> None:
