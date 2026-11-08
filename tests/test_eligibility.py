@@ -144,6 +144,7 @@ def test_no_cache_first_startup(monkeypatch, tmp_path):
     assert bot.global_universe == ["TSLA", "AMZN"]
 
     monkeypatch.setattr("money_mintter.core.live_bot.discover_universe", lambda client, logger, api_key: (_ for _ in ()).throw(RuntimeError("API down")))
+    monkeypatch.setattr("money_mintter.core.live_bot.LivePortfolioManager.fetch_position_state", lambda self: ("POSITIONS_CONFIRMED_FLAT", [], set()))
     with pytest.raises(RuntimeError, match="UNIVERSE_DISCOVERY_FAILED"):
         LiveMarketBot()
 
@@ -164,6 +165,21 @@ def test_refresh_failure_fails_closed(monkeypatch, tmp_path):
         raise RuntimeError("API failure")
 
     monkeypatch.setattr("money_mintter.core.live_bot.discover_universe", mock_discover)
+    monkeypatch.setattr("money_mintter.core.live_bot.LivePortfolioManager.fetch_position_state", lambda self: ("POSITIONS_CONFIRMED_FLAT", [], set()))
 
     with pytest.raises(RuntimeError, match="UNIVERSE_DISCOVERY_FAILED"):
         LiveMarketBot()
+
+
+def test_startup_discovery_failure_unknown_positions_safe_drain(monkeypatch, tmp_path):
+    cache_dir = str(tmp_path)
+    engine = StructuralEligibilityEngine(cache_dir=cache_dir)
+    monkeypatch.setenv("MM_CACHE_DIR", cache_dir)
+
+    monkeypatch.setattr("money_mintter.core.live_bot.discover_universe", lambda client, logger, api_key: (_ for _ in ()).throw(RuntimeError("API down")))
+    monkeypatch.setattr("money_mintter.core.live_bot.LivePortfolioManager.fetch_position_state", lambda self: ("POSITIONS_UNKNOWN", [], set()))
+    monkeypatch.setattr("money_mintter.core.live_bot.UniverseDiscoveryWorker.start", lambda self: True)
+
+    bot = LiveMarketBot()
+    assert bot.safe_drain_mode is True
+    assert bot.global_universe == []
