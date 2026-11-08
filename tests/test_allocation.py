@@ -219,7 +219,7 @@ def test_allocation_g_run_cycle_open_exposure(monkeypatch: pytest.MonkeyPatch) -
     client = FakeTradingClient(positions=positions)
 
     recorded_kwargs = {}
-    def mock_submit(self, top_new, locked_symbols, account_equity, settings, bar_time=None, processed_signals=None, locked_normalized=None, open_exposure=0.0):
+    def mock_submit(self, top_new, locked_symbols, account_equity, settings, bar_time=None, processed_signals=None, locked_normalized=None, open_exposure=0.0, cycle_id=None):
         recorded_kwargs["open_exposure"] = open_exposure
         return 0
 

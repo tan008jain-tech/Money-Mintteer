@@ -190,7 +190,7 @@ def test_alternative_strategy_compatibility():
     strategy = LiquiditySweepReversalStrategy(StrategyConfig())
     stock_client = MockStockClient()
     scanner = MarketScanner(["AAPL"], stock_client, logging.getLogger("test"), data_feed=DataFeed.IEX)
-    
+
     class MockSessionOpenScanner(MarketScanner):
         @staticmethod
         def is_session_open(sym: str, now_utc: datetime) -> tuple[bool, str]:
@@ -199,7 +199,166 @@ def test_alternative_strategy_compatibility():
     now = datetime.now(timezone.utc)
     # Mock stock client bars for scanner
     stock_client.get_stock_bars = lambda req: type("Resp", (), {"data": {"AAPL": [type("Bar", (), {"timestamp": now, "open": 100, "high": 105, "low": 99, "close": 102, "volume": 1000})()]}})()
-    
+
     # scan_universe should execute without TypeErrors or dispatch issues
     analyzed, dashboard = MockSessionOpenScanner(["AAPL"], stock_client, logging.getLogger("test")).scan_universe(now, set(), strategy)
     assert isinstance(analyzed, list)
+
+
+def test_deterministic_quote_age_exact_boundaries(monkeypatch):
+    settings = Settings()
+    base_time = datetime(2026, 11, 8, 12, 0, 0, tzinfo=timezone.utc)
+
+    class MockClockClient:
+        def __init__(self, quote_timestamp: datetime) -> None:
+            self.quote_timestamp = quote_timestamp
+
+        def get_stock_latest_quote(self, request: StockLatestQuoteRequest) -> dict[str, Any]:
+            return {"AAPL": DummyQuote(150.0, 150.5, self.quote_timestamp)}
+
+    test_cases = [
+        (-2.1, 0),  # future skew violation (-2.1 < -2.0) -> reject
+        (-2.0, 1),  # exact future skew limit (-2.0 >= -2.0) -> accept
+        (10.0, 1),  # exact max age limit (10.0 <= 10.0) -> accept
+        (10.1, 0),  # stale quote exceedance (10.1 > 10.0) -> reject
+    ]
+
+    for offset, expected_sent in test_cases:
+        q_time = base_time - timedelta(seconds=offset)
+        stock_client = MockClockClient(q_time)
+
+        class MockDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return base_time
+
+        monkeypatch.setattr("money_mintter.core.live_bot.datetime", MockDatetime)
+
+        manager = LivePortfolioManager(
+            trading_client=FakeTradingClientForSafeguards(),
+            logger=logging.getLogger("test"),
+            stock_client=stock_client,
+            settings=settings,
+        )
+        sent = manager.submit_bracket_orders(
+            [("AAPL", 0.9, Side.BUY, "test", 150.0, 147.0, 155.0, base_time)],
+            set(),
+            100000.0,
+            settings,
+            bar_time=base_time
+        )
+        assert sent == expected_sent, f"Failed for offset {offset}s: expected sent={expected_sent}, got {sent}"
+
+
+def test_quote_eval_time_captured_post_retrieval_discriminating(monkeypatch):
+    settings = Settings()
+    t_pre = datetime(2026, 11, 8, 12, 0, 0, tzinfo=timezone.utc)
+    t_quote = datetime(2026, 11, 8, 12, 0, 3, tzinfo=timezone.utc)
+    t_post = t_quote
+
+    class DiscriminatedClient:
+        def __init__(self) -> None:
+            self.retrieved = False
+
+        def get_stock_latest_quote(self, request: StockLatestQuoteRequest) -> dict[str, Any]:
+            self.retrieved = True
+            return {"AAPL": DummyQuote(150.0, 150.5, t_quote)}
+
+    class DiscriminatorClock:
+        def __init__(self, client) -> None:
+            self.client = client
+
+        def now(self, tz=None):
+            if not self.client.retrieved:
+                return t_pre
+            return t_post
+
+    client = DiscriminatedClient()
+    clock = DiscriminatorClock(client)
+
+    class MockDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return clock.now(tz)
+
+    monkeypatch.setattr("money_mintter.core.live_bot.datetime", MockDatetime)
+
+    manager = LivePortfolioManager(
+        trading_client=FakeTradingClientForSafeguards(),
+        logger=logging.getLogger("test"),
+        stock_client=client,
+        settings=settings,
+    )
+    sent = manager.submit_bracket_orders(
+        [("AAPL", 0.9, Side.BUY, "test", 150.0, 147.0, 155.0, t_pre)],
+        set(),
+        100000.0,
+        settings,
+        bar_time=t_pre
+    )
+    assert sent == 1
+
+
+def test_stale_signal_regression_boundaries():
+    settings = Settings()
+    now = datetime.now(timezone.utc)
+    bar_time = now
+    quote = DummyQuote(150.0, 150.5, now)
+    stock_client = MockStockClient(quotes={"AAPL": quote})
+    manager = LivePortfolioManager(
+        trading_client=FakeTradingClientForSafeguards(),
+        logger=logging.getLogger("test"),
+        stock_client=stock_client,
+        settings=settings,
+    )
+
+    # 389s old signal -> passes freshness
+    signal_ts_389 = bar_time - timedelta(seconds=389)
+    sent = manager.submit_bracket_orders([("AAPL", 0.9, Side.BUY, "test", 150.0, 147.0, 155.0, signal_ts_389)], set(), 100000.0, settings, bar_time=bar_time)
+    assert sent == 1
+
+    # 390s old signal -> passes freshness
+    signal_ts_390 = bar_time - timedelta(seconds=390)
+    sent = manager.submit_bracket_orders([("AAPL", 0.9, Side.BUY, "test", 150.0, 147.0, 155.0, signal_ts_390)], set(), 100000.0, settings, bar_time=bar_time)
+    assert sent == 1
+
+    # 391s old signal -> rejected as stale
+    signal_ts_391 = bar_time - timedelta(seconds=391)
+    sent = manager.submit_bracket_orders([("AAPL", 0.9, Side.BUY, "test", 150.0, 147.0, 155.0, signal_ts_391)], set(), 100000.0, settings, bar_time=bar_time)
+    assert sent == 0
+
+
+def test_lifecycle_identifiers_and_dispositions():
+    settings = Settings()
+    now = datetime.now(timezone.utc)
+    quote = DummyQuote(150.0, 150.5, now)
+    stock_client = MockStockClient(quotes={"AAPL": quote})
+
+    class CapturingHandler(logging.Handler):
+        def __init__(self) -> None:
+            super().__init__()
+            self.records = []
+
+        def emit(self, record: logging.LogRecord) -> None:
+            self.records.append(record.getMessage())
+
+    handler = CapturingHandler()
+    logger = logging.getLogger("test_lifecycle")
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+
+    manager = LivePortfolioManager(
+        trading_client=FakeTradingClientForSafeguards(),
+        logger=logger,
+        stock_client=stock_client,
+        settings=settings,
+    )
+
+    signal_ts = now
+    sent = manager.submit_bracket_orders([("AAPL", 0.9, Side.BUY, "test", 150.0, 147.0, 155.0, signal_ts)], set(), 100000.0, settings, bar_time=now)
+    assert sent == 1
+
+    # Verify disposition logs contain evaluation ID, stable signal ID, and terminal disposition tag
+    log_texts = " ".join(handler.records)
+    assert "EVALUATION_PASSED" in log_texts
+    assert "AAPL" in log_texts

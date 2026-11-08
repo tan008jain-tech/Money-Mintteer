@@ -231,7 +231,7 @@ def test_market_scanner_with_fake_strategy_signal(monkeypatch: pytest.MonkeyPatc
     assert analyzed[0][6] == 103.0 # target_price
 
     fake_client = FakeTradingClient()
-    portfolio_manager = LivePortfolioManager(fake_client, logging.getLogger("test"), stock_client=MockStockClient(quotes={"AAPL": DummyQuote(99.95, 100.05, datetime(2026, 10, 18, 10, 10, 0, tzinfo=timezone.utc))}))
+    portfolio_manager = LivePortfolioManager(fake_client, logging.getLogger("test"), stock_client=MockStockClient(quotes={"AAPL": DummyQuote(99.95, 100.05, datetime.now(timezone.utc))}))
     portfolio_manager.submit_bracket_orders(analyzed, set(), 100_000.0, settings, bar_time=now_utc)
 
     assert len(fake_client.submitted_orders) == 1
@@ -452,7 +452,7 @@ def test_run_cycle_counts_and_single_scan(monkeypatch: pytest.MonkeyPatch) -> No
             syms = req.symbol_or_symbols if hasattr(req, 'symbol_or_symbols') else [req]
             if isinstance(syms, str):
                 syms = [syms]
-            return {s: DummyQuote(99.95, 100.05, datetime(2026, 10, 18, 10, 10, 0, tzinfo=timezone.utc)) for s in syms}
+            return {s: DummyQuote(99.95, 100.05, datetime.now(timezone.utc)) for s in syms}
 
     bot = LiveMarketBot()
     bot.global_universe = ["AAPL"]
@@ -746,7 +746,7 @@ def test_submit_bracket_orders_crypto_short_vs_long(monkeypatch: pytest.MonkeyPa
 def test_bot_run_normal_sleep_scheduling(monkeypatch: pytest.MonkeyPatch) -> None:
     bot = LiveMarketBot()
     monkeypatch.setattr(bot, "run_cycle", lambda now: {"evaluated": 0, "signals": 0, "orders_sent": 0})
-    
+
     sleep_calls = []
     def fake_sleep(secs: float) -> None:
         sleep_calls.append(secs)
@@ -769,7 +769,7 @@ def test_bot_run_error_sleep_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
         raise RuntimeError("boom")
 
     monkeypatch.setattr(bot, "run_cycle", failing_cycle)
-    
+
     sleep_calls = []
     def fake_sleep(secs: float) -> None:
         sleep_calls.append(secs)
@@ -1424,7 +1424,7 @@ def test_consecutive_submission_failures(monkeypatch: pytest.MonkeyPatch) -> Non
             syms = req.symbol_or_symbols if hasattr(req, 'symbol_or_symbols') else [req]
             if isinstance(syms, str):
                 syms = [syms]
-            return {s: DummyQuote(99.95, 100.05, datetime(2026, 10, 18, 10, 10, 0, tzinfo=timezone.utc)) for s in syms}
+            return {s: DummyQuote(99.95, 100.05, datetime.now(timezone.utc)) for s in syms}
 
     bot.stock_client = FakeStockClient()
     bot.scanner = MarketScanner(bot.global_universe, bot.stock_client, bot.logger)

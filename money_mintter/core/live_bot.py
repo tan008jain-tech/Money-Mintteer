@@ -11,6 +11,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 import socket
 import requests
+import uuid
 
 from dotenv import load_dotenv
 
@@ -163,7 +164,7 @@ class UniverseDiscoveryWorker:
                 return False
             self.state = "DISCOVERING"
             self.last_error = None
-        
+
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
         return True
@@ -214,21 +215,21 @@ def discover_universe(trading_client: TradingClient, logger: logging.Logger, api
         status=AssetStatus.ACTIVE,
         asset_class=AssetClass.US_EQUITY
     )
-    
+
     logger.info("[Discovery State: DISCOVERY_PENDING] Starting live asset discovery request against Alpaca API (/v2/assets)...")
     last_exc = None
-    
+
     max_recovery_seconds = 300.0
     recovery_deadline = time.monotonic() + max_recovery_seconds
     attempt = 0
-    
+
     while True:
         now_mono = time.monotonic()
         remaining_budget = recovery_deadline - now_mono
         if remaining_budget <= 0:
             logger.error("[Discovery State: UNIVERSE_DISCOVERY_FAILED] Discovery recovery window of 300 seconds expired.")
             break
-        
+
         read_holder[0] = min(discovery_timeout, max(1.0, remaining_budget))
 
         attempt += 1
@@ -262,19 +263,19 @@ def discover_universe(trading_client: TradingClient, logger: logging.Logger, api
             duration = (datetime.now(timezone.utc) - attempt_start).total_seconds()
             err_name = type(exc).__name__
             logger.warning(f"[Discovery] Attempt {attempt} failed after {duration:.2f}s with {err_name}: {exc}")
-            
+
             status_code = getattr(exc, "status_code", None)
             if status_code in (401, 403, 400, 422):
                 logger.error(f"[Discovery] Non-retryable HTTP status code {status_code}. Aborting discovery immediately.")
                 break
-            
+
             is_retryable = is_connectivity_error(exc) or (status_code in (429, 500, 502, 503, 504))
             if not is_retryable:
                 if not isinstance(exc, (requests.exceptions.RequestException, TimeoutError, ConnectionError, APIError)):
                     break
 
             backoff = min(15.0, (2 ** (min(attempt - 1, 4))) + random.uniform(0.1, 0.5))
-            
+
             if status_code == 429:
                 retry_after_header = getattr(exc, "response", None) and getattr(exc.response, "headers", {}).get("Retry-After")
                 if retry_after_header:
@@ -283,11 +284,11 @@ def discover_universe(trading_client: TradingClient, logger: logging.Logger, api
                         backoff = max(backoff, retry_seconds)
                     except ValueError:
                         pass
-            
+
             if time.monotonic() + backoff >= recovery_deadline:
                 logger.warning("[Discovery] Backoff duration exceeds remaining recovery window. Stopping retries.")
                 break
-                
+
             logger.info(f"[Discovery State: DISCOVERY_RETRYING] Backing off for {backoff:.2f}s before retry...")
             time.sleep(backoff)
 
@@ -425,7 +426,7 @@ class MarketScanner:
                         symbol_start_dts.append(last_ts - timedelta(minutes=15))
                     else:
                         symbol_start_dts.append(now_utc - timedelta(days=HISTORY_DAYS))
-                
+
                 batch_start_dt = min(symbol_start_dts) if symbol_start_dts else (now_utc - timedelta(days=HISTORY_DAYS))
                 if batch_start_dt.tzinfo is None:
                     batch_start_dt = batch_start_dt.replace(tzinfo=timezone.utc)
@@ -719,6 +720,7 @@ class LivePortfolioManager:
         open_exposure: float = 0.0,
         upcoming_opportunities: list[Any] | None = None,
         win_probabilities: dict[str, float] | None = None,
+        cycle_id: str | None = None,
     ) -> int:
         active_untraded_slots = max(1, 5 - len(locked_symbols))
         open_risk = len(locked_symbols) * settings.risk_per_trade_pct * account_equity
@@ -728,51 +730,72 @@ class LivePortfolioManager:
         if locked_normalized is None:
             locked_normalized = {normalize_symbol(s) for s in locked_symbols}
 
+        if cycle_id is None:
+            now_now = datetime.now(timezone.utc)
+            delta_now = now_now - datetime(1970, 1, 1, tzinfo=timezone.utc)
+            ns_now = int(delta_now // timedelta(seconds=1)) * 1_000_000_000 + now_now.microsecond * 1000
+            cycle_id = f"cycle_{ns_now}_{uuid.uuid4().hex}"
+
         eligible = []
+        eval_seq = 0
         for item in top_new[:active_untraded_slots]:
+            eval_seq += 1
             if len(item) >= 8:
                 sym, sc, side_val, reason, curr_price, sl_price, tp_price, signal_ts = item[:8]
             else:
                 sym, sc, side_val, reason, curr_price, sl_price, tp_price = item[:7]
                 signal_ts = None
 
+            norm_sym = normalize_symbol(sym)
+            if signal_ts is not None and signal_ts.tzinfo is None:
+                signal_ts = signal_ts.replace(tzinfo=timezone.utc)
+
+            # Note: Raw source integer timestamp not natively propagated in SetupAnalysis tuple;
+            # using exact integer datetime precision via timedelta integer arithmetic (no float timestamp conversion).
+            if signal_ts is not None:
+                delta_sig = signal_ts - datetime(1970, 1, 1, tzinfo=timezone.utc)
+                ns = int(delta_sig // timedelta(seconds=1)) * 1_000_000_000 + signal_ts.microsecond * 1000
+                signal_id = f"{norm_sym}_{side_val.value if side_val else 'none'}_{ns}"
+            else:
+                signal_id = f"{norm_sym}_{side_val.value if side_val else 'none'}_missing_{eval_seq}"
+
+            evaluation_id = f"{cycle_id}_{eval_seq:03d}_{signal_id}"
+
             if signal_ts is None:
-                self.logger.info(f"Skipping {sym}: missing signal timestamp (fail-closed freshness requirement)")
+                self.logger.info(f"[{evaluation_id}] Skipping {sym}: missing signal timestamp (fail-closed freshness requirement) [REJECTED_MISSING_SIGNAL_TIMESTAMP]")
                 continue
 
-            norm_sym = normalize_symbol(sym)
             if norm_sym in locked_normalized:
+                self.logger.info(f"[{evaluation_id}] Skipping {sym}: symbol is locked [REJECTED_LOCKED]")
                 continue
             if bar_time is not None and processed_signals is not None and (norm_sym, bar_time) in processed_signals:
+                self.logger.info(f"[{evaluation_id}] Skipping {sym}: duplicate signal for bar_time [REJECTED_DUPLICATE_BAR]")
                 continue
             if "/" in sym:
-                self.logger.info(f"Skipping {sym}: unsupported slash symbol")
+                self.logger.info(f"[{evaluation_id}] Skipping {sym}: unsupported slash symbol [REJECTED_SLASH_SYMBOL]")
                 continue
             if curr_price > 0.70 * account_equity:
-                self.logger.info(f"Skipping {sym}: candidate price ${curr_price:.2f} exceeds affordability threshold")
+                self.logger.info(f"[{evaluation_id}] Skipping {sym}: candidate price ${curr_price:.2f} exceeds affordability threshold [REJECTED_AFFORDABILITY]")
                 continue
 
             # 1. Freshness check using 5-minute bar boundary and scanner latency
-            if signal_ts is not None:
-                if signal_ts.tzinfo is None:
-                    signal_ts = signal_ts.replace(tzinfo=timezone.utc)
-                eval_time = bar_time if bar_time is not None else datetime.now(timezone.utc)
-                if eval_time.tzinfo is None:
-                    eval_time = eval_time.replace(tzinfo=timezone.utc)
-                age = (eval_time - signal_ts).total_seconds()
-                if age > 390:  # 5m bar (300s) + 90s latency tolerance
-                    self.logger.info(f"Skipping {sym}: stale signal (age={age:.1f}s exceeds 390s threshold)")
-                    continue
+            eval_time = bar_time if bar_time is not None else datetime.now(timezone.utc)
+            if eval_time.tzinfo is None:
+                eval_time = eval_time.replace(tzinfo=timezone.utc)
+            age = (eval_time - signal_ts).total_seconds()
+            if age > 390:  # 5m bar (300s) + 90s latency tolerance
+                self.logger.info(f"[{evaluation_id}] Skipping {sym}: stale signal (age={age:.1f}s exceeds 390s threshold) [REJECTED_STALE_SIGNAL]")
+                continue
 
             # If safe uncertainty state is active, block new entries
             if getattr(self, 'safe_uncertainty_state', False):
-                self.logger.warning(f"Skipping {sym}: engine in safe uncertainty state due to prior ambiguous order submission.")
+                self.logger.warning(f"[{evaluation_id}] Skipping {sym}: engine in safe uncertainty state due to prior ambiguous order submission. [REJECTED_SAFE_UNCERTAINTY]")
                 continue
 
             # 2. Pre-flight executable price check & max deviation check
             exec_price = curr_price
             if self.stock_client is None:
-                self.logger.info(f"Skipping {sym}: stock_client unavailable (fail-closed requirement)")
+                self.logger.info(f"[{evaluation_id}] Skipping {sym}: stock_client unavailable (fail-closed requirement) [REJECTED_STOCK_CLIENT_UNAVAILABLE]")
                 continue
 
             if hasattr(self.stock_client, 'get_stock_latest_quote'):
@@ -781,51 +804,52 @@ class LivePortfolioManager:
                 try:
                     req = StockLatestQuoteRequest(symbol_or_symbols=[sym], feed=feed_enum)
                     quotes_resp = self.stock_client.get_stock_latest_quote(req)
+                    quote_eval_time = datetime.now(timezone.utc)
                     quote_obj = quotes_resp.get(sym) if isinstance(quotes_resp, dict) else getattr(quotes_resp, sym, None)
                     if quote_obj is None:
-                        self.logger.info(f"Skipping {sym}: quote retrieval failed (no quote returned from {feed_label})")
+                        self.logger.info(f"[{evaluation_id}] Skipping {sym}: quote retrieval failed (no quote returned from {feed_label}) [REJECTED_QUOTE_RETRIEVAL_FAILED]")
                         continue
 
                     q_time = getattr(quote_obj, 'timestamp', None)
                     if q_time is None:
-                        self.logger.info(f"Skipping {sym}: missing quote timestamp from {feed_label}")
+                        self.logger.info(f"[{evaluation_id}] Skipping {sym}: missing quote timestamp from {feed_label} [REJECTED_MISSING_QUOTE_TIMESTAMP]")
                         continue
 
                     if q_time.tzinfo is None:
                         q_time = q_time.replace(tzinfo=timezone.utc)
-                    age = (eval_time - q_time).total_seconds()
+                    quote_age = (quote_eval_time - q_time).total_seconds()
                     max_future_skew = getattr(self.settings, 'quote_max_future_skew_seconds', 2.0) if self.settings else 2.0
-                    if age < -max_future_skew:
-                        self.logger.info(f"Skipping {sym}: future quote timestamp from {feed_label} (age={age:.1f}s violates max future skew -{max_future_skew}s)")
+                    if quote_age < -max_future_skew:
+                        self.logger.info(f"[{evaluation_id}] Skipping {sym}: future quote timestamp from {feed_label} (age={quote_age:.1f}s violates max future skew -{max_future_skew}s) [REJECTED_FUTURE_QUOTE]")
                         continue
 
                     max_age = getattr(self.settings, 'quote_max_age_seconds', 10.0) if self.settings else 10.0
-                    if age > max_age:
-                        self.logger.info(f"Skipping {sym}: stale quote from {feed_label} (age={age:.1f}s exceeds {max_age}s threshold)")
+                    if quote_age > max_age:
+                        self.logger.info(f"[{evaluation_id}] Skipping {sym}: stale quote from {feed_label} (age={quote_age:.1f}s exceeds {max_age}s threshold) [REJECTED_STALE_QUOTE]")
                         continue
 
                     bid = float(getattr(quote_obj, 'bid_price', 0.0) or 0.0)
                     ask = float(getattr(quote_obj, 'ask_price', 0.0) or 0.0)
                     if bid <= 0 or ask <= 0:
-                        self.logger.info(f"Skipping {sym}: invalid quote prices from {feed_label} (bid=${bid:.2f}, ask=${ask:.2f})")
+                        self.logger.info(f"[{evaluation_id}] Skipping {sym}: invalid quote prices from {feed_label} (bid=${bid:.2f}, ask=${ask:.2f}) [REJECTED_INVALID_PRICES]")
                         continue
                     if bid >= ask:
-                        self.logger.info(f"Skipping {sym}: crossed or locked spread from {feed_label} (bid=${bid:.2f} >= ask=${ask:.2f})")
+                        self.logger.info(f"[{evaluation_id}] Skipping {sym}: crossed or locked spread from {feed_label} (bid=${bid:.2f} >= ask=${ask:.2f}) [REJECTED_CROSSED_SPREAD]")
                         continue
 
                     exec_price = ask if side_val is Side.BUY else bid
                     spread = ask - bid
-                    self.logger.info(f"Quote [{feed_label}] {sym}: bid=${bid:.2f}, ask=${ask:.2f}, spread=${spread:.2f}, ref_price=${exec_price:.2f}, age={age:.1f}s")
+                    self.logger.info(f"[{evaluation_id}] Quote [{feed_label}] {sym}: bid=${bid:.2f}, ask=${ask:.2f}, spread=${spread:.2f}, ref_price=${exec_price:.2f}, age={quote_age:.1f}s")
                 except Exception as q_exc:
-                    self.logger.info(f"Skipping {sym}: quote retrieval/validation failed: {q_exc}")
+                    self.logger.info(f"[{evaluation_id}] Skipping {sym}: quote retrieval/validation failed: {q_exc} [REJECTED_QUOTE_RETRIEVAL_EXCEPTION]")
                     continue
             else:
-                self.logger.info(f"Skipping {sym}: stock_client does not implement get_stock_latest_quote (fail-closed requirement)")
+                self.logger.info(f"[{evaluation_id}] Skipping {sym}: stock_client does not implement get_stock_latest_quote (fail-closed requirement) [REJECTED_STOCK_CLIENT_UNIMPLEMENTED]")
                 continue
 
             deviation = abs(exec_price - curr_price) / curr_price if curr_price > 0 else 0.0
             if deviation > 0.01:
-                self.logger.info(f"Skipping {sym}: price deviation {deviation*100:.2f}% exceeds 1.0% limit (exec=${exec_price:.2f}, curr=${curr_price:.2f})")
+                self.logger.info(f"[{evaluation_id}] Skipping {sym}: price deviation {deviation*100:.2f}% exceeds 1.0% limit (exec=${exec_price:.2f}, curr=${curr_price:.2f}) [REJECTED_PRICE_DEVIATION]")
                 continue
 
             # 3. Directional bracket geometry validation (after rounding to 2 decimals)
@@ -838,7 +862,7 @@ class LivePortfolioManager:
                 valid_geometry = (tp_r < exec_r < sl_r)
 
             if not valid_geometry:
-                self.logger.info(f"Skipping {sym}: invalid bracket geometry for {side_val}: stop=${sl_r}, entry=${exec_r}, target=${tp_r}")
+                self.logger.info(f"[{evaluation_id}] Skipping {sym}: invalid bracket geometry for {side_val}: stop=${sl_r}, entry=${exec_r}, target=${tp_r} [REJECTED_INVALID_GEOMETRY]")
                 continue
 
             # 4. Explicit execution minimum RR of 1.10 (signed directional calculation)
@@ -846,10 +870,11 @@ class LivePortfolioManager:
             reward_exec = abs(tp_r - exec_r)
             rr_exec = (reward_exec / risk_exec) if risk_exec > 0 else 0.0
             if rr_exec < 1.10:
-                self.logger.info(f"Skipping {sym}: execution reward/risk {rr_exec:.2f} below minimum 1.10")
+                self.logger.info(f"[{evaluation_id}] Skipping {sym}: execution reward/risk {rr_exec:.2f} below minimum 1.10 [REJECTED_MIN_RR]")
                 continue
 
             if sc >= settings.min_candidate_score and sym not in locked_symbols and side_val is not None:
+                self.logger.info(f"[{evaluation_id}] Evaluation passed pre-flight checks for {sym} [EVALUATION_PASSED]")
                 eligible.append((sym, sc, side_val, reason, curr_price, sl_price, tp_price, exec_r, sl_r, tp_r, risk_exec, reward_exec, rr_exec))
 
         free_capital = max(0.0, account_equity - open_exposure)
@@ -1185,7 +1210,7 @@ class LiveMarketBot:
             settings=self.settings,
         )
         self.portfolio_manager.on_unprotected = lambda reason: self.kill_switch.trip(reason) if hasattr(self, 'kill_switch') else None
-        
+
         self._cached_universe: list[str] = []
         self._universe_last_fetched: datetime | None = None
         self._universe_last_failed: datetime | None = None
@@ -1372,7 +1397,7 @@ class LiveMarketBot:
                 return {"evaluated": 0, "signals": 0, "orders_sent": 0, "halted": True, "safe_drain": True, "flat": True}
 
             self.logger.warning(f"[Discovery State: SAFE_DRAIN] Bot in SAFE_DRAIN mode with {len(open_positions)} open positions. Managing existing positions; new entries blocked.")
-            
+
             # Maintain risk checks and position monitoring state
             self.latest_state["cash"] = account_cash
             self.latest_state["equity"] = account_equity
@@ -1436,6 +1461,9 @@ class LiveMarketBot:
         bar_time = now_utc.replace(minute=minute, second=0, microsecond=0)
 
         open_exposure = sum(p.get("quantity", 0.0) * p.get("current_price", p.get("entry_price", 0.0)) for p in open_positions)
+        delta_utc = now_utc - datetime(1970, 1, 1, tzinfo=timezone.utc)
+        ns_utc = int(delta_utc // timedelta(seconds=1)) * 1_000_000_000 + now_utc.microsecond * 1000
+        cycle_id = f"cycle_{ns_utc}_{uuid.uuid4().hex}"
 
         orders_sent = self.portfolio_manager.submit_bracket_orders(
             top_new,
@@ -1446,6 +1474,7 @@ class LiveMarketBot:
             processed_signals=self.processed_signals,
             locked_normalized=locked_normalized,
             open_exposure=open_exposure,
+            cycle_id=cycle_id,
         )
 
         if self.portfolio_manager.last_submit_failures > 0 and orders_sent == 0:
