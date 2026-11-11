@@ -427,7 +427,7 @@ def test_live_market_bot_position_management_continuity_on_l2_failure(monkeypatc
         bot.kill_switch.check_daily_loss = check_daily_loss_mock
 
         submit_orders_mock = MagicMock(return_value=0)
-        bot.portfolio_manager.submit_bracket_orders = submit_orders_mock
+        bot.portfolio_manager.submit_ict_instructions = submit_orders_mock
 
         bot.portfolio_manager.last_equity = 100000.0
         now = datetime(2026, 10, 22, 14, 0, tzinfo=timezone.utc)
@@ -441,13 +441,13 @@ def test_live_market_bot_position_management_continuity_on_l2_failure(monkeypatc
         # 3. Relevant risk and safety controls execute (check_daily_loss called)
         check_daily_loss_mock.assert_called_once()
 
-        # 4. New-entry orders remain disabled (orders_sent == 0, submit_bracket_orders received empty top_new)
+        # 4. New-entry orders remain disabled (orders_sent == 0, submit_ict_instructions received empty instructions)
         assert res.get("error") is not True
         assert res.get("orders_sent", 0) == 0
         submit_orders_mock.assert_called_once()
         call_args = submit_orders_mock.call_args[0]
-        top_new_arg = call_args[0]
-        assert top_new_arg == []
+        instructions_arg = call_args[0]
+        assert len(instructions_arg) == 0
 
         # 5. Legitimate existing-position management and safety actions remain possible (AAPL is locked/managed in position-management-only mode)
         locked_arg = call_args[1]

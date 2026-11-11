@@ -7,6 +7,7 @@ import tempfile
 import hashlib
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 from typing import Any, Sequence
 
 from alpaca.data.historical import StockHistoricalDataClient
@@ -71,7 +72,7 @@ class DailySuitabilityEngine:
         self.logger = logger or logging.getLogger("MoneyMintterMasterBlueprint")
         self.historical_feed = (
             historical_feed
-            or os.getenv("ALPACA_HISTORICAL_FEED", "sip")
+            or os.getenv("ALPACA_HISTORICAL_FEED", "iex")
         ).strip().lower()
 
     def _get_stock_client(self) -> StockHistoricalDataClient:
@@ -358,8 +359,12 @@ class DailySuitabilityEngine:
         target_feed_enum = DataFeed.SIP if self.historical_feed == "sip" else DataFeed.IEX
 
         feeds_to_try = [target_feed_enum]
-        if target_feed_enum == DataFeed.SIP and os.getenv("ALPACA_ALLOW_IEX_FALLBACK", "false").lower() == "true":
-            feeds_to_try.append(DataFeed.IEX)
+        allow_fallback = os.getenv("ALPACA_ALLOW_IEX_FALLBACK", "true").lower() != "false"
+        if allow_fallback:
+            if target_feed_enum == DataFeed.SIP and DataFeed.IEX not in feeds_to_try:
+                feeds_to_try.append(DataFeed.IEX)
+            elif target_feed_enum == DataFeed.IEX and DataFeed.SIP not in feeds_to_try:
+                feeds_to_try.append(DataFeed.SIP)
 
         all_bars_data: dict[str, list[Any]] = {}
         batch_size = 50
@@ -381,7 +386,7 @@ class DailySuitabilityEngine:
                         symbol_or_symbols=batch[0] if len(batch) == 1 else batch,
                         timeframe=TimeFrame(1, TimeFrameUnit.Day),
                         start=start_dt,
-                        end=now_utc,
+                        end=now_utc - timedelta(minutes=15),
                         feed=attempt_feed,
                     )
                     resp = client.get_stock_bars(req)
@@ -433,7 +438,8 @@ class DailySuitabilityEngine:
 
         eligible_candidates: list[tuple[str, float, float]] = []
         quarantined_symbols: list[str] = []
-        today_date = now_utc.date()
+        ny_tz = ZoneInfo("America/New_York")
+        today_ny_date = now_utc.astimezone(ny_tz).date()
 
         for sym in eligible_symbols:
             raw_bars = all_bars_data.get(sym, [])
@@ -456,7 +462,8 @@ class DailySuitabilityEngine:
             completed_bars = []
             for b in raw_bars:
                 b_dt = b.timestamp.replace(tzinfo=timezone.utc) if b.timestamp.tzinfo is None else b.timestamp
-                if b_dt.date() < today_date:
+                b_ny_date = b_dt.astimezone(ny_tz).date()
+                if b_ny_date < today_ny_date:
                     completed_bars.append((b_dt, b))
 
             completed_bars.sort(key=lambda x: x[0])

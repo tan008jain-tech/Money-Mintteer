@@ -418,6 +418,7 @@ def test_run_cycle_counts_and_single_scan(monkeypatch: pytest.MonkeyPatch) -> No
     bot.portfolio_manager = LivePortfolioManager(bot.trading_client, bot.logger)
     bot.scanner = MarketScanner(bot.global_universe, FakeStockClient(), bot.logger)
     bot.strategy = FakeStrategy()
+    bot.use_legacy = True
 
     scan_calls = 0
     original_scan = bot.scanner.scan_universe
@@ -521,6 +522,7 @@ def test_symbol_with_open_order_does_not_produce_order(monkeypatch: pytest.Monke
     bot.portfolio_manager = LivePortfolioManager(bot.trading_client, bot.logger)
     bot.scanner = MarketScanner(bot.global_universe, FakeStockClient(), bot.logger)
     bot.strategy = FakeStrategy()
+    bot.use_legacy = True
 
     monkeypatch.setattr(MarketScanner, "is_session_open", lambda sym, now: (True, "Open"))
     now_utc = datetime(2026, 10, 18, 10, 10, 0, tzinfo=timezone.utc)
@@ -612,6 +614,7 @@ def test_equity_position_blocks_signal(monkeypatch: pytest.MonkeyPatch) -> None:
     bot.portfolio_manager = LivePortfolioManager(bot.trading_client, bot.logger)
     bot.scanner = MarketScanner(bot.global_universe, FakeStockClient(), bot.logger)
     bot.strategy = FakeStrategy()
+    bot.use_legacy = True
 
     monkeypatch.setattr(MarketScanner, "is_session_open", lambda sym, now: (True, "Open"))
     now_utc = datetime(2026, 10, 18, 10, 10, 0, tzinfo=timezone.utc)
@@ -1104,6 +1107,7 @@ def test_scan_failure_detection_survives_earlier_success(monkeypatch: pytest.Mon
     scanner = MarketScanner(bot.global_universe, bot.stock_client, bot.logger)
     bot.scanner = scanner
     bot.strategy = FakeStrategyNoSignal()
+    bot.use_legacy = True
 
     monkeypatch.setattr(MarketScanner, "is_session_open", lambda sym, now: (True, "Open"))
     now_utc = datetime(2026, 10, 18, 10, 10, 0, tzinfo=timezone.utc)
@@ -1193,6 +1197,7 @@ def test_run_once_partial_scan_failure_no_error_six_cycles(monkeypatch: pytest.M
             return None
 
     bot.strategy = FakeStrategyNoSignal()
+    bot.use_legacy = True
 
     monkeypatch.setattr(MarketScanner, "is_session_open", lambda sym, now: (True, "Open"))
     now_utc = datetime(2026, 10, 18, 10, 10, 0, tzinfo=timezone.utc)
@@ -1254,6 +1259,18 @@ def test_run_once_partial_scan_failure_not_cycle_error(monkeypatch: pytest.Monke
 
     bot.stock_client = MixedStockClient()
     bot.scanner = MarketScanner(bot.global_universe, bot.stock_client, bot.logger)
+
+    class FakeStrategyNoSignal:
+        def analyze(self, snapshot):
+            class Analysis:
+                passed = False
+                reason = "no signal"
+            return Analysis()
+        def signal(self, snapshot):
+            return None
+
+    bot.strategy = FakeStrategyNoSignal()
+    bot.use_legacy = True
 
     monkeypatch.setattr(MarketScanner, "is_session_open", lambda sym, now: (True, "Open"))
     now_utc = datetime(2026, 10, 18, 10, 10, 0, tzinfo=timezone.utc)
@@ -1348,6 +1365,7 @@ def test_consecutive_submission_failures(monkeypatch: pytest.MonkeyPatch) -> Non
             )
 
     bot.strategy = FakeStrategy()
+    bot.use_legacy = True
     monkeypatch.setattr(MarketScanner, "is_session_open", lambda sym, now: (True, "Open"))
 
     class FakeBar:

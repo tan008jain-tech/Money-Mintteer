@@ -30,6 +30,8 @@ from money_mintter.core.session_lock import SessionLock
 from money_mintter.core.selector import select_layer4_candidates
 from money_mintter.domain import Side
 from money_mintter.strategy import Candle, LiquiditySweepReversalStrategy, MultiTimeframeSeries, StrategyConfig, Timeframe
+from money_mintter.strategy.ict.acquisition import fetch_ict_market_data
+from money_mintter.strategy.ict.integration import generate_production_ict_signals, ICTDeduplicationTracker, ICTExecutionInstruction
 from money_mintter.strategy.timeframes import _resample
 
 
@@ -62,6 +64,30 @@ def is_connectivity_error(exc: Any, depth: int = 0) -> bool:
             return True
     if getattr(exc, "__context__", None) is not None:
         if is_connectivity_error(exc.__context__, depth + 1):
+            return True
+    return False
+
+
+def is_broker_rejection(exc: Any, depth: int = 0) -> bool:
+    if depth > 8 or exc is None:
+        return False
+    try:
+        from alpaca.common.exceptions import APIError
+        if isinstance(exc, APIError) and hasattr(exc, "status_code"):
+            if exc.status_code in (400, 422) or (400 <= exc.status_code < 500 and exc.status_code not in (408, 429)):
+                return True
+    except ImportError:
+        pass
+
+    exc_str = str(exc).lower()
+    if "rejected by broker" in exc_str or "order rejected" in exc_str:
+        return True
+
+    if getattr(exc, "__cause__", None) is not None:
+        if is_broker_rejection(exc.__cause__, depth + 1):
+            return True
+    if getattr(exc, "__context__", None) is not None:
+        if is_broker_rejection(exc.__context__, depth + 1):
             return True
     return False
 
@@ -115,42 +141,27 @@ def discover_universe(trading_client: TradingClient, logger: logging.Logger, api
     data_source = "Alpaca Live API"
     try:
         if hasattr(trading_client, "get_all_assets"):
-            assets = trading_client.get_all_assets(search_params)
-    except Exception as exc:
-        err_str = str(exc)
-        if ("validation errors" in err_str or "ValidationError" in type(exc).__name__ or "exchange" in err_str) and hasattr(trading_client, "get"):
-            logger.warning(f"[Discovery] SDK asset validation failed ({exc}), falling back to trading_client.get...")
             try:
-                params = search_params.to_request_fields() if search_params is not None else {}
-                assets = trading_client.get("/assets", params)
-                data_source = "Alpaca REST Fallback"
-            except Exception as get_exc:
-                logger.error(f"[Discovery] trading_client.get fallback failed: {get_exc}")
-                cached_syms, _, _ = engine.load_persisted_cache()
-                if cached_syms:
-                    logger.warning(f"[Discovery] Using persisted cache due to API failure: {len(cached_syms)} assets.")
-                    return cached_syms
-                raise ConnectivityError(f"Asset discovery failed: {get_exc}") from get_exc
-        else:
-            logger.error(f"[Discovery] Failed to fetch assets from Alpaca API: {exc}")
-            cached_syms, _, _ = engine.load_persisted_cache()
-            if cached_syms:
-                logger.warning(f"[Discovery] Using persisted cache due to API error: {len(cached_syms)} assets.")
-                return cached_syms
-            raise ConnectivityError(f"Asset discovery failed: {exc}") from exc
-
-    if assets is None and hasattr(trading_client, "get"):
-        try:
+                assets = trading_client.get_all_assets(search_params)
+            except Exception as sdk_exc:
+                err_str = str(sdk_exc)
+                if ("validation errors" in err_str or "ValidationError" in type(sdk_exc).__name__ or "exchange" in err_str) and hasattr(trading_client, "get"):
+                    params = search_params.to_request_fields() if search_params is not None else {}
+                    assets = trading_client.get("/assets", params)
+                    data_source = "Alpaca REST Fallback"
+                else:
+                    raise
+        elif hasattr(trading_client, "get"):
             params = search_params.to_request_fields() if search_params is not None else {}
             assets = trading_client.get("/assets", params)
             data_source = "Alpaca REST Get"
-        except Exception as exc:
-            logger.error(f"[Discovery] Failed to fetch assets via get: {exc}")
-            cached_syms, _, _ = engine.load_persisted_cache()
-            if cached_syms:
-                logger.warning(f"[Discovery] Using persisted cache: {len(cached_syms)} assets.")
-                return cached_syms
-            raise ConnectivityError(f"Asset discovery failed: {exc}") from exc
+    except Exception as exc:
+        logger.error(f"[Discovery] Failed to fetch assets from Alpaca API: {exc}")
+        cached_syms, _, _ = engine.load_persisted_cache()
+        if cached_syms:
+            logger.warning(f"[Discovery] Using persisted cache due to API error: {len(cached_syms)} assets.")
+            return cached_syms
+        raise ConnectivityError(f"Asset discovery failed: {exc}") from exc
 
     if assets is None:
         cached_syms, _, _ = engine.load_persisted_cache()
@@ -193,7 +204,7 @@ def discover_universe(trading_client: TradingClient, logger: logging.Logger, api
             logger.critical("[Universe Layer 2] Layer 2 evaluation failed and no valid stale fallback pool exists. Position-management-only mode active (new entries disabled).")
             daily_pool = []
             quarantined_count = 0
-            actual_feed = "SIP"
+            actual_feed = "IEX"
             stale_flag = True
 
     logger.info(
@@ -249,11 +260,12 @@ class MarketScanner:
         cum_v = sum(c.volume for c in candles)
         return cum_pv / cum_v if cum_v > 0 else candles[-1].close
 
-    def scan_universe(self, now_utc: datetime, locked_symbols: set[str], strategy: LiquiditySweepReversalStrategy, daily_pool: list[str] | None = None) -> tuple[list[tuple[str, float, Side | None, str, float, float, float]], list[dict[str, Any]]]:
+    def scan_universe(self, now_utc: datetime, locked_symbols: set[str], strategy: Any = None, daily_pool: list[str] | None = None, dedup_tracker: ICTDeduplicationTracker | None = None, **kwargs: Any) -> tuple[Any, list[dict[str, Any]]]:
         self.last_scan_attempts = 0
         self.last_scan_errors = 0
         self.last_scan_connectivity_errors = 0
         analyzed_candidates: list[tuple[str, float, Side | None, str, float, float, float]] = []
+        ict_instructions: list[ICTExecutionInstruction] = []
         dashboard_stocks = []
         locked_normalized = {normalize_symbol(s) for s in locked_symbols}
 
@@ -406,70 +418,103 @@ class MarketScanner:
         layer4_selected = select_layer4_candidates(pool_input, bars_dict, max_candidates=8)
         self.logger.info(f"[Layer 4 Selector] Selected {len(layer4_selected)} candidates from pool of {len(pool_input)} symbols.")
 
-        for item in layer4_selected:
-            clean_symbol = item.symbol
-            try:
-                symbol_candles = self._candle_cache.get(clean_symbol, [])
-                if not symbol_candles:
-                    continue
+        if strategy is not None:
+            for item in layer4_selected:
+                clean_symbol = item.symbol
+                try:
+                    symbol_candles = self._candle_cache.get(clean_symbol, [])
+                    if not symbol_candles:
+                        continue
 
-                timezone_obj = ZoneInfo("America/New_York")
-                resampled_5m = _resample(tuple(symbol_candles), Timeframe.FIVE_MIN, timezone_obj).bars
-                if not resampled_5m:
-                    continue
+                    timezone_obj = ZoneInfo("America/New_York")
+                    resampled_5m = _resample(tuple(symbol_candles), Timeframe.FIVE_MIN, timezone_obj).bars
+                    if not resampled_5m:
+                        continue
 
-                series = MultiTimeframeSeries.from_5m(
-                    list(resampled_5m),
-                    entry_timeframe=Timeframe.FIVE_MIN,
-                    timezone_name="America/New_York",
-                    spread_bps=2.0,
-                )
-                snapshot = series.snapshot_at(now_utc)
+                    series = MultiTimeframeSeries.from_5m(
+                        list(resampled_5m),
+                        entry_timeframe=Timeframe.FIVE_MIN,
+                        timezone_name="America/New_York",
+                        spread_bps=2.0,
+                    )
+                    snapshot = series.snapshot_at(now_utc)
 
-                minute = (now_utc.minute // 5) * 5
-                bar_time = now_utc.replace(minute=minute, second=0, microsecond=0)
-                expected_last_bar_start = bar_time - timedelta(minutes=5)
-                if expected_last_bar_start.tzinfo is None:
-                    expected_last_bar_start = expected_last_bar_start.replace(tzinfo=timezone.utc)
+                    minute = (now_utc.minute // 5) * 5
+                    bar_time = now_utc.replace(minute=minute, second=0, microsecond=0)
+                    expected_last_bar_start = bar_time - timedelta(minutes=5)
+                    if expected_last_bar_start.tzinfo is None:
+                        expected_last_bar_start = expected_last_bar_start.replace(tzinfo=timezone.utc)
 
-                if not snapshot.entry:
-                    self.logger.warning(f"stale bars for {clean_symbol}: no entry-timeframe candles in snapshot")
-                    continue
+                    if not snapshot.entry:
+                        self.logger.warning(f"stale bars for {clean_symbol}: no entry-timeframe candles in snapshot")
+                        continue
 
-                last_entry = snapshot.entry[-1]
-                last_ts = last_entry.timestamp
-                if last_ts.tzinfo is None:
-                    last_ts = last_ts.replace(tzinfo=timezone.utc)
+                    last_entry = snapshot.entry[-1]
+                    last_ts = last_entry.timestamp
+                    if last_ts.tzinfo is None:
+                        last_ts = last_ts.replace(tzinfo=timezone.utc)
 
-                if last_ts < expected_last_bar_start:
-                    self.logger.warning(f"stale bars for {clean_symbol}: latest={last_ts}, expected>={expected_last_bar_start}")
-                    continue
-                self.latest_snapshots[clean_symbol] = snapshot
-                self.logger.info(f"[{clean_symbol}] MTF Chart Analysis | {snapshot.candle_bias_summary}")
+                    if last_ts < expected_last_bar_start:
+                        self.logger.warning(f"stale bars for {clean_symbol}: latest={last_ts}, expected>={expected_last_bar_start}")
+                        continue
+                    self.latest_snapshots[clean_symbol] = snapshot
+                    self.logger.info(f"[{clean_symbol}] MTF Chart Analysis | {snapshot.candle_bias_summary}")
 
-                analysis = strategy.analyze(snapshot)
-                signal = strategy.signal(snapshot)
-                if signal is None:
-                    reason_msg = analysis.reason if analysis else "no signal"
-                    self.logger.info(f"[{clean_symbol}] No signal generated | Reason: {reason_msg}")
-                    continue
+                    analysis = strategy.analyze(snapshot)
+                    signal = strategy.signal(snapshot)
+                    if signal is None:
+                        reason_msg = analysis.reason if analysis else "no signal"
+                        self.logger.info(f"[{clean_symbol}] No signal generated | Reason: {reason_msg}")
+                        continue
 
-                self.logger.info(f"[{clean_symbol}] Signal | Score: {signal.confidence:.2f} | Side: {signal.side} | Entry: ${signal.entry_price:.2f}")
+                    self.logger.info(f"[{clean_symbol}] Signal | Score: {signal.confidence:.2f} | Side: {signal.side} | Entry: ${signal.entry_price:.2f}")
 
-                analyzed_candidates.append((clean_symbol, signal.confidence, signal.side, signal.reason, signal.entry_price, signal.stop_price, signal.target_price))
-                dashboard_stocks.append({
-                    "symbol": clean_symbol,
-                    "market": "Global/US",
-                    "current_price": signal.entry_price,
-                    "score": signal.confidence,
-                })
-            except Exception as sym_ex:
-                self.last_scan_errors += 1
-                if is_connectivity_error(sym_ex):
-                    self.last_scan_connectivity_errors += 1
-                self.logger.error(f"CRITICAL: Symbol analysis error for {clean_symbol}: {sym_ex}")
+                    analyzed_candidates.append((clean_symbol, signal.confidence, signal.side, signal.reason, signal.entry_price, signal.stop_price, signal.target_price))
+                    dashboard_stocks.append({
+                        "symbol": clean_symbol,
+                        "market": "Global/US",
+                        "current_price": signal.entry_price,
+                        "score": signal.confidence,
+                    })
+                except Exception as sym_ex:
+                    self.last_scan_errors += 1
+                    if is_connectivity_error(sym_ex):
+                        self.last_scan_connectivity_errors += 1
+                    self.logger.error(f"CRITICAL: Symbol analysis error for {clean_symbol}: {sym_ex}")
+            return analyzed_candidates, dashboard_stocks
+        else:
+            dedup = dedup_tracker if dedup_tracker is not None else ICTDeduplicationTracker()
+            for item in layer4_selected:
+                clean_symbol = item.symbol
+                try:
+                    cached = self._candle_cache.get(clean_symbol, [])
+                    if cached:
+                        last_ts = max(c.timestamp for c in cached)
+                        if last_ts.tzinfo is None:
+                            last_ts = last_ts.replace(tzinfo=timezone.utc)
+                        start_dt = last_ts - timedelta(minutes=15)
+                    else:
+                        start_dt = now_utc - timedelta(days=HISTORY_DAYS)
+                    if start_dt.tzinfo is None:
+                        start_dt = start_dt.replace(tzinfo=timezone.utc)
 
-        return analyzed_candidates, dashboard_stocks
+                    acq_result = fetch_ict_market_data(self.stock_client, clean_symbol, start_dt, now_utc)
+                    _, instructions = generate_production_ict_signals(acq_result, now_utc, dedup_tracker=dedup, _allow_historical_evaluation=False)
+
+                    for inst in instructions:
+                        ict_instructions.append(inst)
+                        dashboard_stocks.append({
+                            "symbol": clean_symbol,
+                            "market": "Global/US",
+                            "current_price": inst.entry_price,
+                            "score": 1.0,
+                        })
+                except Exception as sym_ex:
+                    self.last_scan_errors += 1
+                    if is_connectivity_error(sym_ex):
+                        self.last_scan_connectivity_errors += 1
+                    self.logger.error(f"CRITICAL: ICT acquisition/signal error for {clean_symbol}: {sym_ex}")
+            return tuple(ict_instructions), dashboard_stocks
 
 
 class LivePortfolioManager:
@@ -553,7 +598,7 @@ class LivePortfolioManager:
         locked_normalized: set[str] | None = None,
         open_exposure: float = 0.0,
     ) -> int:
-        active_untraded_slots = max(1, 5 - len(locked_symbols))
+        active_untraded_slots = max(0, 5 - len(locked_symbols))
         open_risk = len(locked_symbols) * settings.risk_per_trade_pct * account_equity
         orders_sent = 0
         self.last_submit_failures = 0
@@ -726,6 +771,195 @@ class LivePortfolioManager:
 
         return orders_sent
 
+    def submit_ict_instructions(
+        self,
+        instructions: Sequence[ICTExecutionInstruction],
+        locked_symbols: set[str],
+        account_equity: float,
+        settings: Settings,
+        dedup_tracker: ICTDeduplicationTracker | None = None,
+        bar_time: datetime | None = None,
+        processed_signals: set[tuple[str, datetime]] | None = None,
+        locked_normalized: set[str] | None = None,
+        open_exposure: float = 0.0,
+    ) -> int:
+        active_untraded_slots = max(0, 5 - len(locked_symbols))
+        if active_untraded_slots <= 0:
+            return 0
+
+        open_risk = len(locked_symbols) * settings.risk_per_trade_pct * account_equity
+        orders_sent = 0
+        self.last_submit_failures = 0
+
+        if locked_normalized is None:
+            locked_normalized = {normalize_symbol(s) for s in locked_symbols}
+        if dedup_tracker is not None:
+            locked_normalized = locked_normalized | {normalize_symbol(s) for s in dedup_tracker.pending_symbols}
+
+        eligible = []
+        for inst in instructions[:active_untraded_slots]:
+            sym = inst.symbol
+            norm_sym = normalize_symbol(sym)
+            if norm_sym in locked_normalized:
+                continue
+            if bar_time is not None and processed_signals is not None and (norm_sym, bar_time) in processed_signals:
+                continue
+            if "/" in sym:
+                self.logger.info(f"Skipping {sym}: unsupported slash symbol")
+                continue
+            side_str = "bull" if inst.side is Side.BUY else "bear"
+            if dedup_tracker is not None and (
+                dedup_tracker.is_executed(sym, side_str, inst.zone_type, inst.zone_top, inst.zone_bot) or
+                dedup_tracker.is_pending(sym, side_str, inst.zone_type, inst.zone_top, inst.zone_bot)
+            ):
+                continue
+            if sym not in locked_symbols:
+                eligible.append(inst)
+
+        free_capital = max(0.0, account_equity - open_exposure)
+
+        valid_eligible = []
+        for inst in eligible:
+            sym = inst.symbol
+            curr_price = inst.entry_price
+            sl_price = inst.stop_price
+            tp_price = inst.target_price
+            side_val = inst.side
+
+            risk_per_share = abs(curr_price - sl_price)
+            reward = abs(tp_price - curr_price)
+            stop_pct = (risk_per_share / curr_price * 100) if curr_price > 0 else 0.0
+            target_pct = (reward / curr_price * 100) if curr_price > 0 else 0.0
+            rr = (reward / risk_per_share) if risk_per_share > 0 else 0.0
+
+            if risk_per_share <= 0:
+                self.logger.info(f"Skipping {sym}: risk per share <= 0")
+                continue
+
+            # Bypass legacy strategy vetoes (min_candidate_score, min_reward_risk, min_target_pct, min_gross_to_cost_multiple)
+            valid_eligible.append((inst, curr_price, sl_price, tp_price, side_val, risk_per_share, reward, stop_pct, target_pct, rr))
+
+        for idx, (inst, curr_price, sl_price, tp_price, side_val, risk_per_share, reward, stop_pct, target_pct, rr) in enumerate(valid_eligible):
+            sym = inst.symbol
+            norm_sym = normalize_symbol(sym)
+            remaining = len(valid_eligible) - idx
+            notional_cap = min(settings.max_single_position_pct * account_equity, free_capital / remaining if remaining > 0 else 0.0)
+
+            if notional_cap < curr_price:
+                self.logger.info(f"Skipping {sym}: allocation ${notional_cap:.2f} below one share (${curr_price:.2f})")
+                continue
+
+            pos_pct = min(1.0, max(1e-9, notional_cap / account_equity))
+            risk_engine = RiskEngine(
+                risk_per_trade_pct=settings.risk_per_trade_pct,
+                max_position_pct=pos_pct,
+                max_portfolio_risk_pct=settings.max_portfolio_risk_pct,
+                leverage=1.0,
+            )
+
+            try:
+                if side_val is Side.BUY:
+                    decision_obj = risk_engine.size_long(
+                        available_capital=account_equity,
+                        entry=curr_price,
+                        stop=sl_price,
+                        open_risk=open_risk,
+                        active_candidates_count=5,
+                        market_open=True,
+                    )
+                else:
+                    decision_obj = risk_engine.size_short(
+                        available_capital=account_equity,
+                        entry=curr_price,
+                        stop=sl_price,
+                        open_risk=open_risk,
+                        active_candidates_count=5,
+                        market_open=True,
+                    )
+
+                if not decision_obj.approved:
+                    self.logger.info(f"Skipping {sym}: RiskEngine rejected trade ({decision_obj.reason})")
+                    continue
+
+                qty = int(decision_obj.quantity)
+                if qty < 1:
+                    self.logger.info(f"Skipping {sym}: whole share quantity ({qty}) < 1")
+                    continue
+
+                alpaca_side = OrderSide.BUY if side_val is Side.BUY else OrderSide.SELL
+                order_req = MarketOrderRequest(
+                    symbol=sym,
+                    qty=qty,
+                    side=alpaca_side,
+                    time_in_force=TimeInForce.DAY,
+                    order_class=OrderClass.BRACKET,
+                    take_profit=TakeProfitRequest(limit_price=round(tp_price, 2)),
+                    stop_loss=StopLossRequest(stop_price=round(sl_price, 2))
+                )
+                side_str = "bull" if side_val is Side.BUY else "bear"
+                if dedup_tracker is not None:
+                    dedup_tracker.mark_pending(sym, side_str, inst.zone_type, inst.zone_top, inst.zone_bot)
+
+                submitted_order = self.trading_client.submit_order(order_req)
+
+                oc = getattr(submitted_order, 'order_class', None)
+                oc_val = oc.value if hasattr(oc, 'value') else str(oc) if oc is not None else None
+                oc_lower = oc_val.lower() if oc_val is not None else None
+                legs = getattr(submitted_order, 'legs', None)
+
+                self.logger.info(f"ORDER SUBMITTED (class={oc_val if oc is not None else 'unknown'}): {alpaca_side.value} {qty} shares of {sym} @ ~${curr_price:.2f} (SL: ${sl_price:.2f}, TP: ${tp_price:.2f})")
+
+                order_accepted = False
+                if oc_lower is None or legs is None:
+                    self.logger.warning("cannot verify order class")
+                    open_risk += decision_obj.capital_at_risk
+                    orders_sent += 1
+                    order_accepted = True
+                elif oc_lower == "bracket" and isinstance(legs, list) and len(legs) >= 2:
+                    self.logger.info(f"ORDER CONFIRMED: {sym} id={getattr(submitted_order, 'id', 'unknown')} class=bracket legs={len(legs)}")
+                    open_risk += decision_obj.capital_at_risk
+                    orders_sent += 1
+                    order_accepted = True
+                else:
+                    reason_msg = f"unprotected order: class={oc_val}, legs={len(legs) if isinstance(legs, list) else legs}"
+                    self.logger.critical(f"UNPROTECTED ORDER {sym} id={getattr(submitted_order, 'id', 'unknown')} class={oc_val} legs={len(legs) if isinstance(legs, list) else 0}")
+                    try:
+                        if hasattr(submitted_order, 'id') and submitted_order.id:
+                            self.trading_client.cancel_order_by_id(submitted_order.id)
+                    except Exception as cancel_err:
+                        self.logger.error(f"Failed to cancel unprotected order {sym}: {cancel_err}")
+                    try:
+                        self.trading_client.close_position(sym)
+                    except Exception as close_err:
+                        self.logger.error(f"Failed to close position for unprotected order {sym}: {close_err}")
+                    self.last_submit_failures += 1
+                    if self.on_unprotected is not None:
+                        try:
+                            self.on_unprotected(reason_msg)
+                        except Exception as cb_err:
+                            self.logger.error(f"Error in on_unprotected callback: {cb_err}")
+
+                if order_accepted and dedup_tracker is not None:
+                    side_str = "bull" if side_val is Side.BUY else "bear"
+                    dedup_tracker.mark_executed(sym, side_str, inst.zone_type, inst.zone_top, inst.zone_bot)
+
+                if bar_time is not None and processed_signals is not None:
+                    processed_signals.add((norm_sym, bar_time))
+
+                free_capital = max(0.0, free_capital - qty * curr_price)
+
+            except Exception as ord_err:
+                self.last_submit_failures += 1
+                self.logger.error(f"Failed to submit bracket order for {sym}: {ord_err}")
+                side_str = "bull" if side_val is Side.BUY else "bear"
+                if dedup_tracker is not None:
+                    if is_broker_rejection(ord_err):
+                        dedup_tracker.clear_pending(sym, side_str, inst.zone_type, inst.zone_top, inst.zone_bot)
+                    else:
+                        self.logger.info(f"Retaining pending status for {sym} due to uncertain/generic/connectivity exception: {ord_err}")
+
+        return orders_sent
+
     def flatten_all(self, sleep_fn=time.sleep, retries: int = 3, retry_delay: int = 5, max_wait_seconds: int = 0) -> list[str]:
         if max_wait_seconds <= 0:
             try:
@@ -820,7 +1054,6 @@ class LiveMarketBot:
             self.logger.error(f"Critical initialization error: {exc}")
             sys.exit(1)
 
-        self.strategy = LiquiditySweepReversalStrategy(StrategyConfig())
         self.portfolio_manager = LivePortfolioManager(self.trading_client, self.logger)
         self.portfolio_manager.on_unprotected = lambda reason: self.kill_switch.trip(reason)
         
@@ -866,6 +1099,7 @@ class LiveMarketBot:
             self.logger.warning("IEX feed carries only a fraction of market volume; relative volume confirmation is unreliable.")
 
         self.scanner = MarketScanner(self.global_universe, self.stock_client, self.logger, data_feed=data_feed_enum)
+        self.ict_dedup_tracker = ICTDeduplicationTracker()
         self.kill_switch = KillSwitch(
             max_consecutive_errors=self.settings.max_consecutive_errors,
             max_daily_loss_pct=self.settings.max_daily_loss_pct,
@@ -999,6 +1233,13 @@ class LiveMarketBot:
         open_order_symbols = self.portfolio_manager.fetch_open_order_symbols()
         locked_normalized = {normalize_symbol(s) for s in locked_symbols_raw} | open_order_symbols
 
+        dedup = getattr(self, 'ict_dedup_tracker', None)
+        if dedup is not None:
+            for p_sym in list(dedup.pending_symbols):
+                if p_sym in locked_normalized:
+                    dedup.resolve_pending_to_executed_for_symbol(p_sym)
+            locked_normalized = locked_normalized | {normalize_symbol(s) for s in dedup.pending_symbols}
+
         evaluated = 0
         for sym in self.global_universe:
             clean_sym = sym.upper().strip()
@@ -1008,37 +1249,70 @@ class LiveMarketBot:
             if open_status:
                 evaluated += 1
 
-        analyzed_candidates, dashboard_stocks = self.scanner.scan_universe(now_utc, locked_symbols_raw, self.strategy)
-        if self.scanner.last_scan_attempts > 0 and self.scanner.last_scan_errors == self.scanner.last_scan_attempts:
-            if self.scanner.last_scan_connectivity_errors == self.scanner.last_scan_errors:
-                raise ConnectivityError("all symbol analyses failed due to connectivity issues")
-            else:
-                raise RuntimeError("all symbol analyses failed")
-        signals = len(analyzed_candidates)
+        use_legacy = getattr(self, 'use_legacy', False) and hasattr(self, 'strategy') and self.strategy is not None
+        if use_legacy:
+            analyzed_candidates, dashboard_stocks = self.scanner.scan_universe(now_utc, locked_symbols_raw, self.strategy)
+            if self.scanner.last_scan_attempts > 0 and self.scanner.last_scan_errors == self.scanner.last_scan_attempts:
+                if self.scanner.last_scan_connectivity_errors == self.scanner.last_scan_errors:
+                    raise ConnectivityError("all symbol analyses failed due to connectivity issues")
+                else:
+                    raise RuntimeError("all symbol analyses failed")
+            signals = len(analyzed_candidates)
 
-        analyzed_candidates.sort(key=lambda x: x[1], reverse=True)
-        top_new = analyzed_candidates[:max(0, 5 - len(locked_symbols_raw))]
+            analyzed_candidates.sort(key=lambda x: x[1], reverse=True)
+            top_new = analyzed_candidates[:max(0, 5 - len(locked_symbols_raw))]
 
-        final_candidates = list(locked_symbols_raw) + [c[0] for c in analyzed_candidates]
-        self.latest_state["current_candidates"] = final_candidates[:5]
-        if dashboard_stocks:
-            self.latest_state["analyzed_stocks"] = dashboard_stocks
+            final_candidates = list(locked_symbols_raw) + [c[0] for c in analyzed_candidates]
+            self.latest_state["current_candidates"] = final_candidates[:5]
+            if dashboard_stocks:
+                self.latest_state["analyzed_stocks"] = dashboard_stocks
 
-        minute = (now_utc.minute // 5) * 5
-        bar_time = now_utc.replace(minute=minute, second=0, microsecond=0)
+            minute = (now_utc.minute // 5) * 5
+            bar_time = now_utc.replace(minute=minute, second=0, microsecond=0)
 
-        open_exposure = sum(p.get("quantity", 0.0) * p.get("current_price", p.get("entry_price", 0.0)) for p in open_positions)
+            open_exposure = sum(p.get("quantity", 0.0) * p.get("current_price", p.get("entry_price", 0.0)) for p in open_positions)
 
-        orders_sent = self.portfolio_manager.submit_bracket_orders(
-            top_new,
-            locked_symbols_raw,
-            account_equity,
-            self.settings,
-            bar_time=bar_time,
-            processed_signals=self.processed_signals,
-            locked_normalized=locked_normalized,
-            open_exposure=open_exposure,
-        )
+            orders_sent = self.portfolio_manager.submit_bracket_orders(
+                top_new,
+                locked_symbols_raw,
+                account_equity,
+                self.settings,
+                bar_time=bar_time,
+                processed_signals=self.processed_signals,
+                locked_normalized=locked_normalized,
+                open_exposure=open_exposure,
+            )
+        else:
+            dedup = getattr(self, 'ict_dedup_tracker', None)
+            ict_instructions, dashboard_stocks = self.scanner.scan_universe(now_utc, locked_symbols_raw, dedup_tracker=dedup)
+            if self.scanner.last_scan_attempts > 0 and self.scanner.last_scan_errors == self.scanner.last_scan_attempts:
+                if self.scanner.last_scan_connectivity_errors == self.scanner.last_scan_errors:
+                    raise ConnectivityError("all symbol analyses failed due to connectivity issues")
+                else:
+                    raise RuntimeError("all symbol analyses failed")
+            signals = len(ict_instructions)
+
+            final_candidates = list(locked_symbols_raw) + [inst.symbol for inst in ict_instructions]
+            self.latest_state["current_candidates"] = final_candidates[:5]
+            if dashboard_stocks:
+                self.latest_state["analyzed_stocks"] = dashboard_stocks
+
+            minute = (now_utc.minute // 5) * 5
+            bar_time = now_utc.replace(minute=minute, second=0, microsecond=0)
+
+            open_exposure = sum(p.get("quantity", 0.0) * p.get("current_price", p.get("entry_price", 0.0)) for p in open_positions)
+
+            orders_sent = self.portfolio_manager.submit_ict_instructions(
+                ict_instructions,
+                locked_symbols_raw,
+                account_equity,
+                self.settings,
+                dedup_tracker=dedup,
+                bar_time=bar_time,
+                processed_signals=self.processed_signals,
+                locked_normalized=locked_normalized,
+                open_exposure=open_exposure,
+            )
 
         if self.portfolio_manager.last_submit_failures > 0 and orders_sent == 0:
             raise RuntimeError("all order submissions failed")

@@ -183,6 +183,7 @@ def test_allocation_g_run_cycle_open_exposure(monkeypatch: pytest.MonkeyPatch) -
     bot.trading_client = client
     bot.stock_client = type("StockClient", (), {})()
     bot.strategy = LiquiditySweepReversalStrategy(StrategyConfig())
+    bot.use_legacy = True
     bot.scanner = type("Scanner", (), {"scan_universe": lambda *args: ([], []), "last_scan_attempts": 1, "last_scan_errors": 0})()
     bot.kill_switch = type("KillSwitch", (), {"tripped": False, "check_daily_loss": lambda *args: None})()
     bot.portfolio_manager = LivePortfolioManager(client, bot.logger)

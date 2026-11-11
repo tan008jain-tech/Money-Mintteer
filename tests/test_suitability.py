@@ -356,7 +356,7 @@ def test_feed_retry_non_mixing_multibatch(monkeypatch) -> None:
 def test_stale_session_edge_cases_boundary() -> None:
     settings = Settings()
     with tempfile.TemporaryDirectory() as tmpdir:
-        engine = DailySuitabilityEngine(settings=settings, cache_dir=tmpdir)
+        engine = DailySuitabilityEngine(settings=settings, cache_dir=tmpdir, historical_feed="sip")
         # Test handling of generated_at timestamps and max stale sessions
         now = datetime.now(timezone.utc)
         res = SuitabilityResult(
@@ -603,7 +603,7 @@ def test_legitimately_evaluated_empty_pool_accepted() -> None:
 def test_trading_session_boundary_sessions() -> None:
     settings = Settings()
     with tempfile.TemporaryDirectory() as tmpdir:
-        engine = DailySuitabilityEngine(settings=settings, cache_dir=tmpdir)
+        engine = DailySuitabilityEngine(settings=settings, cache_dir=tmpdir, historical_feed="sip")
         
         t0 = pd.Timestamp("2026-06-01 20:00:00", tz="UTC")
         t1 = pd.Timestamp("2026-06-02 20:00:00", tz="UTC")
@@ -743,7 +743,7 @@ def test_market_timing_before_after_close_and_holiday() -> None:
 def test_calendar_failure_72_hour_fallback() -> None:
     settings = Settings()
     with tempfile.TemporaryDirectory() as tmpdir:
-        engine = DailySuitabilityEngine(settings=settings, cache_dir=tmpdir)
+        engine = DailySuitabilityEngine(settings=settings, cache_dir=tmpdir, historical_feed="sip")
         now = datetime.now(timezone.utc)
 
         # 1. Within 72 hours with calendar failure
@@ -821,4 +821,58 @@ def test_compatibility_safety_with_calendar_failure() -> None:
             mock_ecs.side_effect = Exception("Calendar service down")
             fallback = engine.load_stale_fallback_pool(eligible_symbols=["AAPL"])
             assert fallback is None
+
+
+def test_sip_request_15m_lag_and_ny_date_filtering() -> None:
+    settings = Settings()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        stock_client = MagicMock()
+        captured_requests = []
+
+        def mock_get_bars(req):
+            captured_requests.append(req)
+            # Scenario:
+            # fixed_now = 2026-06-03 02:30 UTC (June 2, 22:30 New York time during EDT).
+            # Current New York trading-day daily bar timestamp = 2026-06-02 04:00 UTC (midnight New York).
+            # Previous trading-day daily bar timestamp = 2026-06-01 04:00 UTC.
+            past_bar = MagicMock(
+                timestamp=datetime(2026, 6, 1, 4, 0, tzinfo=timezone.utc),
+                open=100.0, high=105.0, low=95.0, close=102.0, volume=500_000.0
+            )
+            today_bar = MagicMock(
+                timestamp=datetime(2026, 6, 2, 4, 0, tzinfo=timezone.utc),
+                open=102.0, high=108.0, low=100.0, close=106.0, volume=600_000.0
+            )
+            return MagicMock(data={"AAPL": [past_bar, today_bar]}, next_page_token=None)
+
+        stock_client.get_stock_bars.side_effect = mock_get_bars
+
+        engine = DailySuitabilityEngine(
+            settings=settings,
+            stock_client=stock_client,
+            cache_dir=tmpdir,
+            historical_feed="sip",
+        )
+
+        fixed_now = datetime(2026, 6, 3, 2, 30, tzinfo=timezone.utc)
+        res = engine.evaluate_universe(["AAPL"], now_utc=fixed_now, force_refresh=True)
+
+        # Verify StockBarsRequest received end = now_utc - 15 minutes
+        assert len(captured_requests) == 1
+        req = captured_requests[0]
+        req_end = req.end
+        if req_end.tzinfo is None:
+            req_end = req_end.replace(tzinfo=timezone.utc)
+        else:
+            req_end = req_end.astimezone(timezone.utc)
+        assert req_end == fixed_now - timedelta(minutes=15)
+        assert req.feed == DataFeed.SIP
+
+        # Verify metrics show valid_bar_count = 1 (today's NY trading day bar excluded by NY date filtering)
+        metrics = res.metrics.get("AAPL")
+        assert metrics is not None
+        assert metrics.valid_bar_count == 1
+        assert metrics.latest_close == 102.0  # past_bar close
+
+
 

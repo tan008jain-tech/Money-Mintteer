@@ -1,0 +1,251 @@
+from __future__ import annotations
+
+import logging
+from datetime import datetime, timezone, timedelta
+import pytest
+
+from money_mintter.domain import Side
+from money_mintter.config import Settings
+from money_mintter.core.live_bot import LivePortfolioManager, LiveMarketBot, normalize_symbol
+from money_mintter.strategy.ict.integration import ICTExecutionInstruction, ICTDeduplicationTracker
+
+
+def test_ict_instruction_capacity_block_recoverability(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MAX_PORTFOLIO_RISK_PCT", "3")
+    logger = logging.getLogger("test")
+    client = type("FakeClient", (), {"submit_order": lambda self, req: type("Ord", (), {"order_class": "bracket", "legs": [1, 2], "id": "123"})()})()
+    pm = LivePortfolioManager(client, logger)
+    settings = Settings()
+
+    inst = ICTExecutionInstruction(
+        symbol="AAPL",
+        side=Side.BUY,
+        entry_price=100.0,
+        stop_price=98.0,
+        target_price=105.0,
+        risk_pts=2.0,
+        timestamp=datetime.now(timezone.utc),
+        timestamp_ns=1000000,
+        zone_type="disp_fvg",
+        score=1.0,
+        zone_top=101.0,
+        zone_bot=99.0,
+        reason="ict_test",
+        is_diagnostic=False,
+    )
+
+    tracker = ICTDeduplicationTracker()
+
+    # Case 1: 5 positions locked -> capacity full (0 untraded slots) -> instruction blocked, not marked executed
+    locked_full = {"S1", "S2", "S3", "S4", "S5"}
+    sent_full = pm.submit_ict_instructions([inst], locked_full, 100000.0, settings, dedup_tracker=tracker)
+    assert sent_full == 0
+    assert not tracker.is_executed("AAPL", "bull", "disp_fvg", 101.0, 99.0)
+
+    # Case 2: Slot opens up (4 positions locked) -> instruction is recoverable and successfully submitted
+    locked_open = {"S1", "S2", "S3", "S4"}
+    sent_open = pm.submit_ict_instructions([inst], locked_open, 100000.0, settings, dedup_tracker=tracker)
+    assert sent_open == 1
+    assert tracker.is_executed("AAPL", "bull", "disp_fvg", 101.0, 99.0)
+
+    # Case 3: Subsequent submission attempt is deduplicated (0 orders sent)
+    sent_dup = pm.submit_ict_instructions([inst], locked_open, 100000.0, settings, dedup_tracker=tracker)
+    assert sent_dup == 0
+
+
+def test_run_cycle_uses_ict_exclusively_despite_legacy_strategy(monkeypatch: pytest.MonkeyPatch) -> None:
+    from money_mintter.core.live_bot import LiveMarketBot, LivePortfolioManager, MarketScanner
+
+    bot = LiveMarketBot.__new__(LiveMarketBot)
+    bot.logger = logging.getLogger("test")
+    bot.settings = Settings()
+    bot.trading_client = type("FakeClient", (), {"fetch_account": lambda self: (100000.0, 100000.0), "fetch_positions": lambda self: [], "submit_order": lambda self, req: type("Ord", (), {"order_class": "bracket", "legs": [1, 2], "id": "123"})()})()
+    bot.stock_client = type("StockClient", (), {})()
+    bot.kill_switch = type("KillSwitch", (), {"tripped": False, "check_daily_loss": lambda *args: None})()
+    bot.portfolio_manager = LivePortfolioManager(bot.trading_client, bot.logger)
+    bot.global_universe = ["AAPL"]
+    bot.latest_state = {}
+    bot.processed_signals = set()
+    bot.ict_dedup_tracker = ICTDeduplicationTracker()
+
+    # Assign a legacy strategy attribute without use_legacy=True
+    bot.strategy = object()
+
+    ict_called = False
+    legacy_called = False
+
+    class MockScanner:
+        last_scan_attempts = 1
+        last_scan_errors = 0
+        last_scan_connectivity_errors = 0
+        def scan_universe(self, now_utc, locked_symbols, strategy=None, daily_pool=None, dedup_tracker=None, **kwargs):
+            nonlocal ict_called, legacy_called
+            if dedup_tracker is not None or strategy is None:
+                ict_called = True
+                return (), []
+            else:
+                legacy_called = True
+                return [], []
+
+    bot.scanner = MockScanner()
+    monkeypatch.setattr(MarketScanner, "is_session_open", lambda sym, now: (True, "Open"))
+    monkeypatch.setattr(bot.portfolio_manager, "fetch_account_and_positions", lambda: (100000.0, 100000.0, 0.0, [], [], []))
+    monkeypatch.setattr(bot.portfolio_manager, "fetch_open_order_symbols", lambda: set())
+    monkeypatch.setattr(bot.portfolio_manager, "submit_ict_instructions", lambda *args, **kwargs: 0)
+
+    now_utc = datetime(2026, 10, 18, 10, 10, 0, tzinfo=timezone.utc)
+    bot.run_cycle(now_utc)
+
+    assert ict_called, "Production run_cycle() must invoke ICT scanning path"
+    assert not legacy_called, "Production run_cycle() must not invoke legacy strategy path even if self.strategy attribute exists"
+
+
+def test_ict_ambiguous_submission_accepted() -> None:
+    logger = logging.getLogger("test")
+    client = type("FakeClient", (), {"submit_order": lambda self, req: type("Ord", (), {"order_class": "bracket", "legs": [1, 2], "id": "123"})()})()
+    pm = LivePortfolioManager(client, logger)
+    settings = Settings()
+    tracker = ICTDeduplicationTracker()
+
+    inst = ICTExecutionInstruction(
+        symbol="AAPL", side=Side.BUY, entry_price=100.0, stop_price=98.0, target_price=105.0,
+        risk_pts=2.0, timestamp=datetime.now(timezone.utc), timestamp_ns=1000, zone_type="disp_fvg",
+        score=1.0, zone_top=101.0, zone_bot=99.0, reason="test"
+    )
+
+    sent = pm.submit_ict_instructions([inst], set(), 100000.0, settings, dedup_tracker=tracker)
+    assert sent == 1
+    assert tracker.is_executed("AAPL", "bull", "disp_fvg", 101.0, 99.0)
+    assert not tracker.is_pending("AAPL", "bull", "disp_fvg", 101.0, 99.0)
+
+
+def test_ict_ambiguous_submission_explicit_rejection() -> None:
+    logger = logging.getLogger("test")
+    class RejectClient:
+        def submit_order(self, req):
+            raise ValueError("Order rejected by broker: insufficient funds")
+    pm = LivePortfolioManager(RejectClient(), logger)
+    settings = Settings()
+    tracker = ICTDeduplicationTracker()
+
+    inst = ICTExecutionInstruction(
+        symbol="AAPL", side=Side.BUY, entry_price=100.0, stop_price=98.0, target_price=105.0,
+        risk_pts=2.0, timestamp=datetime.now(timezone.utc), timestamp_ns=1000, zone_type="disp_fvg",
+        score=1.0, zone_top=101.0, zone_bot=99.0, reason="test"
+    )
+
+    sent = pm.submit_ict_instructions([inst], set(), 100000.0, settings, dedup_tracker=tracker)
+    assert sent == 0
+    assert not tracker.is_executed("AAPL", "bull", "disp_fvg", 101.0, 99.0)
+    assert not tracker.is_pending("AAPL", "bull", "disp_fvg", 101.0, 99.0)
+
+
+def test_ict_ambiguous_submission_timeout_retains_pending() -> None:
+    logger = logging.getLogger("test")
+    class TimeoutClient:
+        def submit_order(self, req):
+            raise TimeoutError("Connection timed out")
+    pm = LivePortfolioManager(TimeoutClient(), logger)
+    settings = Settings()
+    tracker = ICTDeduplicationTracker()
+
+    inst = ICTExecutionInstruction(
+        symbol="AAPL", side=Side.BUY, entry_price=100.0, stop_price=98.0, target_price=105.0,
+        risk_pts=2.0, timestamp=datetime.now(timezone.utc), timestamp_ns=1000, zone_type="disp_fvg",
+        score=1.0, zone_top=101.0, zone_bot=99.0, reason="test"
+    )
+
+    # Cycle 1: Timeout occurs -> retains pending and blocks further orders
+    sent1 = pm.submit_ict_instructions([inst], set(), 100000.0, settings, dedup_tracker=tracker)
+    assert sent1 == 0
+    assert tracker.is_pending("AAPL", "bull", "disp_fvg", 101.0, 99.0)
+    assert not tracker.is_executed("AAPL", "bull", "disp_fvg", 101.0, 99.0)
+
+    # Cycle 2: Even with no broker order visible yet, pending state is retained and blocks resubmission
+    sent2 = pm.submit_ict_instructions([inst], set(), 100000.0, settings, dedup_tracker=tracker, locked_normalized=set())
+    assert sent2 == 0
+    assert tracker.is_pending("AAPL", "bull", "disp_fvg", 101.0, 99.0)
+
+
+def test_ict_ambiguous_submission_reconciliation() -> None:
+    logger = logging.getLogger("test")
+    client = type("FakeClient", (), {})()
+    pm = LivePortfolioManager(client, logger)
+    settings = Settings()
+    tracker = ICTDeduplicationTracker()
+
+    # Simulate timeout placing symbol in pending
+    tracker.mark_pending("AAPL", "bull", "disp_fvg", 101.0, 99.0)
+    assert tracker.is_pending("AAPL", "bull", "disp_fvg", 101.0, 99.0)
+
+    bot = LiveMarketBot.__new__(LiveMarketBot)
+    bot.logger = logger
+    bot.settings = settings
+    bot.trading_client = client
+    bot.portfolio_manager = pm
+    bot.ict_dedup_tracker = tracker
+
+    open_order_symbols = {"AAPL"}
+    locked_normalized = {normalize_symbol("AAPL")} | open_order_symbols
+    if bot.ict_dedup_tracker is not None:
+        for p_sym in list(bot.ict_dedup_tracker.pending_symbols):
+            if p_sym in locked_normalized:
+                bot.ict_dedup_tracker.resolve_pending_to_executed_for_symbol(p_sym)
+
+    assert not tracker.is_pending("AAPL", "bull", "disp_fvg", 101.0, 99.0)
+    assert tracker.is_executed("AAPL", "bull", "disp_fvg", 101.0, 99.0)
+
+
+def test_ict_ambiguous_submission_generic_exception_retains_pending() -> None:
+    logger = logging.getLogger("test")
+    class GenericErrorClient:
+        def submit_order(self, req):
+            raise RuntimeError("Unexpected internal system error")
+    pm = LivePortfolioManager(GenericErrorClient(), logger)
+    settings = Settings()
+    tracker = ICTDeduplicationTracker()
+
+    inst = ICTExecutionInstruction(
+        symbol="AAPL", side=Side.BUY, entry_price=100.0, stop_price=98.0, target_price=105.0,
+        risk_pts=2.0, timestamp=datetime.now(timezone.utc), timestamp_ns=1000, zone_type="disp_fvg",
+        score=1.0, zone_top=101.0, zone_bot=99.0, reason="test"
+    )
+
+    # Cycle 1: Generic unexpected exception occurs -> retains pending and blocks further submissions
+    sent1 = pm.submit_ict_instructions([inst], set(), 100000.0, settings, dedup_tracker=tracker)
+    assert sent1 == 0
+    assert tracker.is_pending("AAPL", "bull", "disp_fvg", 101.0, 99.0)
+    assert not tracker.is_executed("AAPL", "bull", "disp_fvg", 101.0, 99.0)
+
+    # Cycle 2: Pending state is retained, preventing resubmission
+    sent2 = pm.submit_ict_instructions([inst], set(), 100000.0, settings, dedup_tracker=tracker, locked_normalized=set())
+    assert sent2 == 0
+    assert tracker.is_pending("AAPL", "bull", "disp_fvg", 101.0, 99.0)
+
+
+def test_ict_ambiguous_submission_http_408_retains_pending() -> None:
+    logger = logging.getLogger("test")
+    from alpaca.common.exceptions import APIError
+    class HTTP408Client:
+        def submit_order(self, req):
+            err = APIError("Request Timeout")
+            err.status_code = 408
+            raise err
+    pm = LivePortfolioManager(HTTP408Client(), logger)
+    settings = Settings()
+    tracker = ICTDeduplicationTracker()
+
+    inst = ICTExecutionInstruction(
+        symbol="AAPL", side=Side.BUY, entry_price=100.0, stop_price=98.0, target_price=105.0,
+        risk_pts=2.0, timestamp=datetime.now(timezone.utc), timestamp_ns=1000, zone_type="disp_fvg",
+        score=1.0, zone_top=101.0, zone_bot=99.0, reason="test"
+    )
+
+    sent1 = pm.submit_ict_instructions([inst], set(), 100000.0, settings, dedup_tracker=tracker)
+    assert sent1 == 0
+    assert tracker.is_pending("AAPL", "bull", "disp_fvg", 101.0, 99.0)
+    assert not tracker.is_executed("AAPL", "bull", "disp_fvg", 101.0, 99.0)
+
+
+
+
