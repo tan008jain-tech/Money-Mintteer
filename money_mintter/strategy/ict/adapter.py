@@ -67,6 +67,7 @@ class ICTAdapterResult:
     constituent_count: int
     api_success: bool
     source_coverage_known: bool
+    b15_coverage: tuple[dict[str, Any], ...] = ()
 
 
 def dt_to_ns(dt: datetime) -> int:
@@ -202,7 +203,9 @@ def adapt_market_data(
     b5_timestamps = {c.timestamp for c in filtered_b5}
 
     # Track observed 5-minute constituent count and exact alignment per 15-minute bucket
-    b15_dicts_raw = []
+    b15_coverage_list = []
+    filtered_b15_list = []
+    
     for c15 in b15_candles:
         d15 = candle_to_ict_dict(c15)
         bucket_start = c15.timestamp
@@ -211,60 +214,29 @@ def adapt_market_data(
             bucket_start + timedelta(minutes=5),
             bucket_start + timedelta(minutes=10),
         ]
-        # Validate exact constituents present in filtered_b5 at exact expected timestamps
         constituents = [c for c in filtered_b5 if bucket_start <= c.timestamp < bucket_start + timedelta(minutes=15)]
-        d15["constituent_count"] = len(constituents)
-        d15["bucket_start"] = bucket_start
-        misaligned = any(ts not in b5_timestamps for ts in expected_ts)
-        d15["misaligned"] = misaligned or (len(constituents) != 3)
-        b15_dicts_raw.append(d15)
-    b15_dicts_raw = tuple(b15_dicts_raw)
-
-    dr5 = build_dr(b5_dicts)
-    dr15_raw = build_dr(b15_dicts_raw)
-    all_dates = sorted(list(dr5.keys()))
-
-    # Validate and filter b15 per session date:
-    # - Require constituent_count == 3 and exact 5m constituent alignment.
-    # - Fail closed on internal missing/incomplete buckets or internal gaps (entirely absent internal buckets).
-    # - Drop only legitimate trailing incomplete buckets.
-    # - Rebuild dr15 strictly from the final filtered b15 array.
-    filtered_b15_list = []
-    for d in all_dates:
-        if d not in dr15_raw:
-            continue
-        start_i, end_i = dr15_raw[d]
-        day_bars = list(b15_dicts_raw[start_i:end_i])
+        constituent_count = len(constituents)
+        misaligned = any(ts not in b5_timestamps for ts in expected_ts) or (constituent_count != 3)
         
-        # Find index of last complete valid bar (constituent_count == 3 and not misaligned)
-        last_complete_idx = -1
-        for idx, bar in enumerate(day_bars):
-            if bar.get("constituent_count") == 3 and not bar.get("misaligned", False):
-                last_complete_idx = idx
+        status = "complete" if constituent_count == 3 and not misaligned else ("partial" if constituent_count > 0 else "unobserved")
+        
+        coverage_entry = {
+            "bucket_start": bucket_start,
+            "constituent_count": constituent_count,
+            "status": status,
+            "misaligned": misaligned,
+        }
+        b15_coverage_list.append(coverage_entry)
 
-        if last_complete_idx == -1:
-            continue
+        if constituent_count == 3 and not misaligned:
+            d15["constituent_count"] = constituent_count
+            filtered_b15_list.append({k: v for k, v in d15.items() if k not in ("bucket_start", "misaligned")})
 
-        # Validate up to last_complete_idx: fail closed on any missing, incomplete, or misaligned internal bar
-        for idx in range(last_complete_idx + 1):
-            cnt = day_bars[idx].get("constituent_count")
-            misaligned = day_bars[idx].get("misaligned", False)
-            if cnt != 3 or misaligned:
-                raise ValueError(f"Internal missing or incomplete 15m bucket detected at index {idx} on date {d} (constituent_count={cnt}, misaligned={misaligned}); failing closed.")
-
-        # Check internal continuity (no missing buckets between index 0 and last_complete_idx)
-        valid_day_bars = day_bars[:last_complete_idx + 1]
-        for i in range(1, len(valid_day_bars)):
-            prev_time = valid_day_bars[i-1]["bucket_start"]
-            curr_time = valid_day_bars[i]["bucket_start"]
-            if curr_time - prev_time != timedelta(minutes=15):
-                raise ValueError(f"Entirely absent internal 15m bucket gap detected between {prev_time} and {curr_time} on date {d}; failing closed.")
-
-        for bar in valid_day_bars:
-            filtered_b15_list.append({k: v for k, v in bar.items() if k not in ("bucket_start", "misaligned")})
-
+    b15_coverage = tuple(b15_coverage_list)
     b15_dicts = tuple(filtered_b15_list)
+    dr5 = build_dr(b5_dicts)
     dr15 = build_dr(b15_dicts)
+    all_dates = sorted(list(dr5.keys()))
 
     constituent_count = len(filtered_b5)
 
@@ -292,4 +264,5 @@ def adapt_market_data(
         constituent_count=constituent_count,
         api_success=True,
         source_coverage_known=False,
+        b15_coverage=b15_coverage,
     )

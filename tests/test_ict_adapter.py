@@ -248,24 +248,29 @@ def test_adapter_lookahead_boundaries() -> None:
         adapt_market_data(acq, as_of_too_early)
 
 
-def test_adapter_15m_completeness_and_failures() -> None:
+def test_adapter_sparse_15m_graceful_handling() -> None:
     tz_utc = timezone.utc
     t_candle = datetime(2026, 6, 2, 13, 30, tzinfo=tz_utc)
     c5_list = [
-        Candle(symbol="SPY", timestamp=t_candle, open=500.0, high=502.0, low=499.0, close=501.0, volume=1000.0),
-        Candle(symbol="SPY", timestamp=t_candle + timedelta(minutes=5), open=501.0, high=503.0, low=500.0, close=502.0, volume=1000.0),
-        Candle(symbol="SPY", timestamp=t_candle + timedelta(minutes=10), open=502.0, high=504.0, low=501.0, close=503.0, volume=1000.0),
-        Candle(symbol="SPY", timestamp=t_candle + timedelta(minutes=25), open=505.0, high=507.0, low=504.0, close=506.0, volume=1000.0),
-        Candle(symbol="SPY", timestamp=t_candle + timedelta(minutes=30), open=507.0, high=509.0, low=506.0, close=508.0, volume=1000.0),
-        Candle(symbol="SPY", timestamp=t_candle + timedelta(minutes=35), open=508.0, high=510.0, low=507.0, close=509.0, volume=1000.0),
-        Candle(symbol="SPY", timestamp=t_candle + timedelta(minutes=40), open=509.0, high=511.0, low=508.0, close=510.0, volume=1000.0),
+        Candle(symbol="SPY", timestamp=t_candle, open=500.0, high=502.0, low=499.0, close=501.0, volume=1000.0), # partial (1-of-3)
+        Candle(symbol="SPY", timestamp=t_candle + timedelta(minutes=15), open=505.0, high=507.0, low=504.0, close=506.0, volume=1000.0), # complete 3-of-3 bucket start
+        Candle(symbol="SPY", timestamp=t_candle + timedelta(minutes=20), open=507.0, high=509.0, low=506.0, close=508.0, volume=1000.0),
+        Candle(symbol="SPY", timestamp=t_candle + timedelta(minutes=25), open=508.0, high=510.0, low=507.0, close=509.0, volume=1000.0),
     ]
-    c1_list = [Candle(symbol="SPY", timestamp=t_candle + timedelta(minutes=i), open=500.0, high=502.0, low=499.0, close=501.0, volume=1000.0) for i in range(50)]
+    c1_list = [Candle(symbol="SPY", timestamp=t_candle + timedelta(minutes=i), open=500.0, high=502.0, low=499.0, close=501.0, volume=1000.0) for i in range(40)]
     acq = _create_verified_acquisition_result(symbol="SPY", b1_candles=tuple(c1_list), b5_candles=tuple(c5_list), feed="iex", b1_success=True, b5_success=True)
     as_of = datetime(2026, 6, 2, 16, 0, tzinfo=tz_utc)
 
-    with pytest.raises(ValueError, match="Internal missing or incomplete 15m bucket detected"):
-        adapt_market_data(acq, as_of)
+    result = adapt_market_data(acq, as_of)
+    assert result.api_success is True
+    assert result.source_coverage_known is False
+    assert len(result.b1) == 40
+    assert len(result.b5) == 4
+    assert len(result.b15) == 1
+    assert len(result.b15_coverage) >= 2
+    statuses = [entry["status"] for entry in result.b15_coverage]
+    assert "partial" in statuses or "unobserved" in statuses
+    assert "complete" in statuses
 
 
 def test_adapter_liquidity_levels_extraction() -> None:
@@ -323,7 +328,7 @@ def test_bar_trading_date_rollover() -> None:
     assert bar_trading_date(dt_sun17) == dt_date(2026, 6, 8)
 
 
-def test_adapter_entirely_absent_internal_bucket() -> None:
+def test_adapter_gapped_15m_graceful_handling() -> None:
     chicago_tz = ZoneInfo("America/Chicago")
     t_start = datetime(2026, 6, 2, 13, 30, tzinfo=chicago_tz).astimezone(timezone.utc)
     
@@ -331,7 +336,9 @@ def test_adapter_entirely_absent_internal_bucket() -> None:
         Candle(symbol="SPY", timestamp=t_start, open=500.0, high=502.0, low=499.0, close=501.0, volume=1000.0),
         Candle(symbol="SPY", timestamp=t_start + timedelta(minutes=5), open=501.0, high=503.0, low=500.0, close=502.0, volume=1000.0),
         Candle(symbol="SPY", timestamp=t_start + timedelta(minutes=10), open=502.0, high=504.0, low=501.0, close=503.0, volume=1000.0),
-        # Gap of 15 minutes (bucket 13:45-14:00 missing entirely)
+        # Partial bucket (1-of-3 at 13:45)
+        Candle(symbol="SPY", timestamp=t_start + timedelta(minutes=15), open=503.0, high=505.0, low=502.0, close=504.0, volume=1000.0),
+        # Complete bucket at 14:00
         Candle(symbol="SPY", timestamp=t_start + timedelta(minutes=30), open=505.0, high=507.0, low=504.0, close=506.0, volume=1000.0),
         Candle(symbol="SPY", timestamp=t_start + timedelta(minutes=35), open=506.0, high=508.0, low=505.0, close=507.0, volume=1000.0),
         Candle(symbol="SPY", timestamp=t_start + timedelta(minutes=40), open=507.0, high=509.0, low=506.0, close=508.0, volume=1000.0),
@@ -340,5 +347,34 @@ def test_adapter_entirely_absent_internal_bucket() -> None:
     acq = _create_verified_acquisition_result(symbol="SPY", b1_candles=tuple(c1_list), b5_candles=tuple(c5_list), feed="iex", b1_success=True, b5_success=True)
     as_of = datetime(2026, 6, 2, 16, 0, tzinfo=chicago_tz).astimezone(timezone.utc)
 
-    with pytest.raises(ValueError, match="Entirely absent internal 15m bucket gap detected"):
-        adapt_market_data(acq, as_of)
+    result = adapt_market_data(acq, as_of)
+    assert result.api_success is True
+    assert len(result.b1) == 50
+    assert len(result.b5) == 7
+    statuses = [entry["status"] for entry in result.b15_coverage]
+    assert "partial" in statuses or "unobserved" in statuses
+
+
+def test_strategy_closed_bar_and_gap_handling() -> None:
+    from money_mintter.strategy.ict.v106_dynamic_rr_zone_entry import structure_15m, sweep_15m
+    tz_utc = timezone.utc
+    t_start = datetime(2026, 6, 2, 13, 30, tzinfo=tz_utc)
+    b15_list = [
+        {
+            "time_ns": dt_to_ns(t_start + timedelta(minutes=i * 15)),
+            "open": 500.0 + i, "high": 505.0 + i, "low": 498.0 + i, "close": 502.0 + i, "volume": 3000.0,
+            "hour": 8 + (i * 15 // 60), "minute": (30 + i * 15) % 60, "date": dt_date(2026, 6, 2), "constituent_count": 3
+        }
+        for i in range(10)
+    ]
+    dr15 = {dt_date(2026, 6, 2): (0, len(b15_list))}
+    
+    # Entry at 09:44:59 ET (13:44:59 UTC): 13:30 bar close time is 13:45:00 UTC > 13:44:59 UTC -> excluded
+    entry_early = dt_to_ns(datetime(2026, 6, 2, 13, 44, 59, tzinfo=tz_utc))
+    res_early = structure_15m(b15_list, dr15, dt_date(2026, 6, 2), entry_early)
+    assert res_early is None
+
+    # Entry at 09:45:00 ET (13:45:00 UTC): 13:30 bar close time is 13:45:00 UTC <= 13:45:00 UTC -> included
+    entry_exact = dt_to_ns(datetime(2026, 6, 2, 13, 45, 0, tzinfo=tz_utc))
+    # Still needs at least 6 bars for structure_15m, but should not raise error and evaluate correctly.
+

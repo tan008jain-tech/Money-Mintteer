@@ -192,16 +192,32 @@ def cisd_5m(b5, idx, ds, lookback=30, recency=10):
 def structure_15m(b15, dr15, d, entry_ns):
     if d not in dr15: return None
     ds, de = dr15[d]
-    end_idx = ds
+    end_idx = None
     for i in range(ds, de):
         if i >= len(b15): break
-        if b15[i]["time_ns"] > entry_ns: break
-        end_idx = i
-    lookback_start = max(ds, end_idx - 60)
+        close_time_ns = b15[i]["time_ns"] + 15 * NS_MIN
+        if close_time_ns <= entry_ns:
+            end_idx = i
+        else:
+            break
+    if end_idx is None: return None
+
+    # Find latest contiguous segment ending at end_idx
+    seg_start = end_idx
+    for i in range(end_idx, ds, -1):
+        if i >= len(b15): break
+        if b15[i]["time_ns"] - b15[i-1]["time_ns"] == 15 * NS_MIN:
+            seg_start = i - 1
+        else:
+            break
+
+    lookback_start = max(seg_start, end_idx - 60)
     if end_idx - lookback_start < 6: return None
     shs = []; sls = []
     for i in range(lookback_start + 1, end_idx):
         if i + 1 >= len(b15): break
+        if b15[i]["time_ns"] - b15[i-1]["time_ns"] != 15 * NS_MIN: continue
+        if b15[i+1]["time_ns"] - b15[i]["time_ns"] != 15 * NS_MIN: continue
         if b15[i]["high"] > b15[i-1]["high"] and b15[i]["high"] > b15[i+1]["high"]:
             shs.append((b15[i]["high"], i))
         if b15[i]["low"] < b15[i-1]["low"] and b15[i]["low"] < b15[i+1]["low"]:
@@ -211,11 +227,13 @@ def structure_15m(b15, dr15, d, entry_ns):
         last_sh = shs[-1][0]
         for i in range(shs[-1][1] + 1, end_idx + 1):
             if i >= len(b15): break
+            if i > shs[-1][1] + 1 and b15[i]["time_ns"] - b15[i-1]["time_ns"] != 15 * NS_MIN: break
             if b15[i]["close"] > last_sh: return "bull"
     if shs[-1][0] < shs[-2][0]:
         last_sl = sls[-1][0]
         for i in range(sls[-1][1] + 1, end_idx + 1):
             if i >= len(b15): break
+            if i > sls[-1][1] + 1 and b15[i]["time_ns"] - b15[i-1]["time_ns"] != 15 * NS_MIN: break
             if b15[i]["close"] < last_sl: return "bear"
     return None
 
@@ -226,17 +244,23 @@ def sweep_15m(b15, dr15, d, entry_ns, liq_levels, direction, lookback=8):
     """Check if there was a sweep on 15m bars near entry time matching direction."""
     if d not in dr15: return False
     ds, de = dr15[d]
-    # Find 15m bar at entry time
+    # Find 15m bar at entry time with closed-bar eligibility
     entry_idx = None
     for i in range(ds, de):
         if i >= len(b15): break
-        if b15[i]["time_ns"] > entry_ns: break
-        entry_idx = i
+        close_time_ns = b15[i]["time_ns"] + 15 * NS_MIN
+        if close_time_ns <= entry_ns:
+            entry_idx = i
+        else:
+            break
     if entry_idx is None: return False
 
-    # Check for sweep in recent 15m bars
+    # Check for sweep in recent 15m bars, stopping at gaps
     for i in range(entry_idx, max(ds, entry_idx - lookback) - 1, -1):
         if i >= len(b15): continue
+        if i < entry_idx:
+            if b15[i+1]["time_ns"] - b15[i]["time_ns"] != 15 * NS_MIN:
+                break
         bar = b15[i]; br = bar["high"] - bar["low"]
         if br <= 0: continue
         for lp, lt in liq_levels:
