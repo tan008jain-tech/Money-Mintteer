@@ -247,5 +247,52 @@ def test_ict_ambiguous_submission_http_408_retains_pending() -> None:
     assert not tracker.is_executed("AAPL", "bull", "disp_fvg", 101.0, 99.0)
 
 
+def test_market_scanner_ict_historical_lookback_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    from money_mintter.core.live_bot import MarketScanner, HISTORY_DAYS
+    from money_mintter.strategy import Candle
+
+    logger = logging.getLogger("test")
+
+    class FakeStockClient:
+        def get_stock_bars(self, req):
+            return type("Resp", (), {"data": {}, "next_page_token": None})()
+
+    stock_client = FakeStockClient()
+    scanner = MarketScanner(["AAPL"], stock_client, logger)
+
+    now_utc = datetime(2026, 10, 18, 12, 0, 0, tzinfo=timezone.utc)
+
+    recent_ts = now_utc - timedelta(minutes=10)
+    cached_candles = [
+        Candle(timestamp=recent_ts - timedelta(minutes=i), open=100.0, high=101.0, low=99.0, close=100.0, volume=1000.0, symbol="AAPL")
+        for i in range(5)
+    ]
+    scanner._candle_cache["AAPL"] = cached_candles
+
+    mock_candidate = type("Candidate", (), {"symbol": "AAPL"})()
+    monkeypatch.setattr("money_mintter.core.live_bot.select_layer4_candidates", lambda pool, bars, max_candidates: [mock_candidate])
+
+    class CaptureStop(BaseException):
+        pass
+
+    captured_start = None
+    captured_end = None
+    def mock_fetch_ict(client, symbol, start_dt, end_dt):
+        nonlocal captured_start, captured_end
+        captured_start = start_dt
+        captured_end = end_dt
+        raise CaptureStop("Captured arguments successfully")
+
+    monkeypatch.setattr("money_mintter.core.live_bot.fetch_ict_market_data", mock_fetch_ict)
+    monkeypatch.setattr(MarketScanner, "is_session_open", lambda sym, now: (True, "Open"))
+
+    with pytest.raises(CaptureStop):
+        scanner.scan_universe(now_utc=now_utc, locked_symbols=set(), strategy=None)
+
+    expected_start = now_utc - timedelta(days=HISTORY_DAYS)
+    assert captured_start == expected_start, f"Expected start_dt {expected_start}, got {captured_start}"
+    assert captured_start != recent_ts - timedelta(minutes=15)
+    assert captured_end == now_utc
+
 
 

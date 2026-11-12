@@ -487,14 +487,7 @@ class MarketScanner:
             for item in layer4_selected:
                 clean_symbol = item.symbol
                 try:
-                    cached = self._candle_cache.get(clean_symbol, [])
-                    if cached:
-                        last_ts = max(c.timestamp for c in cached)
-                        if last_ts.tzinfo is None:
-                            last_ts = last_ts.replace(tzinfo=timezone.utc)
-                        start_dt = last_ts - timedelta(minutes=15)
-                    else:
-                        start_dt = now_utc - timedelta(days=HISTORY_DAYS)
+                    start_dt = now_utc - timedelta(days=HISTORY_DAYS)
                     if start_dt.tzinfo is None:
                         start_dt = start_dt.replace(tzinfo=timezone.utc)
 
