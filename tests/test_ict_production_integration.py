@@ -277,7 +277,7 @@ def test_market_scanner_ict_historical_lookback_window(monkeypatch: pytest.Monke
 
     captured_start = None
     captured_end = None
-    def mock_fetch_ict(client, symbol, start_dt, end_dt):
+    def mock_fetch_ict(client, symbol, start_dt, end_dt, feed="iex"):
         nonlocal captured_start, captured_end
         captured_start = start_dt
         captured_end = end_dt
