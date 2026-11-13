@@ -1270,6 +1270,14 @@ class LiveMarketBot:
                         if generated_at.tzinfo is None:
                             generated_at = generated_at.replace(tzinfo=timezone.utc)
                         self._universe_last_fetched = generated_at.astimezone(timezone.utc)
+                        if cached_l2.stale:
+                            # A validated stale pool is safe to retain, but retry on the
+                            # configured cooldown rather than hitting historical APIs every scan.
+                            self._universe_last_failed = now_utc
+                            self.logger.warning(
+                                "[Discovery] Layer 2 returned a compatible stale pool; "
+                                f"retry cooldown started for {self._universe_retry_cooldown_minutes}m."
+                            )
                 except Exception as cache_exc:
                     self.logger.warning(f"[Discovery] Could not read Layer 2 generation timestamp: {cache_exc}")
                 if not self._cached_universe:
