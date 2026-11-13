@@ -79,6 +79,9 @@ class Settings:
     max_single_position_pct: float = field(
         default_factory=lambda: _env_percent("MAX_SINGLE_POSITION_PCT", 0.90)
     )
+    max_open_positions: int = field(
+        default_factory=lambda: _env_int("MAX_OPEN_POSITIONS", 5)
+    )
     commission_per_order_usd: float = field(
         default_factory=lambda: _env_float("COMMISSION_PER_ORDER_USD", 0.35)
     )
@@ -222,6 +225,8 @@ class Settings:
             raise ValueError("max position percentage must be in (0, 1]")
         if not 0 < self.max_single_position_pct <= 1:
             raise ValueError("MAX_SINGLE_POSITION_PCT must be in (0, 1]")
+        if self.max_open_positions <= 0:
+            raise ValueError("MAX_OPEN_POSITIONS must be positive")
         if self.commission_per_order_usd < 0:
             raise ValueError("COMMISSION_PER_ORDER_USD must be >= 0")
         if self.commission_per_share_usd < 0:
