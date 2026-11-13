@@ -1244,7 +1244,8 @@ class LiveMarketBot:
 
     def _get_or_refresh_universe(self, now_utc: datetime) -> list[str]:
         refresh_interval_expired = (
-            self._universe_last_fetched is None
+            not self._cached_universe
+            or self._universe_last_fetched is None
             or (now_utc - self._universe_last_fetched) > timedelta(hours=24)
         )
         cooldown_delta = timedelta(minutes=self._universe_retry_cooldown_minutes)
@@ -1282,9 +1283,11 @@ class LiveMarketBot:
                 except Exception as cache_exc:
                     self.logger.warning(f"[Discovery] Could not read Layer 2 generation timestamp: {cache_exc}")
                 if not self._cached_universe:
+                    self._universe_last_failed = now_utc
                     self.logger.warning(
                         "[Discovery] No eligible Layer 2 candidates. New entries disabled; "
-                        "account and position management remain active."
+                        f"retry cooldown started for {self._universe_retry_cooldown_minutes}m. "
+                        "Account and position management remain active."
                     )
             except Exception as exc:
                 self._universe_last_failed = now_utc
