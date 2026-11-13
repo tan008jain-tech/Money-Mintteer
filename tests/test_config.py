@@ -167,11 +167,19 @@ def test_market_scanner_with_fake_strategy_signal(monkeypatch: pytest.MonkeyPatc
             end_dt = getattr(req, 'end', datetime.now(timezone.utc))
             if end_dt.tzinfo is None:
                 end_dt = end_dt.replace(tzinfo=timezone.utc)
-            minute = (end_dt.minute // 5) * 5
-            bar_time = end_dt.replace(minute=minute, second=0, microsecond=0)
-            expected_last_bar_start = (bar_time - timedelta(minutes=5)).replace(tzinfo=timezone.utc)
-            bars = [FakeBar((expected_last_bar_start - timedelta(minutes=5 * i)).replace(tzinfo=timezone.utc), 100, 101, 99, 100, 1000) for i in range(50, 0, -1)]
-            bars.append(FakeBar(expected_last_bar_start.replace(tzinfo=timezone.utc), 100, 150, 50, 100, 1000))
+            expected_last_1m_bar_start = (
+                end_dt.replace(second=0, microsecond=0) - timedelta(minutes=1)
+            ).replace(tzinfo=timezone.utc)
+            bars = [
+                FakeBar(
+                    (expected_last_1m_bar_start - timedelta(minutes=i)).replace(tzinfo=timezone.utc),
+                    100, 101, 99, 100, 1000,
+                )
+                for i in range(50, 0, -1)
+            ]
+            bars.append(
+                FakeBar(expected_last_1m_bar_start, 100, 150, 50, 100, 1000)
+            )
             return FakeBarsResponse({req.symbol_or_symbols: bars})
 
     class FakeStrategyWithSignal:
@@ -240,11 +248,19 @@ def test_market_scanner_with_no_signal(monkeypatch: pytest.MonkeyPatch) -> None:
             end_dt = getattr(req, 'end', datetime.now(timezone.utc))
             if end_dt.tzinfo is None:
                 end_dt = end_dt.replace(tzinfo=timezone.utc)
-            minute = (end_dt.minute // 5) * 5
-            bar_time = end_dt.replace(minute=minute, second=0, microsecond=0)
-            expected_last_bar_start = (bar_time - timedelta(minutes=5)).replace(tzinfo=timezone.utc)
-            bars = [FakeBar((expected_last_bar_start - timedelta(minutes=5 * i)).replace(tzinfo=timezone.utc), 100, 101, 99, 100, 1000) for i in range(50, 0, -1)]
-            bars.append(FakeBar(expected_last_bar_start.replace(tzinfo=timezone.utc), 100, 150, 50, 100, 1000))
+            expected_last_1m_bar_start = (
+                end_dt.replace(second=0, microsecond=0) - timedelta(minutes=1)
+            ).replace(tzinfo=timezone.utc)
+            bars = [
+                FakeBar(
+                    (expected_last_1m_bar_start - timedelta(minutes=i)).replace(tzinfo=timezone.utc),
+                    100, 101, 99, 100, 1000,
+                )
+                for i in range(50, 0, -1)
+            ]
+            bars.append(
+                FakeBar(expected_last_1m_bar_start, 100, 150, 50, 100, 1000)
+            )
             return FakeBarsResponse({req.symbol_or_symbols: bars})
 
     class FakeStrategyNoSignal:
@@ -390,11 +406,19 @@ def test_run_cycle_counts_and_single_scan(monkeypatch: pytest.MonkeyPatch) -> No
             end_dt = getattr(req, 'end', datetime.now(timezone.utc))
             if end_dt.tzinfo is None:
                 end_dt = end_dt.replace(tzinfo=timezone.utc)
-            minute = (end_dt.minute // 5) * 5
-            bar_time = end_dt.replace(minute=minute, second=0, microsecond=0)
-            expected_last_bar_start = (bar_time - timedelta(minutes=5)).replace(tzinfo=timezone.utc)
-            bars = [FakeBar((expected_last_bar_start - timedelta(minutes=5 * i)).replace(tzinfo=timezone.utc), 100, 101, 99, 100, 1000) for i in range(50, 0, -1)]
-            bars.append(FakeBar(expected_last_bar_start.replace(tzinfo=timezone.utc), 100, 150, 50, 100, 1000))
+            expected_last_1m_bar_start = (
+                end_dt.replace(second=0, microsecond=0) - timedelta(minutes=1)
+            ).replace(tzinfo=timezone.utc)
+            bars = [
+                FakeBar(
+                    (expected_last_1m_bar_start - timedelta(minutes=i)).replace(tzinfo=timezone.utc),
+                    100, 101, 99, 100, 1000,
+                )
+                for i in range(50, 0, -1)
+            ]
+            bars.append(
+                FakeBar(expected_last_1m_bar_start, 100, 150, 50, 100, 1000)
+            )
             return FakeBarsResponse({req.symbol_or_symbols: bars})
 
     class FakeStrategy:
@@ -494,11 +518,19 @@ def test_symbol_with_open_order_does_not_produce_order(monkeypatch: pytest.Monke
             end_dt = getattr(req, 'end', datetime.now(timezone.utc))
             if end_dt.tzinfo is None:
                 end_dt = end_dt.replace(tzinfo=timezone.utc)
-            minute = (end_dt.minute // 5) * 5
-            bar_time = end_dt.replace(minute=minute, second=0, microsecond=0)
-            expected_last_bar_start = (bar_time - timedelta(minutes=5)).replace(tzinfo=timezone.utc)
-            bars = [FakeBar((expected_last_bar_start - timedelta(minutes=5 * i)).replace(tzinfo=timezone.utc), 100, 101, 99, 100, 1000) for i in range(50, 0, -1)]
-            bars.append(FakeBar(expected_last_bar_start.replace(tzinfo=timezone.utc), 100, 150, 50, 100, 1000))
+            expected_last_1m_bar_start = (
+                end_dt.replace(second=0, microsecond=0) - timedelta(minutes=1)
+            ).replace(tzinfo=timezone.utc)
+            bars = [
+                FakeBar(
+                    (expected_last_1m_bar_start - timedelta(minutes=i)).replace(tzinfo=timezone.utc),
+                    100, 101, 99, 100, 1000,
+                )
+                for i in range(50, 0, -1)
+            ]
+            bars.append(
+                FakeBar(expected_last_1m_bar_start, 100, 150, 50, 100, 1000)
+            )
             return FakeBarsResponse({req.symbol_or_symbols: bars})
 
     class FakeStrategy:
@@ -586,11 +618,19 @@ def test_equity_position_blocks_signal(monkeypatch: pytest.MonkeyPatch) -> None:
     class FakeStockClient:
         def get_stock_bars(self, req):
             end_dt = getattr(req, 'end', datetime.now(timezone.utc))
-            minute = (end_dt.minute // 5) * 5
-            bar_time = end_dt.replace(minute=minute, second=0, microsecond=0)
-            expected_last_bar_start = bar_time - timedelta(minutes=5)
-            bars = [FakeBar(expected_last_bar_start - timedelta(minutes=5 * i), 150, 155, 149, 150, 1000) for i in range(50, 0, -1)]
-            bars.append(FakeBar(expected_last_bar_start, 150, 155, 149, 150, 1000))
+            expected_last_1m_bar_start = (
+                end_dt.replace(second=0, microsecond=0) - timedelta(minutes=1)
+            )
+            bars = [
+                FakeBar(
+                    expected_last_1m_bar_start - timedelta(minutes=i),
+                    150, 155, 149, 150, 1000,
+                )
+                for i in range(50, 0, -1)
+            ]
+            bars.append(
+                FakeBar(expected_last_1m_bar_start, 150, 155, 149, 150, 1000)
+            )
             return FakeBarsResponse({req.symbol_or_symbols: bars})
 
     class FakeStrategy:
@@ -1388,11 +1428,19 @@ def test_consecutive_submission_failures(monkeypatch: pytest.MonkeyPatch) -> Non
             end_dt = getattr(req, 'end', datetime(2026, 10, 18, 10, 10, 0, tzinfo=timezone.utc))
             if end_dt.tzinfo is None:
                 end_dt = end_dt.replace(tzinfo=timezone.utc)
-            minute = (end_dt.minute // 5) * 5
-            bar_time = end_dt.replace(minute=minute, second=0, microsecond=0)
-            expected_last_bar_start = (bar_time - timedelta(minutes=5)).replace(tzinfo=timezone.utc)
-            bars = [FakeBar((expected_last_bar_start - timedelta(minutes=5 * i)).replace(tzinfo=timezone.utc), 100, 101, 99, 100, 1000) for i in range(50, 0, -1)]
-            bars.append(FakeBar(expected_last_bar_start.replace(tzinfo=timezone.utc), 100, 150, 50, 100, 1000))
+            expected_last_1m_bar_start = (
+                end_dt.replace(second=0, microsecond=0) - timedelta(minutes=1)
+            ).replace(tzinfo=timezone.utc)
+            bars = [
+                FakeBar(
+                    (expected_last_1m_bar_start - timedelta(minutes=i)).replace(tzinfo=timezone.utc),
+                    100, 101, 99, 100, 1000,
+                )
+                for i in range(50, 0, -1)
+            ]
+            bars.append(
+                FakeBar(expected_last_1m_bar_start, 100, 150, 50, 100, 1000)
+            )
             return FakeBarsResponse({req.symbol_or_symbols: bars})
 
     bot.stock_client = FakeStockClient()
