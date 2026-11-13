@@ -364,6 +364,7 @@ def test_flatten_retry_does_not_cancel_other_symbols_working_close_order():
     client.get_orders.side_effect = [
         [aapl_order],
         [aapl_order, msft_order],
+        [aapl_order, msft_order],
     ]
 
     pm = LivePortfolioManager(client, logging.getLogger("symbol_scoped_close_retry"))
