@@ -23,6 +23,17 @@ from money_mintter.core.live_bot import (
 from money_mintter.domain import Side
 
 
+@pytest.fixture(autouse=True)
+def _small_l1_health_floor_for_single_symbol_tests(monkeypatch, tmp_path):
+    monkeypatch.setenv("MIN_UNIVERSE_HEALTH", "1")
+    monkeypatch.setenv("MAX_UNIVERSE_CACHE_AGE_HOURS", "24")
+    monkeypatch.setenv("ALPACA_HISTORICAL_FEED", "sip")
+    monkeypatch.setenv("ALPACA_REALTIME_FEED", "iex")
+    monkeypatch.setenv("ALPACA_ALLOW_HISTORICAL_FEED_FALLBACK", "false")
+    monkeypatch.setenv("MM_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("MONEY_MINTTER_TEMP_DIR", str(tmp_path))
+
+
 def test_is_connectivity_error_cases():
     # Breaks if is_connectivity_error or ConnectivityError is removed/altered
     assert is_connectivity_error(ConnectivityError("test")) is True
