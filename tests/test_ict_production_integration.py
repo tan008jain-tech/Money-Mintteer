@@ -679,6 +679,40 @@ def test_execution_preflight_rechecks_reward_risk_at_executable_ask() -> None:
     assert submitted == []
 
 
+
+def test_ict_execution_rejects_target_profit_below_commission_gate() -> None:
+    logger = logging.getLogger("ict_commission_cost_gate")
+    submitted: list[str] = []
+
+    class Broker:
+        def submit_order(self, request):
+            submitted.append(request.symbol)
+            return type(
+                "Order",
+                (),
+                {"order_class": "bracket", "legs": [1, 2], "id": "cost-gate"},
+            )()
+
+    pm = LivePortfolioManager(
+        Broker(),
+        logger,
+        stock_client=FakeQuoteClient({"AAPL": 10.0}),
+    )
+    settings = Settings()
+    instruction = _execution_instruction(
+        "AAPL",
+        entry=10.0,
+        stop=9.51,
+        target=10.57,
+    )
+
+    sent = pm.submit_ict_instructions([instruction], set(), 100.0, settings)
+
+    assert sent == 0
+    assert submitted == []
+    assert pm.last_submit_failures == 0
+
+
 def test_execution_preflight_fails_closed_without_quote_client() -> None:
     logger = logging.getLogger("phase2c_missing_quote")
     submitted: list[str] = []
