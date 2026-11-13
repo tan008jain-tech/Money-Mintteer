@@ -548,7 +548,7 @@ class MarketScanner:
             )
             if latest_ts < expected_last_bar_start:
                 self.logger.warning(
-                    f"stale Layer 4 bars for {symbol}: latest={latest_ts}, "
+                    f"stale bars (Layer 4) for {symbol}: latest={latest_ts}, "
                     f"expected>={expected_last_bar_start}; excluding before selection"
                 )
                 continue
@@ -647,6 +647,14 @@ class MarketScanner:
                     adapter_res, instructions = generate_production_ict_signals(
                         acq_result, now_utc, dedup_tracker=dedup, _allow_historical_evaluation=False, diagnostics=diag
                     )
+
+                    if not adapter_res.b1 or not adapter_res.b5:
+                        self.ict_errors += 1
+                        self.logger.error(
+                            f"[ICT Pipeline] symbol={clean_symbol} stale/incomplete adapter data: "
+                            "one-minute or five-minute stream is empty; executable instructions discarded"
+                        )
+                        continue
 
                     latest_b1_ns = max(bar["time_ns"] for bar in adapter_res.b1)
                     latest_b5_ns = max(bar["time_ns"] for bar in adapter_res.b5)
@@ -1895,23 +1903,30 @@ class LiveMarketBot:
         # discovery when the validated Layer 2 cache has expired or a prior
         # failure's retry cooldown has elapsed. This makes startup outages
         # recoverable without repeatedly hitting the APIs during a healthy session.
-        max_cache_age = timedelta(hours=self.settings.max_universe_cache_age_hours)
-        cache_expired = (
-            self._universe_last_fetched is not None
-            and (now_utc - self._universe_last_fetched) > max_cache_age
-        )
-        retry_due = (
-            self._universe_last_failed is not None
-            and now_utc >= self._universe_last_failed
-            and (now_utc - self._universe_last_failed)
-            >= timedelta(minutes=self._universe_retry_cooldown_minutes)
-        )
-        no_initial_cache = (
-            self._universe_last_failed is None
-            and self._universe_last_fetched is None
-        )
-        if retry_due or cache_expired or no_initial_cache:
-            self._get_or_refresh_universe(now_utc)
+        # Lightweight unit fixtures built with __new__ do not carry the
+        # production discovery scheduler state. LiveMarketBot.__init__ always
+        # initializes these fields, so skip the scheduler only for such
+        # intentionally partial test instances.
+        if hasattr(self, "_universe_last_fetched") and hasattr(self, "_universe_last_failed"):
+            max_cache_age = timedelta(hours=self.settings.max_universe_cache_age_hours)
+            universe_last_fetched = self._universe_last_fetched
+            universe_last_failed = self._universe_last_failed
+            cache_expired = (
+                universe_last_fetched is not None
+                and (now_utc - universe_last_fetched) > max_cache_age
+            )
+            retry_due = (
+                universe_last_failed is not None
+                and now_utc >= universe_last_failed
+                and (now_utc - universe_last_failed)
+                >= timedelta(minutes=self._universe_retry_cooldown_minutes)
+            )
+            no_initial_cache = (
+                universe_last_failed is None
+                and universe_last_fetched is None
+            )
+            if retry_due or cache_expired or no_initial_cache:
+                self._get_or_refresh_universe(now_utc)
 
         self.latest_state["cash"] = account_cash
         self.latest_state["equity"] = account_equity
