@@ -1033,6 +1033,8 @@ class LivePortfolioManager:
                 leverage=1.0,
             )
 
+            decision_obj = None
+            submission_attempted = False
             try:
                 if side_val is Side.BUY:
                     decision_obj = risk_engine.size_long(
@@ -1082,6 +1084,7 @@ class LivePortfolioManager:
                 if dedup_tracker is not None:
                     dedup_tracker.mark_pending(sym, side_str, inst.zone_type, inst.zone_top, inst.zone_bot)
 
+                submission_attempted = True
                 submitted_order = self.trading_client.submit_order(order_req)
                 oc = getattr(submitted_order, "order_class", None)
                 oc_val = oc.value if hasattr(oc, "value") else str(oc) if oc is not None else None
@@ -1156,18 +1159,25 @@ class LivePortfolioManager:
                     if dedup_tracker is not None:
                         dedup_tracker.clear_pending(sym, side_str, inst.zone_type, inst.zone_top, inst.zone_bot)
                     self.logger.info(f"Broker definitively rejected {sym}; no slot/risk reservation retained.")
-                else:
-                    # A timeout or generic failure may have reached the broker.
+                elif submission_attempted:
+                    # A timeout or generic failure after the API call may have reached the broker.
                     self.logger.info(
                         f"Retaining pending status and reserving slot for {sym} after uncertain "
                         f"submission outcome: {ord_err}"
                     )
                     occupied_symbols.add(norm_sym)
                     slots_remaining -= 1
-                    open_risk += decision_obj.capital_at_risk
+                    reserved_risk = (
+                        decision_obj.capital_at_risk
+                        if decision_obj is not None
+                        else settings.risk_per_trade_pct * account_equity
+                    )
+                    open_risk += reserved_risk
                     free_capital = max(0.0, free_capital - qty * curr_price)
                     if bar_time is not None and processed_signals is not None:
                         processed_signals.add((norm_sym, bar_time))
+                elif dedup_tracker is not None:
+                    dedup_tracker.clear_pending(sym, side_str, inst.zone_type, inst.zone_top, inst.zone_bot)
 
         return orders_sent
 
