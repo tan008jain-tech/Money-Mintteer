@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
+from math import isfinite
 
 from dotenv import load_dotenv
 
@@ -191,6 +192,11 @@ class Settings:
     )
 
     def __post_init__(self) -> None:
+        for setting_field in fields(self):
+            value = getattr(self, setting_field.name)
+            if isinstance(value, float) and not isfinite(value):
+                raise ValueError(f"{setting_field.name} must be finite")
+
         feed_lower = self.alpaca_data_feed.strip().lower()
         historical_feed = self.alpaca_historical_feed.strip().lower()
         realtime_feed = self.alpaca_realtime_feed.strip().lower()
