@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone, timedelta
+from types import SimpleNamespace
 import pytest
 
 from money_mintter.domain import Side
@@ -9,6 +10,24 @@ from money_mintter.config import Settings
 from money_mintter.core.live_bot import LivePortfolioManager, normalize_symbol
 from money_mintter.strategy.ict.integration import ICTExecutionInstruction, ICTDeduplicationTracker
 from money_mintter.core.suitability import DailySuitabilityEngine, SuitabilityResult, SymbolSuitabilityMetrics
+
+
+
+class FakeQuoteClient:
+    def __init__(self, prices):
+        self.prices = prices
+
+    def get_stock_latest_quote(self, request):
+        now = datetime.now(timezone.utc)
+        symbols = request.symbol_or_symbols
+        return {
+            symbol: SimpleNamespace(
+                timestamp=now,
+                bid_price=self.prices[symbol] - 0.01,
+                ask_price=self.prices[symbol] + 0.01,
+            )
+            for symbol in symbols
+        }
 
 
 class RecordingBroker:
@@ -29,7 +48,11 @@ def test_fix_a_slot_starvation_and_filtering(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setenv("MAX_PORTFOLIO_RISK_PCT", "15")
     logger = logging.getLogger("test")
     broker = RecordingBroker()
-    pm = LivePortfolioManager(broker, logger)
+    pm = LivePortfolioManager(
+        broker,
+        logger,
+        stock_client=FakeQuoteClient({"TSLA": 250.0, "NVDA": 300.0, "META": 400.0}),
+    )
     settings = Settings()
     tracker = ICTDeduplicationTracker()
 
