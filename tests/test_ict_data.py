@@ -21,7 +21,7 @@ class MockBar:
         self.volume = volume
 
 
-def test_iex_enforced_internally_and_identical_requests(monkeypatch) -> None:
+def test_default_iex_feed_and_identical_requests(monkeypatch) -> None:
     from zoneinfo import ZoneInfo
     client = MagicMock()
 
