@@ -731,13 +731,13 @@ class LivePortfolioManager:
         locked_normalized: set[str] | None = None,
         open_exposure: float = 0.0,
     ) -> int:
-        active_untraded_slots = max(0, 5 - len(locked_symbols))
-        open_risk = len(locked_symbols) * settings.risk_per_trade_pct * account_equity
-        orders_sent = 0
-        self.last_submit_failures = 0
-
         if locked_normalized is None:
             locked_normalized = {normalize_symbol(s) for s in locked_symbols}
+        occupied_symbols = set(locked_normalized) | {normalize_symbol(s) for s in locked_symbols}
+        active_untraded_slots = max(0, settings.max_open_positions - len(occupied_symbols))
+        open_risk = len(occupied_symbols) * settings.risk_per_trade_pct * account_equity
+        orders_sent = 0
+        self.last_submit_failures = 0
 
         eligible = []
         for sym, sc, side_val, reason, curr_price, sl_price, tp_price in top_new[:active_untraded_slots]:
@@ -915,73 +915,114 @@ class LivePortfolioManager:
         processed_signals: set[tuple[str, datetime]] | None = None,
         locked_normalized: set[str] | None = None,
         open_exposure: float = 0.0,
+        buying_power: float | None = None,
     ) -> int:
-        active_untraded_slots = max(0, 5 - len(locked_symbols))
-        if active_untraded_slots <= 0:
-            return 0
+        """Submit at most one instruction per symbol within combined position/order/pending capacity.
 
-        open_risk = len(locked_symbols) * settings.risk_per_trade_pct * account_equity
+        Occupied symbols reserve one portfolio slot and one conservative per-trade risk
+        budget. Candidates retain incoming priority; a candidate rejected before broker
+        submission does not consume a slot.
+        """
         orders_sent = 0
         self.last_submit_failures = 0
+        if account_equity <= 0:
+            self.logger.warning("[Execution] New entries disabled: account equity is not positive.")
+            return 0
 
-        if locked_normalized is None:
-            locked_normalized = {normalize_symbol(s) for s in locked_symbols}
+        occupied_symbols = {normalize_symbol(symbol) for symbol in locked_symbols}
+        if locked_normalized is not None:
+            occupied_symbols.update(normalize_symbol(symbol) for symbol in locked_normalized)
         if dedup_tracker is not None:
-            locked_normalized = locked_normalized | {normalize_symbol(s) for s in dedup_tracker.pending_symbols}
+            occupied_symbols.update(normalize_symbol(symbol) for symbol in dedup_tracker.pending_symbols)
 
-        eligible = []
+        max_positions = settings.max_open_positions
+        slots_remaining = max(0, max_positions - len(occupied_symbols))
+        if slots_remaining <= 0:
+            self.logger.info(
+                f"[Execution Capacity] occupied={len(occupied_symbols)}/{max_positions}; "
+                "no new position slots available."
+            )
+            return 0
+
+        # Existing positions, broker-open orders, and uncertain pending submissions each
+        # reserve the full per-trade risk budget. This is intentionally conservative because
+        # the current broker snapshot does not provide a verified stop-risk value for every
+        # existing position/order.
+        open_risk = len(occupied_symbols) * settings.risk_per_trade_pct * account_equity
+        available_cash = max(0.0, account_equity - max(0.0, open_exposure))
+        if buying_power is not None:
+            available_cash = min(available_cash, max(0.0, buying_power))
+        free_capital = available_cash
+
+        self.logger.info(
+            f"[Execution Capacity] positions_orders_pending={len(occupied_symbols)}/"
+            f"{max_positions} free_slots={slots_remaining} "
+            f"conservative_open_risk=${open_risk:.2f} available_capital=${free_capital:.2f}"
+        )
+
+        eligible: list[ICTExecutionInstruction] = []
+        seen_batch_symbols: set[str] = set()
         for inst in instructions:
-            sym = inst.symbol
+            sym = str(inst.symbol).strip()
             norm_sym = normalize_symbol(sym)
-            if norm_sym in locked_normalized:
+            if not norm_sym or "/" in sym:
+                self.logger.info(f"Skipping {sym}: unsupported or empty symbol")
+                continue
+            if norm_sym in occupied_symbols:
                 continue
             if bar_time is not None and processed_signals is not None and (norm_sym, bar_time) in processed_signals:
                 continue
-            if "/" in sym:
-                self.logger.info(f"Skipping {sym}: unsupported slash symbol")
+            if getattr(inst, "is_diagnostic", False):
+                self.logger.info(f"Skipping {sym}: diagnostic-only ICT instruction")
                 continue
+
             side_str = "bull" if inst.side is Side.BUY else "bear"
             if dedup_tracker is not None and (
-                dedup_tracker.is_executed(sym, side_str, inst.zone_type, inst.zone_top, inst.zone_bot) or
-                dedup_tracker.is_pending(sym, side_str, inst.zone_type, inst.zone_top, inst.zone_bot)
+                dedup_tracker.is_executed(sym, side_str, inst.zone_type, inst.zone_top, inst.zone_bot)
+                or dedup_tracker.is_pending(sym, side_str, inst.zone_type, inst.zone_top, inst.zone_bot)
             ):
                 continue
-            if sym not in locked_symbols:
-                eligible.append(inst)
 
-        free_capital = max(0.0, account_equity - open_exposure)
+            # Preserve current scanner/integration ordering; do not invent an ICT ranking rule.
+            if norm_sym in seen_batch_symbols:
+                self.logger.info(
+                    f"Skipping additional instruction for {sym}: one instruction per symbol per batch."
+                )
+                continue
 
-        valid_eligible = []
+            risk_per_share = abs(inst.entry_price - inst.stop_price)
+            if risk_per_share <= 0:
+                self.logger.info(f"Skipping {sym}: risk per share <= 0")
+                continue
+
+            seen_batch_symbols.add(norm_sym)
+            eligible.append(inst)
+
         for inst in eligible:
-            sym = inst.symbol
-            curr_price = inst.entry_price
-            sl_price = inst.stop_price
-            tp_price = inst.target_price
-            side_val = inst.side
+            if slots_remaining <= 0:
+                break
 
+            sym = inst.symbol
+            norm_sym = normalize_symbol(sym)
+            curr_price = float(inst.entry_price)
+            sl_price = float(inst.stop_price)
+            tp_price = float(inst.target_price)
+            side_val = inst.side
             risk_per_share = abs(curr_price - sl_price)
             reward = abs(tp_price - curr_price)
             stop_pct = (risk_per_share / curr_price * 100) if curr_price > 0 else 0.0
             target_pct = (reward / curr_price * 100) if curr_price > 0 else 0.0
             rr = (reward / risk_per_share) if risk_per_share > 0 else 0.0
 
-            if risk_per_share <= 0:
-                self.logger.info(f"Skipping {sym}: risk per share <= 0")
-                continue
-
-            # Bypass legacy strategy vetoes (min_candidate_score, min_reward_risk, min_target_pct, min_gross_to_cost_multiple)
-            valid_eligible.append((inst, curr_price, sl_price, tp_price, side_val, risk_per_share, reward, stop_pct, target_pct, rr))
-
-        valid_eligible = valid_eligible[:active_untraded_slots]
-
-        for idx, (inst, curr_price, sl_price, tp_price, side_val, risk_per_share, reward, stop_pct, target_pct, rr) in enumerate(valid_eligible):
-            sym = inst.symbol
-            norm_sym = normalize_symbol(sym)
-            remaining = len(valid_eligible) - idx
-            notional_cap = min(settings.max_single_position_pct * account_equity, free_capital / remaining if remaining > 0 else 0.0)
-
-            if notional_cap < curr_price:
-                self.logger.info(f"Skipping {sym}: allocation ${notional_cap:.2f} below one share (${curr_price:.2f})")
+            notional_cap = min(
+                settings.max_single_position_pct * account_equity,
+                free_capital / slots_remaining if slots_remaining > 0 else 0.0,
+            )
+            if curr_price <= 0 or notional_cap < curr_price:
+                self.logger.info(
+                    f"Skipping {sym}: allocation ${notional_cap:.2f} below one share "
+                    f"or invalid entry price (${curr_price:.2f})"
+                )
                 continue
 
             pos_pct = min(1.0, max(1e-9, notional_cap / account_equity))
@@ -1013,12 +1054,18 @@ class LivePortfolioManager:
                     )
 
                 if not decision_obj.approved:
-                    self.logger.info(f"Skipping {sym}: RiskEngine rejected trade ({decision_obj.reason})")
+                    self.logger.info(
+                        f"Skipping {sym}: RiskEngine rejected trade ({decision_obj.reason}); "
+                        "candidate slot remains available for the next symbol."
+                    )
                     continue
 
                 qty = int(decision_obj.quantity)
                 if qty < 1:
-                    self.logger.info(f"Skipping {sym}: whole share quantity ({qty}) < 1")
+                    self.logger.info(
+                        f"Skipping {sym}: whole-share quantity ({qty}) < 1; "
+                        "candidate slot remains available."
+                    )
                     continue
 
                 alpaca_side = OrderSide.BUY if side_val is Side.BUY else OrderSide.SELL
@@ -1029,37 +1076,56 @@ class LivePortfolioManager:
                     time_in_force=TimeInForce.DAY,
                     order_class=OrderClass.BRACKET,
                     take_profit=TakeProfitRequest(limit_price=round(tp_price, 2)),
-                    stop_loss=StopLossRequest(stop_price=round(sl_price, 2))
+                    stop_loss=StopLossRequest(stop_price=round(sl_price, 2)),
                 )
                 side_str = "bull" if side_val is Side.BUY else "bear"
                 if dedup_tracker is not None:
                     dedup_tracker.mark_pending(sym, side_str, inst.zone_type, inst.zone_top, inst.zone_bot)
 
                 submitted_order = self.trading_client.submit_order(order_req)
-
-                oc = getattr(submitted_order, 'order_class', None)
-                oc_val = oc.value if hasattr(oc, 'value') else str(oc) if oc is not None else None
+                oc = getattr(submitted_order, "order_class", None)
+                oc_val = oc.value if hasattr(oc, "value") else str(oc) if oc is not None else None
                 oc_lower = oc_val.lower() if oc_val is not None else None
-                legs = getattr(submitted_order, 'legs', None)
+                legs = getattr(submitted_order, "legs", None)
 
-                self.logger.info(f"ORDER SUBMITTED (class={oc_val if oc is not None else 'unknown'}): {alpaca_side.value} {qty} shares of {sym} @ ~${curr_price:.2f} (SL: ${sl_price:.2f}, TP: ${tp_price:.2f})")
+                self.logger.info(
+                    f"ORDER SUBMITTED (class={oc_val if oc is not None else 'unknown'}): "
+                    f"{alpaca_side.value} {qty} shares of {sym} @ ~${curr_price:.2f} "
+                    f"(SL: ${sl_price:.2f}, TP: ${tp_price:.2f})"
+                )
 
-                order_accepted = False
+                reserve_slot = False
                 if oc_lower is None or legs is None:
-                    self.logger.warning("cannot verify order class")
-                    open_risk += decision_obj.capital_at_risk
-                    orders_sent += 1
-                    order_accepted = True
+                    # Broker returned a response, but bracket protection is not verified.
+                    # Keep pending and reserve capacity until next-cycle reconciliation.
+                    self.logger.warning(
+                        f"ORDER RESPONSE AMBIGUOUS for {sym} id={getattr(submitted_order, 'id', 'unknown')}; "
+                        "retaining pending state and reserving slot/risk until broker reconciliation."
+                    )
+                    self.last_submit_failures += 1
+                    reserve_slot = True
                 elif oc_lower == "bracket" and isinstance(legs, list) and len(legs) >= 2:
-                    self.logger.info(f"ORDER CONFIRMED: {sym} id={getattr(submitted_order, 'id', 'unknown')} class=bracket legs={len(legs)}")
-                    open_risk += decision_obj.capital_at_risk
+                    self.logger.info(
+                        f"ORDER CONFIRMED: {sym} id={getattr(submitted_order, 'id', 'unknown')} "
+                        f"class=bracket legs={len(legs)}"
+                    )
                     orders_sent += 1
-                    order_accepted = True
+                    reserve_slot = True
+                    if dedup_tracker is not None:
+                        dedup_tracker.mark_executed(
+                            sym, side_str, inst.zone_type, inst.zone_top, inst.zone_bot
+                        )
                 else:
-                    reason_msg = f"unprotected order: class={oc_val}, legs={len(legs) if isinstance(legs, list) else legs}"
-                    self.logger.critical(f"UNPROTECTED ORDER {sym} id={getattr(submitted_order, 'id', 'unknown')} class={oc_val} legs={len(legs) if isinstance(legs, list) else 0}")
+                    reason_msg = (
+                        f"unprotected order: class={oc_val}, "
+                        f"legs={len(legs) if isinstance(legs, list) else legs}"
+                    )
+                    self.logger.critical(
+                        f"UNPROTECTED ORDER {sym} id={getattr(submitted_order, 'id', 'unknown')} "
+                        f"class={oc_val} legs={len(legs) if isinstance(legs, list) else 0}"
+                    )
                     try:
-                        if hasattr(submitted_order, 'id') and submitted_order.id:
+                        if getattr(submitted_order, "id", None):
                             self.trading_client.cancel_order_by_id(submitted_order.id)
                     except Exception as cancel_err:
                         self.logger.error(f"Failed to cancel unprotected order {sym}: {cancel_err}")
@@ -1068,30 +1134,40 @@ class LivePortfolioManager:
                     except Exception as close_err:
                         self.logger.error(f"Failed to close position for unprotected order {sym}: {close_err}")
                     self.last_submit_failures += 1
+                    reserve_slot = True
                     if self.on_unprotected is not None:
                         try:
                             self.on_unprotected(reason_msg)
                         except Exception as cb_err:
                             self.logger.error(f"Error in on_unprotected callback: {cb_err}")
 
-                if order_accepted and dedup_tracker is not None:
-                    side_str = "bull" if side_val is Side.BUY else "bear"
-                    dedup_tracker.mark_executed(sym, side_str, inst.zone_type, inst.zone_top, inst.zone_bot)
-
-                if bar_time is not None and processed_signals is not None:
-                    processed_signals.add((norm_sym, bar_time))
-
-                free_capital = max(0.0, free_capital - qty * curr_price)
+                if reserve_slot:
+                    occupied_symbols.add(norm_sym)
+                    slots_remaining -= 1
+                    open_risk += decision_obj.capital_at_risk
+                    free_capital = max(0.0, free_capital - qty * curr_price)
+                    if bar_time is not None and processed_signals is not None:
+                        processed_signals.add((norm_sym, bar_time))
 
             except Exception as ord_err:
                 self.last_submit_failures += 1
                 self.logger.error(f"Failed to submit bracket order for {sym}: {ord_err}")
-                side_str = "bull" if side_val is Side.BUY else "bear"
-                if dedup_tracker is not None:
-                    if is_broker_rejection(ord_err):
+                if is_broker_rejection(ord_err):
+                    if dedup_tracker is not None:
                         dedup_tracker.clear_pending(sym, side_str, inst.zone_type, inst.zone_top, inst.zone_bot)
-                    else:
-                        self.logger.info(f"Retaining pending status for {sym} due to uncertain/generic/connectivity exception: {ord_err}")
+                    self.logger.info(f"Broker definitively rejected {sym}; no slot/risk reservation retained.")
+                else:
+                    # A timeout or generic failure may have reached the broker.
+                    self.logger.info(
+                        f"Retaining pending status and reserving slot for {sym} after uncertain "
+                        f"submission outcome: {ord_err}"
+                    )
+                    occupied_symbols.add(norm_sym)
+                    slots_remaining -= 1
+                    open_risk += decision_obj.capital_at_risk
+                    free_capital = max(0.0, free_capital - qty * curr_price)
+                    if bar_time is not None and processed_signals is not None:
+                        processed_signals.add((norm_sym, bar_time))
 
         return orders_sent
 
@@ -1398,7 +1474,7 @@ class LiveMarketBot:
             self.logger.critical(f"Kill switch tripped: {self.kill_switch.reason}")
             return {"evaluated": 0, "signals": 0, "orders_sent": 0, "halted": True}
 
-        account_cash, account_equity, _, open_positions, dashboard_positions, locked_symbols_raw = self.portfolio_manager.fetch_account_and_positions()
+        account_cash, account_equity, buying_power, open_positions, dashboard_positions, locked_symbols_raw = self.portfolio_manager.fetch_account_and_positions()
         self.kill_switch.check_daily_loss(self.portfolio_manager.last_equity, account_equity)
         if self.kill_switch.tripped:
             self.logger.critical(f"Kill switch tripped: {self.kill_switch.reason}")
@@ -1511,6 +1587,7 @@ class LiveMarketBot:
                 processed_signals=self.processed_signals,
                 locked_normalized=locked_normalized,
                 open_exposure=open_exposure,
+                buying_power=buying_power,
             )
 
             self.logger.info(
