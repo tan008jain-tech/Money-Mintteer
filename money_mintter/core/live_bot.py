@@ -1263,6 +1263,32 @@ class LivePortfolioManager:
                     )
                     continue
 
+                gross_target_profit = qty * reward
+                round_trip_commission = 2 * max(
+                    settings.commission_per_order_usd,
+                    settings.commission_per_share_usd * qty,
+                )
+                minimum_gross_profit = (
+                    settings.min_gross_to_cost_multiple * round_trip_commission
+                )
+                if gross_target_profit < minimum_gross_profit:
+                    self.logger.info(
+                        f"Skipping {sym}: expected gross target profit "
+                        f"${gross_target_profit:.2f} below "
+                        f"{settings.min_gross_to_cost_multiple:.2f}x round-trip "
+                        f"commission ${round_trip_commission:.2f}; "
+                        "candidate slot remains available for the next symbol. "
+                        "[REJECTED_EXECUTION_COST_GATE]"
+                    )
+                    continue
+
+                self.logger.info(
+                    f"[Execution Cost Gate] {sym} qty={qty} "
+                    f"gross_target_profit=${gross_target_profit:.2f} "
+                    f"round_trip_commission=${round_trip_commission:.2f} "
+                    f"required_multiple={settings.min_gross_to_cost_multiple:.2f}"
+                )
+
                 alpaca_side = OrderSide.BUY if side_val is Side.BUY else OrderSide.SELL
                 order_req = MarketOrderRequest(
                     symbol=sym,
