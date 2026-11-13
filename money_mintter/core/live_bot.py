@@ -647,6 +647,25 @@ class MarketScanner:
                     adapter_res, instructions = generate_production_ict_signals(
                         acq_result, now_utc, dedup_tracker=dedup, _allow_historical_evaluation=False, diagnostics=diag
                     )
+
+                    latest_b1_ns = max(bar["time_ns"] for bar in adapter_res.b1)
+                    latest_b5_ns = max(bar["time_ns"] for bar in adapter_res.b5)
+                    latest_b1_ts = datetime.fromtimestamp(
+                        latest_b1_ns / 1_000_000_000, tz=timezone.utc
+                    )
+                    latest_b5_ts = datetime.fromtimestamp(
+                        latest_b5_ns / 1_000_000_000, tz=timezone.utc
+                    )
+                    if (
+                        latest_b1_ts < expected_last_bar_start
+                        or latest_b5_ts < expected_last_bar_start
+                    ):
+                        self.logger.warning(
+                            f"[ICT Pipeline] symbol={clean_symbol} stale dedicated acquisition: "
+                            f"latest_1m={latest_b1_ts}, latest_5m={latest_b5_ts}, "
+                            f"expected>={expected_last_bar_start}; executable instructions discarded"
+                        )
+                        continue
                     self.ict_evaluation_successes += 1
 
                     b1_len = len(adapter_res.b1)
