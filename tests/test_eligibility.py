@@ -169,8 +169,17 @@ def test_cache_first_startup_and_timestamp_preservation(monkeypatch, tmp_path):
         lambda *args, **kwargs: MagicMock(),
     )
     monkeypatch.setattr("money_mintter.core.live_bot.apply_default_timeout", lambda *args, **kwargs: None)
+    discovery_calls = []
+
+    def mock_discover(client, logger, api_key=""):
+        assert client is trading_client
+        discovery_calls.append(True)
+        return ["AAPL", "MSFT"]
+
+    monkeypatch.setattr("money_mintter.core.live_bot.discover_universe", mock_discover)
 
     bot = LiveMarketBot()
+    assert discovery_calls == [True]
     assert bot.global_universe == ["AAPL", "MSFT"]
     assert bot._universe_last_fetched == fresh_time
 
