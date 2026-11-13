@@ -11,7 +11,8 @@ from money_mintter.strategy.timeframes import MultiTimeframeSeries
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 _CHICAGO_TZ = ZoneInfo("America/Chicago")
-_IEX_TOKEN = object()
+_TRUSTED_ACQUISITION_TOKEN = object()
+_IEX_TOKEN = _TRUSTED_ACQUISITION_TOKEN  # Backward-compatible private alias.
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,7 +49,7 @@ def _create_verified_acquisition_result(
         b1_success=b1_success,
         b5_success=b5_success,
         error_message=error_message,
-        _token=_IEX_TOKEN,
+        _token=_TRUSTED_ACQUISITION_TOKEN,
     )
 
 
@@ -155,16 +156,17 @@ def adapt_market_data(
     acquisition_result: ICTAcquisitionResult,
     as_of: datetime,
 ) -> ICTAdapterResult:
-    """Adapt validated IEX ICTAcquisitionResult into ICT-compatible structures with strict lookahead protection."""
+    """Adapt validated single-feed ICT acquisition data with strict lookahead protection."""
     if as_of.tzinfo is None:
         raise ValueError("as_of timestamp must be timezone-aware")
 
     # Enforce acquisition provenance verification via module-private object-identity token
-    if acquisition_result._token is not _IEX_TOKEN:
-        raise ValueError("ICT acquisition provenance check failed: result did not originate from trusted IEX acquisition path.")
+    if acquisition_result._token is not _TRUSTED_ACQUISITION_TOKEN:
+        raise ValueError("ICT acquisition provenance check failed: result did not originate from the trusted acquisition path.")
 
-    if not acquisition_result.feed or acquisition_result.feed.lower() != "iex":
-        raise ValueError(f"Non-IEX feed rejected by ICT adapter: {acquisition_result.feed}")
+    feed_value = (acquisition_result.feed or "").strip().lower()
+    if feed_value not in ("iex", "sip"):
+        raise ValueError(f"Unsupported ICT acquisition feed rejected by adapter: {acquisition_result.feed}")
 
     if not acquisition_result.b1_success or not acquisition_result.b5_success:
         raise ValueError(f"Unsuccessful or incomplete acquisition result rejected: b1_success={acquisition_result.b1_success}, b5_success={acquisition_result.b5_success}, error={acquisition_result.error_message}")
