@@ -70,6 +70,58 @@ def _metadata(symbol: str) -> dict[str, Any]:
     }
 
 
+def test_layer2_cache_rejects_pool_symbols_outside_current_layer1_universe(tmp_path):
+    eligible = ["SYM_A", "SYM_B"]
+    now = datetime.now(timezone.utc)
+    settings = Settings()
+    stock_client = MagicMock()
+    stock_client.get_stock_bars.return_value = MagicMock(data={}, next_page_token=None)
+    engine = DailySuitabilityEngine(
+        settings=settings,
+        stock_client=stock_client,
+        cache_dir=str(tmp_path),
+        historical_feed="sip",
+    )
+    engine.save_persisted_pool(
+        SuitabilityResult(
+            pool=["SYM_A", "RAW_L1_BYPASS"],
+            quarantined=[],
+            metrics={},
+            exclusion_counts={},
+            requested_feed="SIP",
+            actual_feed="SIP",
+            data_source="SIP",
+            generated_at=now.isoformat(),
+            stale=False,
+            cached=True,
+            config_signature=engine._compute_config_signature(),
+            universe_signature=engine._compute_universe_signature(eligible),
+        )
+    )
+
+    assert engine.load_stale_fallback_pool(eligible_symbols=eligible) is None
+    with pytest.raises(RuntimeError, match="no valid compatible cached pool"):
+        engine.evaluate_universe(eligible, now_utc=now)
+    stock_client.get_stock_bars.assert_called_once()
+
+
+def test_layer2_universe_signature_covers_middle_symbols(tmp_path):
+    engine = DailySuitabilityEngine(
+        settings=Settings(),
+        cache_dir=str(tmp_path),
+        historical_feed="sip",
+    )
+    original = [f"SYM{i:02d}" for i in range(20)]
+    changed_middle = list(original)
+    changed_middle[10] = "SYM10X"
+
+    assert original[:10] == changed_middle[:10]
+    assert original[-1] == changed_middle[-1]
+    assert engine._compute_universe_signature(original) != engine._compute_universe_signature(
+        changed_middle
+    )
+
+
 def test_feed_split_defaults_and_layer2_pool_target(monkeypatch):
     for key in (
         "ALPACA_HISTORICAL_FEED",
