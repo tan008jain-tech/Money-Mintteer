@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone, timedelta
+from types import SimpleNamespace
 import pytest
 
 from money_mintter.domain import Side
@@ -10,11 +11,35 @@ from money_mintter.core.live_bot import LivePortfolioManager, LiveMarketBot, nor
 from money_mintter.strategy.ict.integration import ICTExecutionInstruction, ICTDeduplicationTracker
 
 
+
+class FakeQuoteClient:
+    def __init__(self, prices=None, *, age_seconds=0.0, quote_overrides=None):
+        self.prices = prices or {}
+        self.age_seconds = age_seconds
+        self.quote_overrides = quote_overrides or {}
+
+    def get_stock_latest_quote(self, request):
+        timestamp = datetime.now(timezone.utc) - timedelta(seconds=self.age_seconds)
+        quotes = {}
+        for symbol in request.symbol_or_symbols:
+            if symbol in self.quote_overrides:
+                bid, ask = self.quote_overrides[symbol]
+            else:
+                mid = self.prices.get(symbol, 100.0)
+                bid, ask = mid - 0.01, mid + 0.01
+            quotes[symbol] = SimpleNamespace(
+                timestamp=timestamp,
+                bid_price=bid,
+                ask_price=ask,
+            )
+        return quotes
+
+
 def test_ict_instruction_capacity_block_recoverability(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MAX_PORTFOLIO_RISK_PCT", "3")
     logger = logging.getLogger("test")
     client = type("FakeClient", (), {"submit_order": lambda self, req: type("Ord", (), {"order_class": "bracket", "legs": [1, 2], "id": "123"})()})()
-    pm = LivePortfolioManager(client, logger)
+    pm = LivePortfolioManager(client, logger, stock_client=FakeQuoteClient({"AAPL": 100.0}))
     settings = Settings()
 
     inst = ICTExecutionInstruction(
@@ -103,7 +128,7 @@ def test_run_cycle_uses_ict_exclusively_despite_legacy_strategy(monkeypatch: pyt
 def test_ict_ambiguous_submission_accepted() -> None:
     logger = logging.getLogger("test")
     client = type("FakeClient", (), {"submit_order": lambda self, req: type("Ord", (), {"order_class": "bracket", "legs": [1, 2], "id": "123"})()})()
-    pm = LivePortfolioManager(client, logger)
+    pm = LivePortfolioManager(client, logger, stock_client=FakeQuoteClient({"AAPL": 100.0}))
     settings = Settings()
     tracker = ICTDeduplicationTracker()
 
@@ -124,7 +149,7 @@ def test_ict_ambiguous_submission_explicit_rejection() -> None:
     class RejectClient:
         def submit_order(self, req):
             raise ValueError("Order rejected by broker: insufficient funds")
-    pm = LivePortfolioManager(RejectClient(), logger)
+    pm = LivePortfolioManager(RejectClient(), logger, stock_client=FakeQuoteClient({"AAPL": 100.0}))
     settings = Settings()
     tracker = ICTDeduplicationTracker()
 
@@ -145,7 +170,7 @@ def test_ict_ambiguous_submission_timeout_retains_pending() -> None:
     class TimeoutClient:
         def submit_order(self, req):
             raise TimeoutError("Connection timed out")
-    pm = LivePortfolioManager(TimeoutClient(), logger)
+    pm = LivePortfolioManager(TimeoutClient(), logger, stock_client=FakeQuoteClient({"AAPL": 100.0}))
     settings = Settings()
     tracker = ICTDeduplicationTracker()
 
@@ -170,7 +195,7 @@ def test_ict_ambiguous_submission_timeout_retains_pending() -> None:
 def test_ict_ambiguous_submission_reconciliation() -> None:
     logger = logging.getLogger("test")
     client = type("FakeClient", (), {})()
-    pm = LivePortfolioManager(client, logger)
+    pm = LivePortfolioManager(client, logger, stock_client=FakeQuoteClient({"AAPL": 100.0}))
     settings = Settings()
     tracker = ICTDeduplicationTracker()
 
@@ -201,7 +226,7 @@ def test_ict_ambiguous_submission_generic_exception_retains_pending() -> None:
     class GenericErrorClient:
         def submit_order(self, req):
             raise RuntimeError("Unexpected internal system error")
-    pm = LivePortfolioManager(GenericErrorClient(), logger)
+    pm = LivePortfolioManager(GenericErrorClient(), logger, stock_client=FakeQuoteClient({"AAPL": 100.0}))
     settings = Settings()
     tracker = ICTDeduplicationTracker()
 
@@ -231,7 +256,7 @@ def test_ict_ambiguous_submission_http_408_retains_pending() -> None:
             err = APIError("Request Timeout")
             err.status_code = 408
             raise err
-    pm = LivePortfolioManager(HTTP408Client(), logger)
+    pm = LivePortfolioManager(HTTP408Client(), logger, stock_client=FakeQuoteClient({"AAPL": 100.0}))
     settings = Settings()
     tracker = ICTDeduplicationTracker()
 
@@ -335,7 +360,14 @@ def test_pending_orders_consume_capacity_and_duplicate_symbols_are_filtered(monk
             submitted.append(req.symbol)
             return type("Order", (), {"order_class": "bracket", "legs": [1, 2], "id": f"id_{req.symbol}"})()
 
-    pm = LivePortfolioManager(RecordingBroker(), logger)
+    pm = LivePortfolioManager(
+        RecordingBroker(),
+        logger,
+        stock_client=FakeQuoteClient({
+            "AAPL": 100.0, "MSFT": 100.0, "NVDA": 100.0,
+            "EXPENSIVE": 1_000.0, "VALID": 100.0,
+        }),
+    )
     settings = Settings()
     tracker = ICTDeduplicationTracker()
 
@@ -374,7 +406,14 @@ def test_risk_or_capital_rejection_backfills_next_candidate(monkeypatch: pytest.
             submitted.append(req.symbol)
             return type("Order", (), {"order_class": "bracket", "legs": [1, 2], "id": "valid_order"})()
 
-    pm = LivePortfolioManager(RecordingBroker(), logger)
+    pm = LivePortfolioManager(
+        RecordingBroker(),
+        logger,
+        stock_client=FakeQuoteClient({
+            "AAPL": 100.0, "MSFT": 100.0, "NVDA": 100.0,
+            "EXPENSIVE": 1_000.0, "VALID": 100.0,
+        }),
+    )
     settings = Settings()
     assert settings.max_open_positions == 1
 
@@ -406,7 +445,14 @@ def test_max_open_positions_setting_is_enforced_against_positions_and_orders(mon
             submitted.append(req.symbol)
             return type("Order", (), {"order_class": "bracket", "legs": [1, 2], "id": "unexpected"})()
 
-    pm = LivePortfolioManager(RecordingBroker(), logger)
+    pm = LivePortfolioManager(
+        RecordingBroker(),
+        logger,
+        stock_client=FakeQuoteClient({
+            "AAPL": 100.0, "MSFT": 100.0, "NVDA": 100.0,
+            "EXPENSIVE": 1_000.0, "VALID": 100.0,
+        }),
+    )
     settings = Settings()
     assert settings.max_open_positions == 2
 
@@ -417,6 +463,73 @@ def test_max_open_positions_setting_is_enforced_against_positions_and_orders(mon
         settings=settings,
         locked_normalized={"POSITION_1", "OPEN_ORDER_1"},
     )
+
+    assert sent == 0
+    assert submitted == []
+
+
+def test_execution_preflight_rejects_stale_quote() -> None:
+    logger = logging.getLogger("phase2c_stale_quote")
+    submitted: list[str] = []
+
+    class Broker:
+        def submit_order(self, req):
+            submitted.append(req.symbol)
+            return type("Order", (), {"order_class": "bracket", "legs": [1, 2], "id": "stale"})()
+
+    tracker = ICTDeduplicationTracker()
+    pm = LivePortfolioManager(
+        Broker(),
+        logger,
+        stock_client=FakeQuoteClient({"AAPL": 100.0}, age_seconds=30.0),
+    )
+    inst = _execution_instruction("AAPL")
+
+    sent = pm.submit_ict_instructions([inst], set(), 100_000.0, Settings(), dedup_tracker=tracker)
+
+    assert sent == 0
+    assert submitted == []
+    assert not tracker.is_pending("AAPL", "bull", "disp_fvg", 101.0, 99.0)
+
+
+def test_execution_preflight_rechecks_reward_risk_at_executable_ask() -> None:
+    logger = logging.getLogger("phase2c_quote_rr")
+    submitted: list[str] = []
+
+    class Broker:
+        def submit_order(self, req):
+            submitted.append(req.symbol)
+            return type("Order", (), {"order_class": "bracket", "legs": [1, 2], "id": "rr"})()
+
+    # Signal R/R is 1.10 at 100.00. A valid but higher ask at 100.50
+    # reduces executable R/R below 1.10 and must be rejected.
+    pm = LivePortfolioManager(
+        Broker(),
+        logger,
+        stock_client=FakeQuoteClient(
+            {"AAPL": 100.0},
+            quote_overrides={"AAPL": (100.49, 100.50)},
+        ),
+    )
+    inst = _execution_instruction("AAPL", entry=100.0, stop=99.0, target=101.1)
+
+    sent = pm.submit_ict_instructions([inst], set(), 100_000.0, Settings())
+
+    assert sent == 0
+    assert submitted == []
+
+
+def test_execution_preflight_fails_closed_without_quote_client() -> None:
+    logger = logging.getLogger("phase2c_missing_quote")
+    submitted: list[str] = []
+
+    class Broker:
+        def submit_order(self, req):
+            submitted.append(req.symbol)
+            return type("Order", (), {"order_class": "bracket", "legs": [1, 2], "id": "missing"})()
+
+    pm = LivePortfolioManager(Broker(), logger)
+    sent = pm.submit_ict_instructions([_execution_instruction("AAPL")], set(), 100_000.0, Settings())
 
     assert sent == 0
     assert submitted == []
