@@ -211,6 +211,41 @@ def test_flatten_all_does_not_report_success_with_open_orders():
     assert client.get_orders.call_count >= 1
 
 
+@pytest.mark.parametrize("order_listed_as_open", [True, False])
+def test_flatten_all_does_not_cancel_or_duplicate_tracked_close_orders(order_listed_as_open):
+    client = MagicMock()
+    client.get_account.return_value = SimpleNamespace(
+        cash="100000.0", equity="100000.0", buying_power="100000.0", last_equity="100000.0"
+    )
+    client.get_all_positions.return_value = [
+        SimpleNamespace(
+            symbol="AAPL", qty="10", avg_entry_price="150.0",
+            current_price="150.0", unrealized_pl="0.0",
+        )
+    ]
+    close_response = SimpleNamespace(
+        status=200,
+        symbol="AAPL",
+        order_id="close-aapl-1",
+        body=SimpleNamespace(id="close-aapl-1", symbol="AAPL"),
+    )
+    client.close_all_positions.return_value = [close_response]
+    close_order = SimpleNamespace(id="close-aapl-1", symbol="AAPL", status="new")
+    client.get_orders.return_value = [close_order] if order_listed_as_open else []
+    client.get_order_by_id.return_value = close_order
+
+    pm = LivePortfolioManager(client, logging.getLogger("tracked_close_order"))
+    result = pm.flatten_all(
+        sleep_fn=lambda _: None, max_wait_seconds=2, retry_delay=1
+    )
+
+    assert result == ["AAPL"]
+    client.close_all_positions.assert_called_once_with(cancel_orders=True)
+    client.cancel_order_by_id.assert_not_called()
+    if not order_listed_as_open:
+        client.get_order_by_id.assert_called_with("close-aapl-1")
+
+
 def test_flatten_all_requires_successful_open_order_verification():
     # If order state cannot be fetched, the bot must not claim a verified clean flatten.
     client = MagicMock()
