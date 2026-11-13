@@ -320,6 +320,17 @@ def test_main_banner_positions_open_symbol(capsys, monkeypatch):
     assert "POSITIONS MAY STILL BE OPEN" in captured.out
 
 
+def test_settings_reject_non_finite_numeric_values():
+    with pytest.raises(ValueError, match="quote_max_age_seconds must be finite"):
+        Settings(quote_max_age_seconds=float("nan"))
+
+    with pytest.raises(ValueError, match="min_gross_to_cost_multiple must be finite"):
+        Settings(min_gross_to_cost_multiple=float("inf"))
+
+    with pytest.raises(ValueError, match="commission_per_order_usd must be finite"):
+        Settings(commission_per_order_usd=float("-inf"))
+
+
 def test_settings_validation_outage_and_flatten():
     # Breaks if max_outage_minutes or flatten_max_wait_seconds validation in Settings is removed
     s = Settings()
