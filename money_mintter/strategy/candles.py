@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from math import isfinite
 
 
 @dataclass(frozen=True, slots=True)
@@ -18,6 +19,10 @@ class Candle:
 
     def __post_init__(self) -> None:
         prices = (self.open, self.high, self.low, self.close)
+        if any(not isfinite(price) for price in prices):
+            raise ValueError("candle prices must be finite")
+        if not isfinite(self.volume):
+            raise ValueError("candle volume must be finite")
         if any(price <= 0 for price in prices):
             raise ValueError("candle prices must be positive")
         if self.low > min(self.open, self.close) or self.high < max(self.open, self.close):
