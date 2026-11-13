@@ -911,9 +911,26 @@ class LivePortfolioManager:
         req = GetOrdersRequest(status=QueryOrderStatus.OPEN)
         orders = self.trading_client.get_orders(req)
         symbols = set()
-        for o in orders:
-            if hasattr(o, 'symbol') and o.symbol:
-                symbols.add(normalize_symbol(o.symbol))
+        for order in orders:
+            symbol = order.get("symbol") if isinstance(order, dict) else getattr(order, "symbol", None)
+            if (
+                not isinstance(symbol, str)
+                or not symbol
+                or symbol != symbol.strip()
+                or "/" in symbol
+                or any(character.isspace() for character in symbol)
+            ):
+                raise RuntimeError(
+                    "Alpaca returned an open order with a missing or invalid symbol; "
+                    "new entries disabled until broker order state is verified"
+                )
+            normalized = normalize_symbol(symbol)
+            if not normalized:
+                raise RuntimeError(
+                    "Alpaca returned an open order with an empty normalized symbol; "
+                    "new entries disabled until broker order state is verified"
+                )
+            symbols.add(normalized)
         return symbols
 
     def submit_bracket_orders(
