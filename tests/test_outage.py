@@ -268,7 +268,8 @@ def test_flatten_all_waits_for_positions_to_catch_up_after_filled_close_order():
         status=200, symbol="AAPL", order_id="filled-close-2",
         body=SimpleNamespace(id="filled-close-2", symbol="AAPL"),
     )
-    client.close_all_positions.side_effect = [[first_close], [second_close]]
+    client.close_all_positions.return_value = [first_close]
+    client.close_position.return_value = second_close
     client.get_orders.return_value = []
     client.get_order_by_id.return_value = SimpleNamespace(status="filled")
 
@@ -278,7 +279,8 @@ def test_flatten_all_waits_for_positions_to_catch_up_after_filled_close_order():
     )
 
     assert result == ["AAPL"]
-    assert client.close_all_positions.call_count == 2
+    client.close_all_positions.assert_called_once_with(cancel_orders=True)
+    client.close_position.assert_called_once_with("AAPL")
     reconciled_order_ids = [
         call.args[0] for call in client.get_order_by_id.call_args_list
     ]
@@ -307,7 +309,8 @@ def test_flatten_all_retries_position_after_close_order_rejection():
     active_second_order = SimpleNamespace(
         id="close-aapl-2", symbol="AAPL", status="new"
     )
-    client.close_all_positions.side_effect = [[first_close], [second_close]]
+    client.close_all_positions.return_value = [first_close]
+    client.close_position.return_value = second_close
     client.get_orders.side_effect = [[], [active_second_order]]
     client.get_order_by_id.return_value = SimpleNamespace(status="rejected")
 
@@ -317,8 +320,61 @@ def test_flatten_all_retries_position_after_close_order_rejection():
     )
 
     assert result == ["AAPL"]
-    assert client.close_all_positions.call_count == 2
+    client.close_all_positions.assert_called_once_with(cancel_orders=True)
+    client.close_position.assert_called_once_with("AAPL")
     client.get_order_by_id.assert_called_once_with("close-aapl-1")
+
+
+def test_flatten_retry_does_not_cancel_other_symbols_working_close_order():
+    client = MagicMock()
+    client.get_account.return_value = SimpleNamespace(
+        cash="100000.0", equity="100000.0", buying_power="100000.0", last_equity="100000.0"
+    )
+    client.get_all_positions.return_value = [
+        SimpleNamespace(
+            symbol=symbol, qty="10", avg_entry_price="150.0",
+            current_price="150.0", unrealized_pl="0.0",
+        )
+        for symbol in ("AAPL", "MSFT")
+    ]
+
+    active_aapl_close = SimpleNamespace(
+        status=200, symbol="AAPL", order_id="close-aapl-1",
+        body=SimpleNamespace(id="close-aapl-1", symbol="AAPL"),
+    )
+    rejected_msft_close = SimpleNamespace(
+        status=422, symbol="MSFT", order_id=None,
+        body=SimpleNamespace(symbol="MSFT"),
+    )
+    retry_msft_close = SimpleNamespace(
+        status=200, symbol="MSFT", order_id="close-msft-2",
+        body=SimpleNamespace(id="close-msft-2", symbol="MSFT"),
+    )
+    client.close_all_positions.return_value = [
+        active_aapl_close, rejected_msft_close
+    ]
+    client.close_position.return_value = retry_msft_close
+
+    aapl_order = SimpleNamespace(
+        id="close-aapl-1", symbol="AAPL", status="new"
+    )
+    msft_order = SimpleNamespace(
+        id="close-msft-2", symbol="MSFT", status="new"
+    )
+    client.get_orders.side_effect = [
+        [aapl_order],
+        [aapl_order, msft_order],
+    ]
+
+    pm = LivePortfolioManager(client, logging.getLogger("symbol_scoped_close_retry"))
+    result = pm.flatten_all(
+        sleep_fn=lambda _: None, max_wait_seconds=3, retry_delay=1
+    )
+
+    assert result == ["AAPL", "MSFT"]
+    client.close_all_positions.assert_called_once_with(cancel_orders=True)
+    client.close_position.assert_called_once_with("MSFT")
+    client.cancel_order_by_id.assert_not_called()
 
 
 def test_flatten_all_requires_successful_open_order_verification():
