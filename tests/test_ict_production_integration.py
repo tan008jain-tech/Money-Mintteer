@@ -451,6 +451,65 @@ def _execution_instruction(
     )
 
 
+
+def test_scanner_discards_instructions_from_stale_dedicated_ict_acquisition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from money_mintter.core.live_bot import MarketScanner
+
+    now_utc = datetime(2026, 10, 18, 12, 5, 20, tzinfo=timezone.utc)
+    fresh_l1_bar = SimpleNamespace(
+        timestamp=now_utc - timedelta(minutes=1),
+        open=100.0,
+        high=101.0,
+        low=99.0,
+        close=100.5,
+        volume=10_000.0,
+    )
+
+    class StockClient:
+        def get_stock_bars(self, request):
+            return SimpleNamespace(data={"AAPL": [fresh_l1_bar]}, next_page_token=None)
+
+    scanner = MarketScanner(["AAPL"], StockClient(), logging.getLogger("stale_ict_acquisition"))
+    candidate = SimpleNamespace(symbol="AAPL")
+    monkeypatch.setattr(
+        "money_mintter.core.live_bot.select_layer4_candidates",
+        lambda pool, bars, max_candidates=8: [candidate],
+    )
+    monkeypatch.setattr(
+        MarketScanner,
+        "is_session_open",
+        staticmethod(lambda symbol, now: (True, "Open")),
+    )
+    monkeypatch.setattr(
+        "money_mintter.core.live_bot.fetch_ict_market_data",
+        lambda *args, **kwargs: SimpleNamespace(
+            b1_success=True, b5_success=True, error_message=None
+        ),
+    )
+
+    stale_ns = int((now_utc - timedelta(minutes=10)).timestamp() * 1_000_000_000)
+    stale_adapter = SimpleNamespace(
+        b1=({"time_ns": stale_ns},),
+        b5=({"time_ns": stale_ns},),
+        b15=(),
+        b15_coverage=(),
+    )
+    monkeypatch.setattr(
+        "money_mintter.core.live_bot.generate_production_ict_signals",
+        lambda *args, **kwargs: (stale_adapter, (_execution_instruction("AAPL"),)),
+    )
+
+    instructions, _ = scanner.scan_universe(now_utc, set(), strategy=None)
+
+    assert instructions == ()
+    assert scanner.ict_attempts == 1
+    assert scanner.ict_acquisition_successes == 1
+    assert scanner.ict_evaluation_successes == 0
+    assert scanner.ict_instructions == 0
+
+
 def test_pending_orders_consume_capacity_and_duplicate_symbols_are_filtered(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MAX_PORTFOLIO_RISK_PCT", "3")
     logger = logging.getLogger("phase2c_capacity")
