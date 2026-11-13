@@ -521,6 +521,33 @@ class MarketScanner:
                 if completed_candles:
                     bars_dict[clean_symbol] = completed_candles
 
+        # Layer 4 is shared by both production and legacy routes. Reject stale
+        # completed 1m data before ranking so the active ICT route cannot select
+        # a candidate from an old movement burst.
+        minute = (now_utc.minute // 5) * 5
+        bar_time = now_utc.replace(minute=minute, second=0, microsecond=0)
+        expected_last_bar_start = bar_time - timedelta(minutes=5)
+        fresh_bars_dict: dict[str, list[Candle]] = {}
+        for symbol, candles in bars_dict.items():
+            if not candles:
+                continue
+            latest_ts = max(
+                (
+                    candle.timestamp.replace(tzinfo=timezone.utc)
+                    if candle.timestamp.tzinfo is None
+                    else candle.timestamp.astimezone(timezone.utc)
+                )
+                for candle in candles
+            )
+            if latest_ts < expected_last_bar_start:
+                self.logger.warning(
+                    f"stale Layer 4 bars for {symbol}: latest={latest_ts}, "
+                    f"expected>={expected_last_bar_start}; excluding before selection"
+                )
+                continue
+            fresh_bars_dict[symbol] = list(candles)
+        bars_dict = fresh_bars_dict
+
         layer4_selected = select_layer4_candidates(pool_input, bars_dict, max_candidates=8)
         self.last_l4_selected = len(layer4_selected)
         self.logger.info(f"[Layer 4 Selector] Selected {len(layer4_selected)} candidates from pool of {len(pool_input)} symbols.")
