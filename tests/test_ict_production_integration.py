@@ -322,7 +322,7 @@ def test_market_scanner_ict_historical_lookback_window(monkeypatch: pytest.Monke
 
 @pytest.mark.parametrize(
     ("bar_age_minutes", "expected_symbols"),
-    [(4, ["AAPL"]), (10, [])],
+    [(1, ["AAPL"]), (2, [])],
 )
 def test_scanner_filters_stale_bars_before_layer4(
     monkeypatch: pytest.MonkeyPatch,
@@ -452,8 +452,19 @@ def _execution_instruction(
 
 
 
-def test_scanner_discards_instructions_from_stale_dedicated_ict_acquisition(
+@pytest.mark.parametrize(
+    ("b1_age_minutes", "b5_age_minutes", "expected_instruction_count"),
+    [
+        (1, 5, 1),   # latest completed 1m and 5m bars
+        (2, 5, 0),   # 1m stream is stale even though 5m is fresh
+        (1, 10, 0),  # 5m stream is stale even though 1m is fresh
+    ],
+)
+def test_scanner_uses_timeframe_specific_ict_freshness_gates(
     monkeypatch: pytest.MonkeyPatch,
+    b1_age_minutes: int,
+    b5_age_minutes: int,
+    expected_instruction_count: int,
 ) -> None:
     from money_mintter.core.live_bot import MarketScanner
 
@@ -471,7 +482,9 @@ def test_scanner_discards_instructions_from_stale_dedicated_ict_acquisition(
         def get_stock_bars(self, request):
             return SimpleNamespace(data={"AAPL": [fresh_l1_bar]}, next_page_token=None)
 
-    scanner = MarketScanner(["AAPL"], StockClient(), logging.getLogger("stale_ict_acquisition"))
+    scanner = MarketScanner(
+        ["AAPL"], StockClient(), logging.getLogger("timeframe_specific_ict_freshness")
+    )
     candidate = SimpleNamespace(symbol="AAPL")
     monkeypatch.setattr(
         "money_mintter.core.live_bot.select_layer4_candidates",
@@ -489,26 +502,33 @@ def test_scanner_discards_instructions_from_stale_dedicated_ict_acquisition(
         ),
     )
 
-    stale_ns = int((now_utc - timedelta(minutes=10)).timestamp() * 1_000_000_000)
-    stale_adapter = SimpleNamespace(
-        b1=({"time_ns": stale_ns},),
-        b5=({"time_ns": stale_ns},),
+    b1_ns = int(
+        (now_utc - timedelta(minutes=b1_age_minutes)).timestamp() * 1_000_000_000
+    )
+    b5_ns = int(
+        (now_utc - timedelta(minutes=b5_age_minutes)).timestamp() * 1_000_000_000
+    )
+    adapter_result = SimpleNamespace(
+        b1=({"time_ns": b1_ns},),
+        b5=({"time_ns": b5_ns},),
         b15=(),
         b15_coverage=(),
     )
     monkeypatch.setattr(
         "money_mintter.core.live_bot.generate_production_ict_signals",
-        lambda *args, **kwargs: (stale_adapter, (_execution_instruction("AAPL"),)),
+        lambda *args, **kwargs: (
+            adapter_result,
+            (_execution_instruction("AAPL"),),
+        ),
     )
 
     instructions, _ = scanner.scan_universe(now_utc, set(), strategy=None)
 
-    assert instructions == ()
+    assert len(instructions) == expected_instruction_count
     assert scanner.ict_attempts == 1
     assert scanner.ict_acquisition_successes == 1
-    assert scanner.ict_evaluation_successes == 0
-    assert scanner.ict_instructions == 0
-
+    assert scanner.ict_evaluation_successes == expected_instruction_count
+    assert scanner.ict_instructions == expected_instruction_count
 
 def test_pending_orders_consume_capacity_and_duplicate_symbols_are_filtered(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MAX_PORTFOLIO_RISK_PCT", "3")
