@@ -70,10 +70,9 @@ class DailySuitabilityEngine:
         )
         self.cache_file = os.path.join(self.cache_dir, "daily_suitability_pool.json")
         self.logger = logger or logging.getLogger("MoneyMintterMasterBlueprint")
-        self.historical_feed = (
-            historical_feed
-            or os.getenv("ALPACA_HISTORICAL_FEED", "iex")
-        ).strip().lower()
+        self.historical_feed = (historical_feed or self.settings.alpaca_historical_feed).strip().lower()
+        if self.historical_feed not in ("iex", "sip"):
+            raise ValueError("historical_feed must be either 'iex' or 'sip'")
 
     def _get_stock_client(self) -> StockHistoricalDataClient:
         if self.stock_client is not None:
@@ -361,7 +360,8 @@ class DailySuitabilityEngine:
         target_feed_enum = DataFeed.SIP if self.historical_feed == "sip" else DataFeed.IEX
 
         feeds_to_try = [target_feed_enum]
-        allow_fallback = os.getenv("ALPACA_ALLOW_IEX_FALLBACK", "true").lower() != "false"
+        # Cross-feed fallback is opt-in; never silently downgrade SIP history to IEX.
+        allow_fallback = self.settings.alpaca_allow_historical_feed_fallback
         if allow_fallback:
             if target_feed_enum == DataFeed.SIP and DataFeed.IEX not in feeds_to_try:
                 feeds_to_try.append(DataFeed.IEX)
