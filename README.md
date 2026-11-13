@@ -51,3 +51,14 @@ IBKR will later replace temporary market-data and execution providers behind nor
 ## Security
 
 API keys stay in local environment files or deployment secret stores and are never committed.
+
+
+## Market data and universe policy
+
+The production pipeline separates consolidated historical suitability data from intraday scanning:
+
+- `ALPACA_HISTORICAL_FEED=sip`: Layer 2 daily-bar suitability uses SIP history, with requests ending at least 15 minutes before the current time.
+- `ALPACA_REALTIME_FEED=iex`: Layer 4 intraday polling and ICT acquisition use the configured realtime feed (IEX by default).
+- `ALPACA_ALLOW_HISTORICAL_FEED_FALLBACK=false`: Cross-feed historical fallback is disabled by default. Actual feed provenance is persisted and incompatible Layer 2 caches are rejected.
+
+Layer 1 discovery must meet `MIN_UNIVERSE_HEALTH` (default 50) and a persisted cache must be no older than `MAX_UNIVERSE_CACHE_AGE_HOURS` (default 24). Layer 2 returns up to `MAX_DAILY_POOL_SIZE` qualified symbols (default 50) and never pads the pool. Layer 4 selects up to 8 candidates.
