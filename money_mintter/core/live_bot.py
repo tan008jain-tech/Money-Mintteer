@@ -1445,7 +1445,7 @@ class LivePortfolioManager:
         # Filled market orders and the positions endpoint can become visible
         # at slightly different times. Require two later position snapshots
         # before retrying a close that the order endpoint already reports filled.
-        filled_order_confirmation_checks: dict[str, int] = {}
+        filled_order_confirmation_checks: dict[str, tuple[int, int]] = {}
 
         def _field(item: Any, name: str, default: Any = None) -> Any:
             if isinstance(item, dict):
@@ -1599,7 +1599,7 @@ class LivePortfolioManager:
                     elif status_text in terminal_order_statuses:
                         close_order_symbols.pop(order_id, None)
                         if status_text == "filled":
-                            filled_order_confirmation_checks[normalized_symbol] = cycle_number
+                            filled_order_confirmation_checks[normalized_symbol] = (cycle_number, 0)
                             newly_filled_symbols.add(normalized_symbol)
                     else:
                         self.logger.error(
@@ -1628,7 +1628,7 @@ class LivePortfolioManager:
                     # endpoint. Wait for two subsequent position snapshots before
                     # retrying, and cancel the pending retry if the position disappears.
                     ready_after_fill: set[str] = set()
-                    for symbol, last_checked_cycle in list(
+                    for symbol, (last_checked_cycle, checks) in list(
                         filled_order_confirmation_checks.items()
                     ):
                         if symbol in newly_filled_symbols:
@@ -1637,14 +1637,14 @@ class LivePortfolioManager:
                             filled_order_confirmation_checks.pop(symbol, None)
                             continue
                         if cycle_number > last_checked_cycle:
-                            checks = 1 + (last_checked_cycle if last_checked_cycle == cycle_number else 0)
-                            # Store the number of successful post-fill position
-                            # confirmations in the value (1, then 2).
+                            checks += 1
                             if checks >= 2:
                                 ready_after_fill.add(symbol)
                                 filled_order_confirmation_checks.pop(symbol, None)
                             else:
-                                filled_order_confirmation_checks[symbol] = cycle_number
+                                filled_order_confirmation_checks[symbol] = (
+                                    cycle_number, checks
+                                )
 
                     retry_symbols = {
                         symbol for symbol in position_symbols
