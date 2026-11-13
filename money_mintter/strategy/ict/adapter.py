@@ -255,7 +255,7 @@ def adapt_market_data(
     return ICTAdapterResult(
         symbol=symbol,
         as_of=as_of,
-        feed="iex",
+        feed=feed_value,
         b1=b1_dicts,
         b5=b5_dicts,
         b15=b15_dicts,
