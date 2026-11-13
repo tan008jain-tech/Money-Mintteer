@@ -92,9 +92,41 @@ class DailySuitabilityEngine:
         return hashlib.sha256(cfg_str.encode("utf-8")).hexdigest()[:16]
 
     def _compute_universe_signature(self, symbols: list[str]) -> str:
+        # Hash the complete ordered-independent universe. A first-10/last-only
+        # signature can collide when middle symbols change, incorrectly reusing
+        # suitability metrics for a different Layer 1 input set.
         sorted_syms = sorted(symbols)
-        univ_str = f"{len(sorted_syms)}:" + ",".join(sorted_syms[:10]) + (":" + sorted_syms[-1] if sorted_syms else "")
+        univ_str = f"{len(sorted_syms)}:" + ",".join(sorted_syms)
         return hashlib.sha256(univ_str.encode("utf-8")).hexdigest()[:16]
+
+    def _is_pool_compatible(
+        self,
+        pool: Any,
+        eligible_symbols: Sequence[str],
+    ) -> bool:
+        """Reject cached Layer 2 pools that escape or exceed the current Layer 1 universe."""
+        if not isinstance(pool, list) or not pool:
+            return False
+        if len(pool) > self.settings.max_daily_pool_size:
+            return False
+
+        eligible_set = set(eligible_symbols)
+        seen: set[str] = set()
+        for raw_symbol in pool:
+            if not isinstance(raw_symbol, str):
+                return False
+            symbol = raw_symbol.upper().strip()
+            if (
+                not symbol
+                or symbol != raw_symbol
+                or "/" in symbol
+                or any(character.isspace() for character in symbol)
+                or symbol not in eligible_set
+                or symbol in seen
+            ):
+                return False
+            seen.add(symbol)
+        return True
 
     def _is_session_expired(self, gen_dt: datetime, now_utc: datetime) -> bool:
         """Check if a new completed US trading session has occurred since gen_dt using market calendar."""
@@ -187,6 +219,13 @@ class DailySuitabilityEngine:
 
         res = self.load_persisted_pool()
         if not res or not res.generated_at or not res.pool:
+            return None
+        if not self._is_pool_compatible(res.pool, eligible_symbols):
+            self.logger.warning(
+                "[Layer 2 Suitability] Stale fallback rejected: cached pool contains "
+                "symbols outside the validated Layer 1 universe, duplicates, invalid symbols, "
+                "or exceeds the configured pool cap."
+            )
             return None
 
         # 1. Parse and validate generation timestamp independently
@@ -338,7 +377,10 @@ class DailySuitabilityEngine:
 
                     is_fresh = not cached_result.stale
                     has_pool = bool(cached_result.pool)
-                    if is_fresh and has_pool and not session_expired and config_matches and universe_matches and feed_matches:
+                    pool_compatible = self._is_pool_compatible(
+                        cached_result.pool, eligible_symbols
+                    )
+                    if is_fresh and has_pool and pool_compatible and not session_expired and config_matches and universe_matches and feed_matches:
                         self.logger.info(
                             f"[Layer 2 Suitability] Reusing cached daily pool (pool size: {len(cached_result.pool)}, "
                             f"stale: {cached_result.stale})"
@@ -347,7 +389,8 @@ class DailySuitabilityEngine:
                     else:
                         self.logger.info(
                             f"[Layer 2 Suitability] Cache invalidated due to change in (fresh={is_fresh}, has_pool={has_pool}, session_expired={session_expired}, "
-                            f"config_matches={config_matches}, universe_matches={universe_matches}, feed_matches={feed_matches})."
+                            f"config_matches={config_matches}, universe_matches={universe_matches}, "
+                            f"feed_matches={feed_matches}, pool_compatible={pool_compatible})."
                         )
                 except Exception:
                     pass
