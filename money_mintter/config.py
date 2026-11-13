@@ -104,8 +104,21 @@ class Settings:
         default_factory=lambda: _env_float("PAPER_COMMISSION_BPS", 2.0)
     )
 
+    # Legacy single-feed setting retained for older local .env files.
     alpaca_data_feed: str = field(
         default_factory=lambda: _env_text("ALPACA_DATA_FEED", "iex")
+    )
+    alpaca_historical_feed: str = field(
+        default_factory=lambda: _env_text("ALPACA_HISTORICAL_FEED", _env_text("ALPACA_DATA_FEED", "sip"))
+    )
+    alpaca_realtime_feed: str = field(
+        default_factory=lambda: _env_text("ALPACA_REALTIME_FEED", "iex")
+    )
+    alpaca_allow_historical_feed_fallback: bool = field(
+        default_factory=lambda: _env_bool(
+            "ALPACA_ALLOW_HISTORICAL_FEED_FALLBACK",
+            _env_bool("ALPACA_ALLOW_IEX_FALLBACK", False),
+        )
     )
     min_latest_close: float = field(
         default_factory=lambda: _env_float("MIN_LATEST_CLOSE", 5.0)
@@ -129,7 +142,13 @@ class Settings:
         default_factory=lambda: _env_float("MAX_ATR_PCT", 0.10)
     )
     max_daily_pool_size: int = field(
-        default_factory=lambda: _env_int("MAX_DAILY_POOL_SIZE", 200)
+        default_factory=lambda: _env_int("MAX_DAILY_POOL_SIZE", 50)
+    )
+    min_universe_health: int = field(
+        default_factory=lambda: _env_int("MIN_UNIVERSE_HEALTH", 50)
+    )
+    max_universe_cache_age_hours: float = field(
+        default_factory=lambda: _env_float("MAX_UNIVERSE_CACHE_AGE_HOURS", 24.0)
     )
     max_daily_loss_pct: float = field(
         default_factory=lambda: _env_percent("MAX_DAILY_LOSS_PCT", 0.02)
@@ -161,8 +180,14 @@ class Settings:
 
     def __post_init__(self) -> None:
         feed_lower = self.alpaca_data_feed.strip().lower()
+        historical_feed = self.alpaca_historical_feed.strip().lower()
+        realtime_feed = self.alpaca_realtime_feed.strip().lower()
         if feed_lower not in ("iex", "sip"):
             raise ValueError("ALPACA_DATA_FEED must be either 'iex' or 'sip'")
+        if historical_feed not in ("iex", "sip"):
+            raise ValueError("ALPACA_HISTORICAL_FEED must be either 'iex' or 'sip'")
+        if realtime_feed not in ("iex", "sip"):
+            raise ValueError("ALPACA_REALTIME_FEED must be either 'iex' or 'sip'")
         if not 0 < self.max_daily_loss_pct <= 1:
             raise ValueError("max daily loss percentage must be in (0, 1]")
         if self.max_consecutive_errors <= 0:
@@ -183,6 +208,10 @@ class Settings:
             raise ValueError("min_atr_pct must be <= max_atr_pct")
         if self.max_daily_pool_size <= 0:
             raise ValueError("max_daily_pool_size must be positive")
+        if self.min_universe_health <= 0:
+            raise ValueError("min_universe_health must be positive")
+        if self.max_universe_cache_age_hours <= 0:
+            raise ValueError("max_universe_cache_age_hours must be positive")
         if self.max_deep_candidates <= 0:
             raise ValueError("max deep candidates must be positive")
         if not 0 <= self.min_candidate_score <= 1:
