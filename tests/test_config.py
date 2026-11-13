@@ -34,6 +34,9 @@ def test_settings_keep_existing_defaults(monkeypatch: pytest.MonkeyPatch) -> Non
     assert settings.max_position_pct == 0.20
     assert settings.max_portfolio_risk_pct == 0.02
     assert settings.max_open_positions == 5
+    assert settings.quote_max_age_seconds == 10.0
+    assert settings.quote_max_future_skew_seconds == 2.0
+    assert settings.max_execution_price_deviation_pct == 0.01
 
 
 def test_settings_read_percent_values_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
