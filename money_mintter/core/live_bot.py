@@ -131,121 +131,129 @@ def next_bar_boundary(now_utc: datetime, minutes: int = 5, delay_seconds: int = 
 
 
 def discover_universe(trading_client: TradingClient, logger: logging.Logger, api_key: str = "") -> list[str]:
+    """Discover Layer 1 assets, enforce its health contract, then evaluate Layer 2.
+
+    Returns only a validated Layer 2 pool. Raw Layer 1 symbols are never returned,
+    including during API outages or cache recovery.
+    """
     engine = StructuralEligibilityEngine()
     settings = Settings()
     start_time = datetime.now(timezone.utc)
-    assets = None
-    search_params = GetAssetsRequest(
-        status=AssetStatus.ACTIVE,
-        asset_class=AssetClass.US_EQUITY
-    )
+    search_params = GetAssetsRequest(status=AssetStatus.ACTIVE, asset_class=AssetClass.US_EQUITY)
     data_source = "Alpaca Live API"
     raw_asset_count = 0
     cached_used = False
     cache_age_hours = 0.0
+    min_health = settings.min_universe_health
 
+    def load_healthy_l1_cache(reason: str):
+        cached_symbols, cached_metadata, cached_fetched = engine.load_validated_cache(
+            now_utc=start_time,
+            max_age_hours=settings.max_universe_cache_age_hours,
+            min_symbols=min_health,
+        )
+        if cached_symbols and cached_fetched:
+            age = (start_time - cached_fetched).total_seconds() / 3600.0
+            logger.warning(
+                f"[Discovery] Using validated Layer 1 cache because {reason}; "
+                f"symbols={len(cached_symbols)}, age={age:.2f}h."
+            )
+            return cached_symbols, cached_metadata, cached_fetched
+        logger.error(f"[Discovery] No compatible Layer 1 cache available after {reason}; new entries disabled.")
+        return [], {}, None
+
+    assets = None
     try:
         if hasattr(trading_client, "get_all_assets"):
             try:
                 assets = trading_client.get_all_assets(search_params)
             except Exception as sdk_exc:
                 err_str = str(sdk_exc)
-                if ("validation errors" in err_str or "ValidationError" in type(sdk_exc).__name__ or "exchange" in err_str) and hasattr(trading_client, "get"):
-                    params = search_params.to_request_fields() if search_params is not None else {}
-                    assets = trading_client.get("/assets", params)
+                if (
+                    "validation errors" in err_str
+                    or "ValidationError" in type(sdk_exc).__name__
+                    or "exchange" in err_str
+                ) and hasattr(trading_client, "get"):
+                    assets = trading_client.get("/assets", search_params.to_request_fields())
                     data_source = "Alpaca REST Fallback"
                 else:
                     raise
         elif hasattr(trading_client, "get"):
-            params = search_params.to_request_fields() if search_params is not None else {}
-            assets = trading_client.get("/assets", params)
+            assets = trading_client.get("/assets", search_params.to_request_fields())
             data_source = "Alpaca REST Get"
-    except Exception as exc:
-        logger.error(f"[Discovery] Failed to fetch assets from Alpaca API: {exc}")
-        cached_syms, _, cached_fetched = engine.load_persisted_cache()
-        if cached_syms:
-            cache_age_hours = (start_time - (cached_fetched or start_time)).total_seconds() / 3600.0
-            logger.warning(f"[Discovery] Using persisted Layer 1 cache due to API error: {len(cached_syms)} assets (age: {cache_age_hours:.1f}h).")
-            cached_used = True
-            eligible_symbols = cached_syms
-            raw_asset_count = len(cached_syms)
-        else:
-            raise ConnectivityError(f"Asset discovery failed: {exc}") from exc
-
-    eligible_symbols = []
-    metadata_map = {}
-    exclusion_counts = {}
-
-    if assets is None and not cached_used:
-        cached_syms, _, cached_fetched = engine.load_persisted_cache()
-        if cached_syms:
-            cache_age_hours = (start_time - (cached_fetched or start_time)).total_seconds() / 3600.0
-            cached_used = True
-            eligible_symbols = cached_syms
-            raw_asset_count = len(cached_syms)
-            logger.warning(f"[Discovery] Assets is None. Using persisted cache: {len(cached_syms)} assets (age: {cache_age_hours:.1f}h).")
         else:
             raise RuntimeError("trading_client does not support asset retrieval")
+    except Exception as exc:
+        logger.error(f"[Discovery] Failed to fetch assets from Alpaca API: {exc}")
+        cached_symbols, cached_metadata, cached_fetched = load_healthy_l1_cache("Alpaca API failure")
+        if not cached_symbols:
+            raise ConnectivityError(f"Asset discovery failed and no healthy Layer 1 cache exists: {exc}") from exc
+        eligible_symbols, metadata_map = cached_symbols, cached_metadata
+        cached_used = True
+        raw_asset_count = len(cached_symbols)
+        cache_age_hours = (start_time - cached_fetched).total_seconds() / 3600.0
 
-    if assets is not None and not cached_used:
-        try:
-            raw_asset_count = len(assets)
-        except Exception:
-            raw_asset_count = 0
-        eligible_symbols, metadata_map, exclusion_counts = engine.filter_universe(assets, logger)
-
-    min_health = settings.min_universe_health
-    if len(eligible_symbols) < min_health and not cached_used:
-        logger.warning(f"[Discovery] Live/direct L1 eligible count ({len(eligible_symbols)}) is below minimum health floor ({min_health}). Inspecting persisted L1 cache...")
-        cached_syms, cached_meta, cached_fetched = engine.load_persisted_cache()
-        if cached_syms:
-            cache_age_hours = (start_time - (cached_fetched or start_time)).total_seconds() / 3600.0
-            if len(cached_syms) >= min_health or len(cached_syms) > len(eligible_symbols):
-                cached_used = True
-                eligible_symbols = cached_syms
-                metadata_map = cached_meta
-                raw_asset_count = len(cached_syms)
-                logger.warning(f"[Discovery] Using age-bounded validated Layer 1 cache: {len(cached_syms)} assets (age: {cache_age_hours:.1f}h).")
-
-    logger.info(
-        f"[Discovery Observability] L1 Source: {data_source} | Raw Assets: {raw_asset_count} | "
-        f"L1 Eligible: {len(eligible_symbols)} | Cached L1 Used: {cached_used} (Age: {cache_age_hours:.1f}h) | "
-        f"Health Floor: {min_health} | Exclusions: {exclusion_counts}"
-    )
-
-    if not eligible_symbols:
-        logger.error("[Discovery] Discovered L1 eligible symbols count is empty.")
-        suitability_engine = DailySuitabilityEngine(logger=logger, settings=settings)
-        cached_pool_res = suitability_engine.load_stale_fallback_pool(eligible_symbols=[])
-        if cached_pool_res and cached_pool_res.pool is not None:
-            logger.warning(f"[Universe Layer 2] Using stale persisted Layer 2 pool fallback ({len(cached_pool_res.pool)} assets).")
-            return cached_pool_res.pool
-        else:
-            logger.critical("[Universe Layer 2] Valid Layer 2 pool unavailable and no valid stale fallback pool exists. Position-management-only mode active (new entries disabled).")
-            return []
+    if assets is None and not cached_used:
+        cached_symbols, cached_metadata, cached_fetched = load_healthy_l1_cache("empty API response")
+        if not cached_symbols:
+            raise RuntimeError("Alpaca asset discovery returned None and no healthy Layer 1 cache exists")
+        eligible_symbols, metadata_map = cached_symbols, cached_metadata
+        cached_used = True
+        raw_asset_count = len(cached_symbols)
+        cache_age_hours = (start_time - cached_fetched).total_seconds() / 3600.0
 
     if not cached_used:
-        try:
-            engine.save_persisted_cache(eligible_symbols, metadata_map, start_time)
-        except Exception:
-            pass
+        raw_asset_count = len(assets) if assets is not None else 0
+        eligible_symbols, metadata_map, exclusion_counts = engine.filter_universe(assets or [], logger)
+    else:
+        exclusion_counts = {}
 
-    # Layer 2 Daily Suitability Filter Integration
-    suitability_engine = DailySuitabilityEngine(logger=logger, settings=settings)
+    if len(eligible_symbols) < min_health:
+        logger.warning(
+            f"[Discovery] Live Layer 1 universe unhealthy: eligible={len(eligible_symbols)}, "
+            f"required={min_health}. Checking recent validated cache."
+        )
+        cached_symbols, cached_metadata, cached_fetched = load_healthy_l1_cache(
+            f"live Layer 1 health floor failure ({len(eligible_symbols)}<{min_health})"
+        )
+        if cached_symbols:
+            eligible_symbols, metadata_map = cached_symbols, cached_metadata
+            cached_used = True
+            raw_asset_count = len(cached_symbols)
+            cache_age_hours = (start_time - cached_fetched).total_seconds() / 3600.0
+        else:
+            logger.critical(
+                "[Universe Layer 1] No healthy live or cached universe. "
+                "Position-management-only mode active; Layer 2 and new entries disabled."
+            )
+            return []
+
+    logger.info(
+        f"[Discovery Observability] L1 Source={data_source} raw={raw_asset_count} "
+        f"eligible={len(eligible_symbols)} cached={cached_used} cache_age_hours={cache_age_hours:.2f} "
+        f"health_floor={min_health} cache_max_age_hours={settings.max_universe_cache_age_hours:.1f} "
+        f"exclusions={exclusion_counts}"
+    )
+    if not cached_used:
+        engine.save_persisted_cache(eligible_symbols, metadata_map, start_time)
+
+    suitability_engine = DailySuitabilityEngine(
+        logger=logger, settings=settings, historical_feed=settings.alpaca_historical_feed
+    )
+    requested_feed = settings.alpaca_historical_feed.upper()
     try:
         suitability_result = suitability_engine.evaluate_universe(eligible_symbols, start_time)
-        daily_pool = suitability_result.pool
+        daily_pool = suitability_result.pool or []
         quarantined_count = len(suitability_result.quarantined)
-        excluded_count = len(eligible_symbols) - len(daily_pool) - quarantined_count
+        excluded_count = max(0, len(eligible_symbols) - len(daily_pool) - quarantined_count)
         actual_feed = suitability_result.actual_feed
         requested_feed = suitability_result.requested_feed
         stale_flag = suitability_result.stale
-        new_entries_disabled = False
+        new_entries_disabled = not bool(daily_pool)
     except Exception as exc:
-        logger.error(f"[Universe Layer 2] Evaluation failed: {exc}. Attempting persisted Layer 2 pool fallback...")
+        logger.error(f"[Universe Layer 2] Evaluation failed: {exc}. Checking compatible Layer 2 stale fallback.")
         cached_pool_res = suitability_engine.load_stale_fallback_pool(eligible_symbols=eligible_symbols)
-        if cached_pool_res and cached_pool_res.pool is not None:
-            logger.warning(f"[Universe Layer 2] Using stale persisted Layer 2 pool fallback ({len(cached_pool_res.pool)} assets).")
+        if cached_pool_res and cached_pool_res.pool:
             daily_pool = cached_pool_res.pool
             quarantined_count = len(cached_pool_res.quarantined)
             excluded_count = 0
@@ -253,24 +261,31 @@ def discover_universe(trading_client: TradingClient, logger: logging.Logger, api
             requested_feed = cached_pool_res.requested_feed
             stale_flag = True
             new_entries_disabled = False
+            logger.warning(
+                f"[Universe Layer 2] Using compatible stale Layer 2 pool: "
+                f"pool={len(daily_pool)}, actual_feed={actual_feed}."
+            )
         else:
-            logger.critical("[Universe Layer 2] Layer 2 evaluation failed and no valid stale fallback pool exists. Position-management-only mode active (new entries disabled).")
             daily_pool = []
             quarantined_count = 0
             excluded_count = len(eligible_symbols)
-            actual_feed = settings.alpaca_data_feed.upper()
-            requested_feed = actual_feed
+            actual_feed = requested_feed
             stale_flag = True
             new_entries_disabled = True
+            logger.critical(
+                "[Universe Layer 2] No valid compatible Layer 2 pool exists. "
+                "Position-management-only mode active; new entries disabled."
+            )
 
     logger.info(
-        f"[Universe Layer 1 & 2 Observability] L1 Raw: {raw_asset_count} | L1 Eligible: {len(eligible_symbols)} | "
-        f"L2 Evaluated: {len(eligible_symbols)} | L2 Pool: {len(daily_pool)} (Max: {settings.max_daily_pool_size}) | "
-        f"Quarantined: {quarantined_count} | Excluded: {excluded_count} | "
-        f"Feed (Actual/Requested): {actual_feed}/{requested_feed} | Stale: {stale_flag} | "
-        f"New Entries Disabled: {new_entries_disabled}"
+        f"[Universe Layer 1 & 2 Observability] L1 raw={raw_asset_count} eligible={len(eligible_symbols)} "
+        f"L2 evaluated={len(eligible_symbols)} pool={len(daily_pool)} max_pool={settings.max_daily_pool_size} "
+        f"quarantined={quarantined_count} excluded={excluded_count} "
+        f"historical_feed_requested={requested_feed} historical_feed_actual={actual_feed} "
+        f"stale={stale_flag} new_entries_disabled={new_entries_disabled}"
     )
     return daily_pool
+
 
 
 def count_b15_gaps(b15: tuple[dict[str, Any], ...]) -> int:
@@ -583,7 +598,10 @@ class MarketScanner:
                     if start_dt.tzinfo is None:
                         start_dt = start_dt.replace(tzinfo=timezone.utc)
 
-                    acq_result = fetch_ict_market_data(self.stock_client, clean_symbol, start_dt, now_utc)
+                    acq_result = fetch_ict_market_data(
+                        self.stock_client, clean_symbol, start_dt, now_utc,
+                        feed=getattr(self.data_feed, "value", str(self.data_feed)).lower(),
+                    )
                     if not (acq_result.b1_success and acq_result.b5_success):
                         self.ict_errors += 1
                         self.logger.error(f"[ICT Pipeline] symbol={clean_symbol} acquisition=failure error={acq_result.error_message}")
@@ -1180,29 +1198,29 @@ class LiveMarketBot:
         self._universe_retry_cooldown_minutes = 60
         self._api_key = api_key or "mock_key"
 
-        # Startup universe initialization via unified DailySuitabilityEngine.evaluate_universe path
+        # Startup and refresh share one validated Layer 1 -> Layer 2 path.
         now_utc = datetime.now(timezone.utc)
-        engine = StructuralEligibilityEngine()
-        cached_syms, _, cached_fetched = engine.load_persisted_cache()
-        suitability_engine = DailySuitabilityEngine(logger=self.logger, historical_feed=self.settings.alpaca_data_feed)
         try:
-            if cached_syms:
-                suitability_result = suitability_engine.evaluate_universe(cached_syms, now_utc)
-                self._cached_universe = suitability_result.pool
-                self._universe_last_fetched = cached_fetched or now_utc
-            else:
-                self._cached_universe = self._get_or_refresh_universe(now_utc)
-                self._universe_last_fetched = now_utc
+            self._cached_universe = self._get_or_refresh_universe(now_utc)
         except Exception as exc:
-            self.logger.critical(f"[Discovery] Critical startup failure during dynamic universe discovery and no valid Layer 2 pool exists: {exc}")
-            raise
+            self.logger.critical(
+                f"[Discovery] Startup candidate discovery failed; position-management-only mode: {exc}"
+            )
+            self._cached_universe = []
         self.global_universe = self._cached_universe
 
-        feed_val = self.settings.alpaca_data_feed.strip().lower()
-        data_feed_enum = DataFeed.SIP if feed_val == "sip" else DataFeed.IEX
+        realtime_feed = self.settings.alpaca_realtime_feed.strip().lower()
+        data_feed_enum = DataFeed.SIP if realtime_feed == "sip" else DataFeed.IEX
+        self.logger.info(
+            f"[Data Feed Policy] historical_suitability={self.settings.alpaca_historical_feed.upper()} "
+            f"realtime_scanning={realtime_feed.upper()} "
+            f"historical_cross_feed_fallback={self.settings.alpaca_allow_historical_feed_fallback}"
+        )
         if data_feed_enum == DataFeed.IEX:
-            self.logger.warning("IEX feed carries only a fraction of market volume; relative volume confirmation is unreliable.")
-
+            self.logger.warning(
+                "Layer 4 and ICT use IEX for timely intraday data; Layer 2 historical suitability "
+                "uses the separately configured historical feed."
+            )
         self.scanner = MarketScanner(self.global_universe, self.stock_client, self.logger, data_feed=data_feed_enum)
         self.ict_dedup_tracker = ICTDeduplicationTracker()
         self.kill_switch = KillSwitch(
@@ -1225,43 +1243,88 @@ class LiveMarketBot:
 
     def _get_or_refresh_universe(self, now_utc: datetime) -> list[str]:
         refresh_interval_expired = (
-            not self._cached_universe or
-            self._universe_last_fetched is None or
-            (now_utc - self._universe_last_fetched) > timedelta(hours=24)
+            self._universe_last_fetched is None
+            or (now_utc - self._universe_last_fetched) > timedelta(hours=24)
+        )
+        cooldown_delta = timedelta(minutes=self._universe_retry_cooldown_minutes)
+        in_cooldown = (
+            self._universe_last_failed is not None
+            and (now_utc - self._universe_last_failed) < cooldown_delta
         )
 
-        in_cooldown = False
-        if self._universe_last_failed is not None and self._cached_universe:
-            cooldown_delta = timedelta(minutes=self._universe_retry_cooldown_minutes)
-            if (now_utc - self._universe_last_failed) < cooldown_delta:
-                in_cooldown = True
-
-        refresh_needed = refresh_interval_expired and not in_cooldown
-
-        if refresh_needed:
+        if refresh_interval_expired and not in_cooldown:
             try:
                 discovered = discover_universe(self.trading_client, self.logger, self._api_key)
-                self._cached_universe = discovered
+                self._cached_universe = list(discovered or [])
                 self._universe_last_fetched = now_utc
                 self._universe_last_failed = None
+                try:
+                    l2_engine = DailySuitabilityEngine(
+                        logger=self.logger,
+                        settings=self.settings,
+                        historical_feed=self.settings.alpaca_historical_feed,
+                    )
+                    cached_l2 = l2_engine.load_persisted_pool()
+                    if cached_l2 and cached_l2.pool == self._cached_universe and cached_l2.generated_at:
+                        generated_at = datetime.fromisoformat(cached_l2.generated_at)
+                        if generated_at.tzinfo is None:
+                            generated_at = generated_at.replace(tzinfo=timezone.utc)
+                        self._universe_last_fetched = generated_at.astimezone(timezone.utc)
+                except Exception as cache_exc:
+                    self.logger.warning(f"[Discovery] Could not read Layer 2 generation timestamp: {cache_exc}")
+                if not self._cached_universe:
+                    self.logger.warning(
+                        "[Discovery] No eligible Layer 2 candidates. New entries disabled; "
+                        "account and position management remain active."
+                    )
             except Exception as exc:
                 self._universe_last_failed = now_utc
-                engine = StructuralEligibilityEngine()
-                cached_syms, _, cached_fetched = engine.load_persisted_cache()
-                if cached_syms:
-                    age_hours = (now_utc - (cached_fetched or now_utc)).total_seconds() / 3600.0
-                    self.logger.warning(f"[Discovery] Asset universe refresh failed ({exc}). Using persisted stale cache fallback ({len(cached_syms)} assets, age: {age_hours:.1f}h). Last successful broker refresh timestamp preserved. Entering retry cooldown for {self._universe_retry_cooldown_minutes}m.")
-                    self._cached_universe = cached_syms
-                    self._universe_last_fetched = cached_fetched
-                elif self._cached_universe:
-                    self.logger.warning(f"[Discovery] Asset universe refresh failed ({exc}). Using in-memory cached universe during cooldown.")
+                age_hours = None
+                if self._universe_last_fetched is not None:
+                    age_hours = (now_utc - self._universe_last_fetched).total_seconds() / 3600.0
+                if (
+                    self._cached_universe
+                    and age_hours is not None
+                    and 0 <= age_hours <= self.settings.max_universe_cache_age_hours
+                ):
+                    self.logger.warning(
+                        f"[Discovery] Refresh failed ({exc}). Retaining last-known validated Layer 2 pool "
+                        f"only (size={len(self._cached_universe)}, age={age_hours:.2f}h); "
+                        "raw persisted Layer 1 symbols are never used as fallback."
+                    )
                 else:
-                    self.logger.critical(f"[Discovery] Asset universe refresh failed and no valid cache exists: {exc}")
-                    raise
-        elif in_cooldown and self._cached_universe:
-            age_hours = (now_utc - (self._universe_last_fetched or now_utc)).total_seconds() / 3600.0
-            self.logger.info(f"[Discovery] Universe refresh in retry cooldown (failed at {self._universe_last_failed}). Reusing cached universe ({len(self._cached_universe)} assets, age: {age_hours:.1f}h, stale status: active).")
+                    self.logger.critical(
+                        f"[Discovery] Refresh failed ({exc}) and no sufficiently recent validated "
+                        "Layer 2 pool is available. Position-management-only mode active."
+                    )
+                    self._cached_universe = []
+                    self._universe_last_fetched = None
+        elif in_cooldown:
+            age_hours = None
+            if self._universe_last_fetched is not None:
+                age_hours = (now_utc - self._universe_last_fetched).total_seconds() / 3600.0
+            if (
+                not self._cached_universe or age_hours is None or age_hours < 0
+                or age_hours > self.settings.max_universe_cache_age_hours
+            ):
+                self._cached_universe = []
+                self._universe_last_fetched = None
+                self.logger.warning(
+                    "[Discovery] Retry cooldown active without a sufficiently recent Layer 2 pool; "
+                    "new entries remain disabled."
+                )
+            else:
+                self.logger.info(
+                    f"[Discovery] Retry cooldown active; retaining recent validated Layer 2 pool "
+                    f"(size={len(self._cached_universe)}, age={age_hours:.2f}h)."
+                )
+
+        self.global_universe = self._cached_universe
+        if hasattr(self, "scanner"):
+            self.scanner.global_universe = self._cached_universe
         return self._cached_universe
+
+
 
     def _note_outage(self, now_utc: datetime) -> None:
         if self._outage_start is None:
