@@ -5,6 +5,7 @@ import os
 import sys
 import time
 from datetime import datetime, timedelta, timezone, time as dt_time
+from math import isfinite
 from typing import Any
 from zoneinfo import ZoneInfo
 import socket
@@ -16,7 +17,7 @@ from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import MarketOrderRequest, TakeProfitRequest, StopLossRequest, GetOrdersRequest, GetAssetsRequest
 from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus, OrderClass, AssetClass, AssetStatus
 from alpaca.data.historical import StockHistoricalDataClient
-from alpaca.data.requests import StockBarsRequest
+from alpaca.data.requests import StockBarsRequest, StockLatestQuoteRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from alpaca.data.enums import DataFeed
 from alpaca.common.exceptions import APIError
@@ -654,13 +655,124 @@ class LivePortfolioManager:
     """Portfolio & Position Manager modeled after Freqtrade Trade persistence model.
     Handles order execution, bracket orders, state tracking, and lock protection.
     """
-    def __init__(self, trading_client: TradingClient, logger: logging.Logger) -> None:
+    def __init__(
+        self,
+        trading_client: TradingClient,
+        logger: logging.Logger,
+        stock_client: StockHistoricalDataClient | None = None,
+    ) -> None:
         self.trading_client = trading_client
         self.logger = logger
+        self.stock_client = stock_client
         self.last_equity: float | None = None
         self.last_submit_failures = 0
         self._last_equity_date = None
         self.on_unprotected: Any | None = None
+
+    def _get_executable_price(
+        self,
+        symbol: str,
+        side: Side,
+        signal_entry_price: float,
+        settings: Settings,
+    ) -> float | None:
+        """Return a fresh side-aware quote price, or fail closed with a logged reason."""
+        if self.stock_client is None or not hasattr(self.stock_client, "get_stock_latest_quote"):
+            self.logger.info(
+                f"Skipping {symbol}: latest-quote client unavailable [REJECTED_QUOTE_CLIENT_UNAVAILABLE]"
+            )
+            return None
+        if not isfinite(signal_entry_price) or signal_entry_price <= 0:
+            self.logger.info(
+                f"Skipping {symbol}: invalid signal entry price [REJECTED_INVALID_SIGNAL_ENTRY]"
+            )
+            return None
+
+        feed_name = settings.alpaca_realtime_feed.strip().lower()
+        if feed_name not in ("iex", "sip"):
+            self.logger.info(
+                f"Skipping {symbol}: unsupported realtime quote feed {feed_name!r} "
+                "[REJECTED_INVALID_QUOTE_FEED]"
+            )
+            return None
+        feed_enum = DataFeed.SIP if feed_name == "sip" else DataFeed.IEX
+        feed_label = "SIP NBBO" if feed_enum == DataFeed.SIP else "IEX reference quote"
+
+        try:
+            request = StockLatestQuoteRequest(symbol_or_symbols=[symbol], feed=feed_enum)
+            response = self.stock_client.get_stock_latest_quote(request)
+            if isinstance(response, dict):
+                quote = response.get(symbol) or response.get(symbol.upper())
+            else:
+                quote = getattr(response, symbol, None) or getattr(response, symbol.upper(), None)
+            if quote is None:
+                self.logger.info(
+                    f"Skipping {symbol}: no latest quote returned from {feed_label} "
+                    "[REJECTED_QUOTE_MISSING]"
+                )
+                return None
+
+            quote_time = getattr(quote, "timestamp", None)
+            if quote_time is None or not isinstance(quote_time, datetime):
+                self.logger.info(
+                    f"Skipping {symbol}: missing or invalid quote timestamp from {feed_label} "
+                    "[REJECTED_QUOTE_TIMESTAMP_MISSING]"
+                )
+                return None
+            if quote_time.tzinfo is None:
+                quote_time = quote_time.replace(tzinfo=timezone.utc)
+
+            quote_age = (datetime.now(timezone.utc) - quote_time.astimezone(timezone.utc)).total_seconds()
+            if quote_age < -settings.quote_max_future_skew_seconds:
+                self.logger.info(
+                    f"Skipping {symbol}: future quote timestamp from {feed_label} "
+                    f"(age={quote_age:.2f}s) [REJECTED_FUTURE_QUOTE]"
+                )
+                return None
+            if quote_age > settings.quote_max_age_seconds:
+                self.logger.info(
+                    f"Skipping {symbol}: stale quote from {feed_label} "
+                    f"(age={quote_age:.2f}s) [REJECTED_STALE_QUOTE]"
+                )
+                return None
+
+            bid = float(getattr(quote, "bid_price", 0.0) or 0.0)
+            ask = float(getattr(quote, "ask_price", 0.0) or 0.0)
+            if not isfinite(bid) or not isfinite(ask) or bid <= 0 or ask <= 0:
+                self.logger.info(
+                    f"Skipping {symbol}: invalid quote prices from {feed_label} "
+                    f"(bid={bid}, ask={ask}) [REJECTED_INVALID_QUOTE_PRICES]"
+                )
+                return None
+            if bid >= ask:
+                self.logger.info(
+                    f"Skipping {symbol}: crossed or locked quote from {feed_label} "
+                    f"(bid={bid:.4f}, ask={ask:.4f}) [REJECTED_CROSSED_QUOTE]"
+                )
+                return None
+
+            executable_price = ask if side is Side.BUY else bid
+            deviation = abs(executable_price - signal_entry_price) / signal_entry_price
+            if deviation > settings.max_execution_price_deviation_pct:
+                self.logger.info(
+                    f"Skipping {symbol}: quote execution price deviation={deviation:.4%} "
+                    f"exceeds {settings.max_execution_price_deviation_pct:.4%} "
+                    f"(signal={signal_entry_price:.4f}, executable={executable_price:.4f}) "
+                    "[REJECTED_EXECUTION_PRICE_DEVIATION]"
+                )
+                return None
+
+            self.logger.info(
+                f"[Execution Quote] {symbol} feed={feed_label} bid={bid:.4f} ask={ask:.4f} "
+                f"executable={executable_price:.4f} age={quote_age:.2f}s deviation={deviation:.4%}"
+            )
+            return executable_price
+        except Exception as exc:
+            self.logger.info(
+                f"Skipping {symbol}: latest quote retrieval/validation failed ({exc}) "
+                "[REJECTED_QUOTE_RETRIEVAL_ERROR]"
+            )
+            return None
 
     def fetch_account_and_positions(self) -> tuple[float, float, float, list[dict[str, Any]], list[dict[str, Any]], set[str]]:
         account = self.trading_client.get_account()
@@ -1004,15 +1116,43 @@ class LivePortfolioManager:
 
             sym = inst.symbol
             norm_sym = normalize_symbol(sym)
-            curr_price = float(inst.entry_price)
-            sl_price = float(inst.stop_price)
-            tp_price = float(inst.target_price)
+            signal_entry_price = float(inst.entry_price)
             side_val = inst.side
+            executable_price = self._get_executable_price(
+                sym,
+                side_val,
+                signal_entry_price,
+                settings,
+            )
+            if executable_price is None:
+                continue
+
+            # Recalculate geometry and R/R from the side-aware executable quote,
+            # using the same two-decimal prices that will be sent to the broker.
+            curr_price = round(executable_price, 2)
+            sl_price = round(float(inst.stop_price), 2)
+            tp_price = round(float(inst.target_price), 2)
+            if side_val is Side.BUY:
+                valid_geometry = sl_price < curr_price < tp_price
+            else:
+                valid_geometry = tp_price < curr_price < sl_price
+            if not valid_geometry:
+                self.logger.info(
+                    f"Skipping {sym}: invalid directional bracket geometry after quote "
+                    f"(side={side_val}, entry={curr_price:.2f}, stop={sl_price:.2f}, "
+                    f"target={tp_price:.2f}) [REJECTED_EXECUTION_BRACKET_GEOMETRY]"
+                )
+                continue
+
             risk_per_share = abs(curr_price - sl_price)
             reward = abs(tp_price - curr_price)
-            stop_pct = (risk_per_share / curr_price * 100) if curr_price > 0 else 0.0
-            target_pct = (reward / curr_price * 100) if curr_price > 0 else 0.0
-            rr = (reward / risk_per_share) if risk_per_share > 0 else 0.0
+            rr = reward / risk_per_share if risk_per_share > 0 else 0.0
+            if rr < 1.10:
+                self.logger.info(
+                    f"Skipping {sym}: executable reward/risk={rr:.3f} below 1.10 "
+                    "[REJECTED_EXECUTION_MIN_RR]"
+                )
+                continue
 
             notional_cap = min(
                 settings.max_single_position_pct * account_equity,
@@ -1275,7 +1415,11 @@ class LiveMarketBot:
             self.logger.error(f"Critical initialization error: {exc}")
             sys.exit(1)
 
-        self.portfolio_manager = LivePortfolioManager(self.trading_client, self.logger)
+        self.portfolio_manager = LivePortfolioManager(
+            self.trading_client,
+            self.logger,
+            stock_client=self.stock_client,
+        )
         self.portfolio_manager.on_unprotected = lambda reason: self.kill_switch.trip(reason)
 
         self._cached_universe: list[str] = []
