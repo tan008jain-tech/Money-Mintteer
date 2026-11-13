@@ -391,7 +391,7 @@ def test_scanner_excludes_malformed_symbol_bars_without_aborting_other_symbols(
 
     now_utc = datetime(2026, 10, 18, 12, 0, 20, tzinfo=timezone.utc)
     valid_bar = SimpleNamespace(
-        timestamp=now_utc - timedelta(minutes=4),
+        timestamp=now_utc - timedelta(minutes=1),
         open=100.0,
         high=101.0,
         low=99.0,
@@ -399,7 +399,7 @@ def test_scanner_excludes_malformed_symbol_bars_without_aborting_other_symbols(
         volume=10_000.0,
     )
     malformed_bar = SimpleNamespace(
-        timestamp=now_utc - timedelta(minutes=4),
+        timestamp=now_utc - timedelta(minutes=1),
         open=float("nan"),
         high=101.0,
         low=99.0,
