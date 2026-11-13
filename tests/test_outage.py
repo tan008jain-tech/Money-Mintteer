@@ -8,6 +8,7 @@ import pytest
 import requests
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
+from types import SimpleNamespace
 
 import tempfile
 from alpaca.trading.enums import AssetStatus, AssetClass
@@ -318,6 +319,37 @@ def test_main_banner_positions_open_symbol(capsys, monkeypatch):
     captured = capsys.readouterr()
     assert "AAPL" in captured.out
     assert "POSITIONS MAY STILL BE OPEN" in captured.out
+
+
+def test_account_snapshot_rejects_non_finite_equity():
+    client = MagicMock()
+    client.get_account.return_value = SimpleNamespace(
+        cash="100.0", equity="nan", buying_power="100.0", last_equity="100.0"
+    )
+    pm = LivePortfolioManager(client, logging.getLogger("non_finite_account"))
+
+    with pytest.raises(RuntimeError, match="non-finite cash, equity, or buying power"):
+        pm.fetch_account_and_positions()
+
+
+def test_position_snapshot_rejects_non_finite_quantity():
+    client = MagicMock()
+    client.get_account.return_value = SimpleNamespace(
+        cash="100.0", equity="100.0", buying_power="100.0", last_equity="100.0"
+    )
+    client.get_all_positions.return_value = [
+        SimpleNamespace(
+            symbol="AAPL",
+            qty="nan",
+            avg_entry_price="10.0",
+            current_price="10.0",
+            unrealized_pl="0.0",
+        )
+    ]
+    pm = LivePortfolioManager(client, logging.getLogger("non_finite_position"))
+
+    with pytest.raises(RuntimeError, match="non-finite values for AAPL"):
+        pm.fetch_account_and_positions()
 
 
 def test_settings_reject_non_finite_numeric_values():
