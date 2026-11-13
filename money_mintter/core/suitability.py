@@ -187,7 +187,7 @@ class DailySuitabilityEngine:
             return None
 
         res = self.load_persisted_pool()
-        if not res or not res.generated_at or res.pool is None:
+        if not res or not res.generated_at or not res.pool:
             return None
 
         # 1. Parse and validate generation timestamp independently
@@ -337,7 +337,9 @@ class DailySuitabilityEngine:
                     act_feed = (cached_result.actual_feed or cached_result.data_source or "").strip().lower()
                     feed_matches = bool(req_feed) and req_feed == feed_policy and bool(act_feed) and act_feed == feed_policy
 
-                    if not session_expired and config_matches and universe_matches and feed_matches:
+                    is_fresh = not cached_result.stale
+                    has_pool = bool(cached_result.pool)
+                    if is_fresh and has_pool and not session_expired and config_matches and universe_matches and feed_matches:
                         self.logger.info(
                             f"[Layer 2 Suitability] Reusing cached daily pool (pool size: {len(cached_result.pool)}, "
                             f"stale: {cached_result.stale})"
@@ -345,7 +347,7 @@ class DailySuitabilityEngine:
                         return cached_result
                     else:
                         self.logger.info(
-                            f"[Layer 2 Suitability] Cache invalidated due to change in (session_expired={session_expired}, "
+                            f"[Layer 2 Suitability] Cache invalidated due to change in (fresh={is_fresh}, has_pool={has_pool}, session_expired={session_expired}, "
                             f"config_matches={config_matches}, universe_matches={universe_matches}, feed_matches={feed_matches})."
                         )
                 except Exception:

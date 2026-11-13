@@ -854,7 +854,7 @@ class LivePortfolioManager:
             locked_normalized = locked_normalized | {normalize_symbol(s) for s in dedup_tracker.pending_symbols}
 
         eligible = []
-        for inst in instructions[:active_untraded_slots]:
+        for inst in instructions:
             sym = inst.symbol
             norm_sym = normalize_symbol(sym)
             if norm_sym in locked_normalized:
@@ -895,6 +895,8 @@ class LivePortfolioManager:
 
             # Bypass legacy strategy vetoes (min_candidate_score, min_reward_risk, min_target_pct, min_gross_to_cost_multiple)
             valid_eligible.append((inst, curr_price, sl_price, tp_price, side_val, risk_per_share, reward, stop_pct, target_pct, rr))
+
+        valid_eligible = valid_eligible[:active_untraded_slots]
 
         for idx, (inst, curr_price, sl_price, tp_price, side_val, risk_per_share, reward, stop_pct, target_pct, rr) in enumerate(valid_eligible):
             sym = inst.symbol
