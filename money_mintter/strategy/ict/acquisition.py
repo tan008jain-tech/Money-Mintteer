@@ -20,11 +20,11 @@ def fetch_ict_market_data(
     symbol: str,
     start: datetime,
     end: datetime,
+    feed: str = "iex",
 ) -> ICTAcquisitionResult:
     """
-    Independently retrieve direct 1-minute and 5-minute equity candles from Alpaca
-    for ICT integration using IEX exclusively.
-    Uses identical symbol, IEX feed, and time window for both streams.
+    Retrieve direct 1-minute and 5-minute equity candles using one explicitly
+    selected realtime feed for both streams. Feed provenance is retained.
     Handles pagination correctly and validates output streams.
     """
     if start.tzinfo is None or start.utcoffset() is None:
@@ -35,8 +35,10 @@ def fetch_ict_market_data(
         raise ValueError(f"naive or invalid timezone end datetime encountered: {end}")
     end = end.astimezone(timezone.utc)
 
-    feed_enum = DataFeed.IEX
-    feed_val = "iex"
+    feed_val = str(getattr(feed, "value", feed)).strip().lower()
+    if feed_val not in ("iex", "sip"):
+        raise ValueError("ICT acquisition feed must be either 'iex' or 'sip'")
+    feed_enum = DataFeed.SIP if feed_val == "sip" else DataFeed.IEX
 
     b1_bars_raw = []
     b1_success = False
