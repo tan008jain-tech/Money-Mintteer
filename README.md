@@ -62,3 +62,11 @@ The production pipeline separates consolidated historical suitability data from 
 - `ALPACA_ALLOW_HISTORICAL_FEED_FALLBACK=false`: Cross-feed historical fallback is disabled by default. Actual feed provenance is persisted and incompatible Layer 2 caches are rejected.
 
 Layer 1 discovery must meet `MIN_UNIVERSE_HEALTH` (default 50) and a persisted cache must be no older than `MAX_UNIVERSE_CACHE_AGE_HOURS` (default 24). Layer 2 returns up to `MAX_DAILY_POOL_SIZE` qualified symbols (default 50) and never pads the pool. Layer 4 selects up to 8 candidates. Execution capacity is controlled separately by `MAX_OPEN_POSITIONS` (default 5); open positions, broker-open orders, and uncertain pending submissions each consume a symbol slot.
+
+
+## Execution and portfolio safety
+
+- `MAX_OPEN_POSITIONS=5` is the portfolio limit, separate from Layer 4's eight-candidate selection cap. Existing positions, broker-open orders, and ambiguous pending submissions consume a symbol slot.
+- `QUOTE_MAX_AGE_SECONDS=10` and `QUOTE_MAX_FUTURE_SKEW_SECONDS=2` define acceptable latest-quote timestamp freshness.
+- `MAX_EXECUTION_PRICE_DEVIATION_PCT=1` limits the side-aware executable quote (ask for buys, bid for sells) to 1% away from the ICT signal entry. Missing, stale, invalid, crossed, or out-of-tolerance quotes fail closed.
+- The executable entry, rounded stop and target must retain directional bracket geometry and at least 1.10 reward/risk before sizing. The ICT signal-generation rules are unchanged.
