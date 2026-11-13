@@ -200,7 +200,7 @@ def test_flatten_all_does_not_report_success_with_open_orders():
     acc.buying_power = "100000.0"
     client.get_account.return_value = acc
     client.get_all_positions.return_value = []
-    client.get_orders.return_value = [MagicMock(symbol="AAPL")]
+    client.get_orders.return_value = [MagicMock(id="working-aapl", symbol="AAPL")]
 
     pm = LivePortfolioManager(client, logging.getLogger("test_flatten_open_orders"))
     result = pm.flatten_all(sleep_fn=lambda _: None, max_wait_seconds=2, retry_delay=1)
