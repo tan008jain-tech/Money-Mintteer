@@ -328,6 +328,41 @@ def test_refresh_failure_never_reintroduces_raw_layer1_cache(monkeypatch, tmp_pa
     assert bot.global_universe == []
 
 
+def test_empty_layer2_pool_enters_retry_cooldown(monkeypatch):
+    calls = []
+
+    trading_client = MagicMock()
+    monkeypatch.setattr(
+        "money_mintter.core.live_bot.TradingClient",
+        lambda *args, **kwargs: trading_client,
+    )
+    monkeypatch.setattr(
+        "money_mintter.core.live_bot.StockHistoricalDataClient",
+        lambda *args, **kwargs: MagicMock(),
+    )
+    monkeypatch.setattr(
+        "money_mintter.core.live_bot.apply_default_timeout",
+        lambda *args, **kwargs: None,
+    )
+
+    def empty_discovery(*args, **kwargs):
+        calls.append(True)
+        return []
+
+    monkeypatch.setattr("money_mintter.core.live_bot.discover_universe", empty_discovery)
+    bot = LiveMarketBot()
+    assert bot.global_universe == []
+    assert len(calls) == 1
+
+    failed_at = bot._universe_last_failed
+    assert failed_at is not None
+    assert bot._get_or_refresh_universe(failed_at + timedelta(minutes=5)) == []
+    assert len(calls) == 1
+
+    assert bot._get_or_refresh_universe(failed_at + timedelta(minutes=65)) == []
+    assert len(calls) == 2
+
+
 @pytest.mark.parametrize(
     ("feed", "expected_feed"),
     [("iex", DataFeed.IEX), ("sip", DataFeed.SIP)],
