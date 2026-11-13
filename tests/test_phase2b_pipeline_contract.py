@@ -76,6 +76,7 @@ def test_feed_split_defaults_and_layer2_pool_target(monkeypatch):
         "ALPACA_REALTIME_FEED",
         "ALPACA_DATA_FEED",
         "MAX_DAILY_POOL_SIZE",
+        "MIN_UNIVERSE_HEALTH",
     ):
         monkeypatch.delenv(key, raising=False)
     settings = Settings()
@@ -266,6 +267,14 @@ def test_startup_uses_same_discovery_and_layer2_cache_path(monkeypatch, tmp_path
         "money_mintter.core.live_bot.TradingClient",
         lambda *args, **kwargs: trading_client,
     )
+    discovery_calls = []
+
+    def mock_discover(client, logger, api_key=""):
+        assert client is trading_client
+        discovery_calls.append(True)
+        return symbols
+
+    monkeypatch.setattr("money_mintter.core.live_bot.discover_universe", mock_discover)
     monkeypatch.setattr(
         "money_mintter.core.live_bot.StockHistoricalDataClient",
         lambda *args, **kwargs: MagicMock(),
@@ -273,6 +282,7 @@ def test_startup_uses_same_discovery_and_layer2_cache_path(monkeypatch, tmp_path
     monkeypatch.setattr("money_mintter.core.live_bot.apply_default_timeout", lambda *args, **kwargs: None)
 
     bot = LiveMarketBot()
+    assert discovery_calls == [True]
     assert bot.global_universe == symbols
     assert bot.scanner.data_feed == DataFeed.IEX
     assert bot._universe_last_fetched is not None
