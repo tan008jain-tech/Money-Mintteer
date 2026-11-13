@@ -152,7 +152,11 @@ def test_undersized_layer1_discovery_fails_closed(monkeypatch):
     assert pool == []
 
 
-def test_recent_validated_layer1_cache_reenters_layer2(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    "failure_mode",
+    ["api_exception", "none_response", "empty_response", "undersized_live"],
+)
+def test_recent_validated_layer1_cache_reenters_layer2(monkeypatch, tmp_path, failure_mode):
     monkeypatch.setenv("MIN_UNIVERSE_HEALTH", "50")
     logger = logging.getLogger("test_l1_cache_fallback")
     engine = StructuralEligibilityEngine(cache_dir=str(tmp_path))
@@ -188,9 +192,46 @@ def test_recent_validated_layer1_cache_reenters_layer2(monkeypatch, tmp_path):
         "money_mintter.core.suitability.DailySuitabilityEngine.evaluate_universe",
         mock_evaluate,
     )
-    pool = discover_universe(MockTradingClient(should_raise=True), logger)
+
+    if failure_mode == "api_exception":
+        client = MockTradingClient(should_raise=True)
+    elif failure_mode == "none_response":
+        client = MockTradingClient(return_none=True)
+    elif failure_mode == "empty_response":
+        client = MockTradingClient(assets=[])
+    else:
+        # A live response below the configured health floor must not bypass
+        # Layer 1 cache validation or skip the subsequent Layer 2 evaluation.
+        client = MockTradingClient([FakeAsset("LIVE1"), FakeAsset("LIVE2")])
+
+    pool = discover_universe(client, logger)
     assert evaluated_inputs == [symbols]
     assert pool == symbols[:7]
+
+
+@pytest.mark.parametrize("response_mode", ["none", "empty"])
+def test_none_and_empty_layer1_responses_fail_closed_without_cache(
+    monkeypatch, response_mode
+):
+    monkeypatch.setattr(
+        "money_mintter.core.suitability.DailySuitabilityEngine.evaluate_universe",
+        lambda *args, **kwargs: pytest.fail(
+            "Layer 2 must not receive an empty or unavailable Layer 1 universe"
+        ),
+    )
+    client = (
+        MockTradingClient(return_none=True)
+        if response_mode == "none"
+        else MockTradingClient(assets=[])
+    )
+
+    if response_mode == "none":
+        with pytest.raises(RuntimeError, match="returned None"):
+            discover_universe(client, logging.getLogger("test_l1_none"))
+    else:
+        assert discover_universe(
+            client, logging.getLogger("test_l1_empty")
+        ) == []
 
 
 def test_expired_layer1_cache_is_rejected(monkeypatch, tmp_path):
@@ -284,6 +325,7 @@ def test_startup_uses_same_discovery_and_layer2_cache_path(monkeypatch, tmp_path
     bot = LiveMarketBot()
     assert discovery_calls == [True]
     assert bot.global_universe == symbols
+    assert bot.scanner.global_universe == symbols
     assert bot.scanner.data_feed == DataFeed.IEX
     assert bot._universe_last_fetched is not None
     assert abs((bot._universe_last_fetched - (now - timedelta(hours=2))).total_seconds()) < 5
