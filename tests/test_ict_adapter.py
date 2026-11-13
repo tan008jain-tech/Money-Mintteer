@@ -51,32 +51,51 @@ def test_adapter_enforces_provenance_iex_and_completeness() -> None:
     with pytest.raises(ValueError, match="provenance check failed"):
         adapt_market_data(res_unverified, aware_dt + timedelta(minutes=10))
 
-    # 2. Non-IEX feed rejected
-    res_sip = _create_verified_acquisition_result(symbol="AAPL", b1_candles=(c,), b5_candles=(c,), feed="sip", b1_success=True, b5_success=True)
-    with pytest.raises(ValueError, match="Non-IEX feed rejected"):
-        adapt_market_data(res_sip, aware_dt + timedelta(minutes=10))
+    # 2. A trusted SIP result is accepted, and its actual provenance is preserved.
+    res_sip = _create_verified_acquisition_result(
+        symbol="AAPL",
+        b1_candles=(c,),
+        b5_candles=(c,),
+        feed="sip",
+        b1_success=True,
+        b5_success=True,
+    )
+    sip_adapter = adapt_market_data(res_sip, aware_dt + timedelta(minutes=10))
+    assert sip_adapter.feed == "sip"
 
-    # 3. Unsuccessful acquisition rejected
+    # 3. Unsupported feed metadata is rejected even when the acquisition token is valid.
+    res_unsupported = _create_verified_acquisition_result(
+        symbol="AAPL",
+        b1_candles=(c,),
+        b5_candles=(c,),
+        feed="unknown",
+        b1_success=True,
+        b5_success=True,
+    )
+    with pytest.raises(ValueError, match="Unsupported ICT acquisition feed"):
+        adapt_market_data(res_unsupported, aware_dt + timedelta(minutes=10))
+
+    # 4. Unsuccessful acquisition rejected
     res_fail = _create_verified_acquisition_result(symbol="AAPL", b1_candles=(), b5_candles=(), feed="iex", b1_success=False, b5_success=True, error_message="fail")
     with pytest.raises(ValueError, match="Unsuccessful or incomplete acquisition result rejected"):
         adapt_market_data(res_fail, aware_dt + timedelta(minutes=10))
 
-    # 4. Dataset completeness: Empty 1m stream despite successful API request rejected
+    # 5. Dataset completeness: Empty 1m stream despite successful API request rejected
     res_empty_1m = _create_verified_acquisition_result(symbol="AAPL", b1_candles=(), b5_candles=(c,), feed="iex", b1_success=True, b5_success=True)
     with pytest.raises(ValueError, match="Dataset completeness rejection: 1m stream is empty"):
         adapt_market_data(res_empty_1m, aware_dt + timedelta(minutes=10))
 
-    # 5. Dataset completeness: Empty 5m stream despite successful API request rejected
+    # 6. Dataset completeness: Empty 5m stream despite successful API request rejected
     res_empty_5m = _create_verified_acquisition_result(symbol="AAPL", b1_candles=(c,), b5_candles=(), feed="iex", b1_success=True, b5_success=True)
     with pytest.raises(ValueError, match="Dataset completeness rejection: 5m stream is empty"):
         adapt_market_data(res_empty_5m, aware_dt + timedelta(minutes=10))
 
-    # 6. Dataset completeness: Both streams empty rejected
+    # 7. Dataset completeness: Both streams empty rejected
     res_empty_both = _create_verified_acquisition_result(symbol="AAPL", b1_candles=(), b5_candles=(), feed="iex", b1_success=True, b5_success=True)
     with pytest.raises(ValueError, match="Dataset completeness rejection: 1m stream is empty"):
         adapt_market_data(res_empty_both, aware_dt + timedelta(minutes=10))
 
-    # 7. Dataset completeness: Streams becoming empty after lookahead filtering rejected
+    # 8. Dataset completeness: Streams becoming empty after lookahead filtering rejected
     future_dt = aware_dt + timedelta(hours=2)
     res_lookahead_empty = _create_verified_acquisition_result(symbol="AAPL", b1_candles=(c,), b5_candles=(c,), feed="iex", b1_success=True, b5_success=True)
     with pytest.raises(ValueError, match="Dataset completeness rejection: 1m stream became empty after lookahead filtering"):
@@ -663,7 +682,7 @@ def test_ict_error_accounting_matrix(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("money_mintter.core.live_bot.select_layer4_candidates", lambda pool, bars, max_candidates=8: [type("C", (), {"symbol": "AAPL"})(), type("C", (), {"symbol": "MSFT"})()])
     monkeypatch.setattr(MarketScanner, "is_session_open", lambda s, n: (True, "Open"))
 
-    def mock_fetch(client, sym, start, end):
+    def mock_fetch(client, sym, start, end, feed="iex"):
         if sym == "AAPL":
             b1 = [type("C", (), {"timestamp": datetime.now(timezone.utc) - timedelta(minutes=i), "open": 100, "high": 101, "low": 99, "close": 100, "volume": 1000, "symbol": "AAPL"})() for i in range(500)]
             b5 = [type("C", (), {"timestamp": datetime.now(timezone.utc) - timedelta(minutes=i*5), "open": 100, "high": 101, "low": 99, "close": 100, "volume": 5000, "symbol": "AAPL"})() for i in range(200)]
@@ -694,7 +713,10 @@ def test_ict_error_accounting_matrix(monkeypatch: pytest.MonkeyPatch) -> None:
     bot.portfolio_manager = type("PM", (), {"last_submit_failures": 0})()
 
     # Mock fetch_ict_market_data to raise ConnectivityError
-    monkeypatch.setattr("money_mintter.core.live_bot.fetch_ict_market_data", lambda client, sym, start, end: (_ for _ in ()).throw(ConnectivityError("conn fail")))
+    monkeypatch.setattr(
+        "money_mintter.core.live_bot.fetch_ict_market_data",
+        lambda client, sym, start, end, feed="iex": (_ for _ in ()).throw(ConnectivityError("conn fail")),
+    )
     monkeypatch.setattr(bot.scanner, "scan_universe", lambda now, locked, dedup_tracker=None: ((), []))
     bot.scanner.ict_attempts = 1
     bot.scanner.ict_errors = 1
