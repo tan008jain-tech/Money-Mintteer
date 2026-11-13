@@ -1478,10 +1478,8 @@ class LivePortfolioManager:
                 phase = "Initial" if first_close_attempt else "Retry"
                 retry_symbols.clear()
                 try:
-                    self.trading_client.cancel_orders()
-                except Exception as exc:
-                    self.logger.error(f"Error cancelling orders before {phase.lower()} flatten: {exc}")
-                try:
+                    # Alpaca's close_all_positions(cancel_orders=True) performs
+                    # order cancellation and liquidation as one broker operation.
                     responses = self.trading_client.close_all_positions(cancel_orders=True)
                     _remember_close_responses(responses, phase)
                 except Exception as exc:
