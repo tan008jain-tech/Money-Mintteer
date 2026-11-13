@@ -52,7 +52,7 @@ class SuitabilityResult:
 class DailySuitabilityEngine:
     """Layer 2 Daily Suitability Filter for US Equities.
     Filters eligible Layer 1 symbols for price, history, liquidity, and volatility,
-    placing extreme-volatility stocks in quarantine and ranking up to 200 core pool stocks.
+    placing extreme-volatility stocks in quarantine and ranking up to the configured pool cap (default 50).
     """
 
     def __init__(
