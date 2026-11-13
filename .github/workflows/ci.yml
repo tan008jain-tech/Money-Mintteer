@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: ["main"]
+    branches: ["main", "ict-rebuild"]
   pull_request:
-    branches: ["main"]
+    branches: ["main", "ict-rebuild"]
 
 jobs:
   test:
