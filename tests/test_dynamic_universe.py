@@ -32,6 +32,7 @@ class FakeTradingClient:
 @pytest.fixture(autouse=True)
 def _mock_suitability_evaluation(monkeypatch, tmp_path):
     monkeypatch.setenv("MIN_UNIVERSE_HEALTH", "1")
+    monkeypatch.setenv("MAX_DAILY_POOL_SIZE", "50")
     monkeypatch.setenv("ALPACA_HISTORICAL_FEED", "sip")
     monkeypatch.setenv("ALPACA_REALTIME_FEED", "iex")
     monkeypatch.setenv("ALPACA_ALLOW_HISTORICAL_FEED_FALLBACK", "false")
