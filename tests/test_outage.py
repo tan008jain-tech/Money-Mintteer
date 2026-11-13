@@ -246,6 +246,42 @@ def test_flatten_all_does_not_cancel_or_duplicate_tracked_close_orders(order_lis
         client.get_order_by_id.assert_called_with("close-aapl-1")
 
 
+def test_flatten_all_retries_position_after_close_order_rejection():
+    client = MagicMock()
+    client.get_account.return_value = SimpleNamespace(
+        cash="100000.0", equity="100000.0", buying_power="100000.0", last_equity="100000.0"
+    )
+    client.get_all_positions.return_value = [
+        SimpleNamespace(
+            symbol="AAPL", qty="10", avg_entry_price="150.0",
+            current_price="150.0", unrealized_pl="0.0",
+        )
+    ]
+    first_close = SimpleNamespace(
+        status=200, symbol="AAPL", order_id="close-aapl-1",
+        body=SimpleNamespace(id="close-aapl-1", symbol="AAPL"),
+    )
+    second_close = SimpleNamespace(
+        status=200, symbol="AAPL", order_id="close-aapl-2",
+        body=SimpleNamespace(id="close-aapl-2", symbol="AAPL"),
+    )
+    active_second_order = SimpleNamespace(
+        id="close-aapl-2", symbol="AAPL", status="new"
+    )
+    client.close_all_positions.side_effect = [[first_close], [second_close]]
+    client.get_orders.side_effect = [[], [active_second_order]]
+    client.get_order_by_id.return_value = SimpleNamespace(status="rejected")
+
+    pm = LivePortfolioManager(client, logging.getLogger("rejected_close_retry"))
+    result = pm.flatten_all(
+        sleep_fn=lambda _: None, max_wait_seconds=2, retry_delay=1
+    )
+
+    assert result == ["AAPL"]
+    assert client.close_all_positions.call_count == 2
+    client.get_order_by_id.assert_called_once_with("close-aapl-1")
+
+
 def test_flatten_all_requires_successful_open_order_verification():
     # If order state cannot be fetched, the bot must not claim a verified clean flatten.
     client = MagicMock()
