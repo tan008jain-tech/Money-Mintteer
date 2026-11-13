@@ -193,6 +193,7 @@ def generate_production_ict_signals(
     evaluation_dates: Sequence[dt_date] | None = None,
     dedup_tracker: ICTDeduplicationTracker | None = None,
     _allow_historical_evaluation: bool = False,
+    diagnostics: dict | None = None,
 ) -> tuple[ICTAdapterResult, tuple[ICTExecutionInstruction, ...]]:
     """
     Run production ICT signal generation bridge:
@@ -227,6 +228,8 @@ def generate_production_ict_signals(
 
     instructions: list[ICTExecutionInstruction] = []
     symbol = acquisition_result.symbol
+    raw_entries_count = 0
+    entry_mode_passes_count = 0
 
     with _ICT_LOCK:
         for d in target_dates:
@@ -244,6 +247,7 @@ def generate_production_ict_signals(
                 d,
                 liq,
             )
+            raw_entries_count += len(raw_entries)
 
             # Sort entries using original upstream ordering: (ns, zone priority) with IFVG priority over displacement Fvg
             sorted_entries = sorted(
@@ -271,6 +275,7 @@ def generate_production_ict_signals(
                 )
                 if sig is None:
                     continue
+                entry_mode_passes_count += 1
 
                 # Inspect resulting signal's time for IFVG time restriction (skip before 9:00 CT)
                 sig_time = sig["time"]
@@ -315,5 +320,9 @@ def generate_production_ict_signals(
                         is_diagnostic=False,
                     )
                 )
+
+    if diagnostics is not None:
+        diagnostics["raw_entries_count"] = raw_entries_count
+        diagnostics["entry_mode_passes_count"] = entry_mode_passes_count
 
     return adapter_result, tuple(instructions)

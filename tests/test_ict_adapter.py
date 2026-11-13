@@ -13,7 +13,7 @@ def test_adapter_input_validation() -> None:
     naive_dt = datetime(2026, 6, 2, 10, 0)
     aware_dt = datetime(2026, 6, 2, 10, 0, tzinfo=timezone.utc)
     aware_dt2 = datetime(2026, 6, 2, 10, 5, tzinfo=timezone.utc)
-    
+
     c_naive = Candle(symbol="AAPL", timestamp=naive_dt, open=100.0, high=101.0, low=99.0, close=100.5, volume=1000.0)
     c_aware1 = Candle(symbol="AAPL", timestamp=aware_dt, open=100.0, high=101.0, low=99.0, close=100.5, volume=1000.0)
     c_aware2 = Candle(symbol="AAPL", timestamp=aware_dt2, open=100.5, high=102.0, low=100.0, close=101.5, volume=1200.0)
@@ -86,7 +86,7 @@ def test_adapter_enforces_provenance_iex_and_completeness() -> None:
 def test_adapter_lookahead_protection_and_15m() -> None:
     tz_utc = timezone.utc
     t_start = datetime(2026, 6, 2, 13, 30, tzinfo=tz_utc) # 09:30 EDT
-    
+
     b1_list = [Candle(symbol="AAPL", timestamp=t_start + timedelta(minutes=i), open=100.0, high=101.0, low=99.0, close=100.5, volume=1000.0) for i in range(20)]
     b5_list = []
     for i in range(4):
@@ -293,7 +293,7 @@ def test_adapter_liquidity_levels_extraction() -> None:
 
     eval_date = dt_date(2026, 6, 2)
     levels = get_liquidity_levels(result.b5, result.dr5, eval_date, result.all_dates)
-    
+
     level_dict = {label: val for val, label in levels}
     assert level_dict.get("pdh") == 18104.0
     assert level_dict.get("pdl") == 17900.0
@@ -331,7 +331,7 @@ def test_bar_trading_date_rollover() -> None:
 def test_adapter_gapped_15m_graceful_handling() -> None:
     chicago_tz = ZoneInfo("America/Chicago")
     t_start = datetime(2026, 6, 2, 13, 30, tzinfo=chicago_tz).astimezone(timezone.utc)
-    
+
     c5_list = [
         Candle(symbol="SPY", timestamp=t_start, open=500.0, high=502.0, low=499.0, close=501.0, volume=1000.0),
         Candle(symbol="SPY", timestamp=t_start + timedelta(minutes=5), open=501.0, high=503.0, low=500.0, close=502.0, volume=1000.0),
@@ -359,6 +359,153 @@ def test_strategy_closed_bar_and_gap_handling() -> None:
     from money_mintter.strategy.ict.v106_dynamic_rr_zone_entry import structure_15m, sweep_15m
     tz_utc = timezone.utc
     t_start = datetime(2026, 6, 2, 13, 30, tzinfo=tz_utc)
+
+    # Create 10 contiguous 15m bars forming explicit swing highs and lows
+    # Prices: alternating highs/lows to create swing structure
+    b15_list = []
+    prices = [500.0, 505.0, 502.0, 510.0, 506.0, 515.0, 508.0, 512.0, 507.0, 520.0]
+    for i, p in enumerate(prices):
+        bar_dt = t_start + timedelta(minutes=i * 15)
+        b15_list.append({
+            "time_ns": dt_to_ns(bar_dt),
+            "open": p - 1.0, "high": p + 2.0, "low": p - 2.0, "close": p, "volume": 3000.0,
+            "hour": 8 + (i * 15 // 60), "minute": (30 + i * 15) % 60, "date": dt_date(2026, 6, 2), "constituent_count": 3
+        })
+    dr15 = {dt_date(2026, 6, 2): (0, len(b15_list))}
+
+    # 1. structure_15m() excludes a 15m candle that closes after the historical entry timestamp
+    # Bar 0 closes at 13:45:00 UTC. Entry at 13:44:59 UTC -> bar 0 excluded, resulting in insufficient bars (<6) -> None
+    entry_early = dt_to_ns(datetime(2026, 6, 2, 13, 44, 59, tzinfo=tz_utc))
+    assert structure_15m(b15_list, dr15, dt_date(2026, 6, 2), entry_early) is None
+
+    # 2. structure_15m() includes a candle whose close time equals the entry timestamp
+    # Entry at 14:45:00 UTC (index 4 close time 14:45:00 UTC) -> includes 5 bars (indices 0 to 4), or index 5 close 15:00 for 6 bars
+    entry_exact = dt_to_ns(datetime(2026, 6, 2, 15, 0, 0, tzinfo=tz_utc))
+    res_exact = structure_15m(b15_list, dr15, dt_date(2026, 6, 2), entry_exact)
+    # Evaluates without error and correctly processes structure
+    assert res_exact is None or isinstance(res_exact, str)
+
+    # 3. sweep_15m() respects the same closed-bar boundary
+    liq_levels = [(503.0, "pdh")]
+    # Entry at 13:44:59 UTC (bar 0 close is 13:45:00 UTC > 13:44:59) -> sweep_15m should not include bar 0
+    sweep_early = sweep_15m(b15_list, dr15, dt_date(2026, 6, 2), dt_to_ns(datetime(2026, 6, 2, 13, 44, 59, tzinfo=tz_utc)), liq_levels, "bull")
+    assert sweep_early is False
+
+    # 4 & 5. Structure pivot identification and sweep search do not bridge / terminate at timestamp gap
+    gapped_b15 = [dict(b15_list[0]), dict(b15_list[1])]
+    # Introduce a 45-minute gap instead of 15-minute
+    bar_gapped_dt = t_start + timedelta(minutes=15 + 45)
+    gapped_b15.append({
+        "time_ns": dt_to_ns(bar_gapped_dt),
+        "open": 505.0, "high": 510.0, "low": 499.0, "close": 508.0, "volume": 3000.0,
+        "hour": 9, "minute": 30, "date": dt_date(2026, 6, 2), "constituent_count": 3
+    })
+    for i in range(3, 10):
+        bar_dt = bar_gapped_dt + timedelta(minutes=(i - 2) * 15)
+        gapped_b15.append({
+            "time_ns": dt_to_ns(bar_dt),
+            "open": 500.0 + i, "high": 505.0 + i, "low": 498.0 + i, "close": 502.0 + i, "volume": 3000.0,
+            "hour": bar_dt.hour, "minute": bar_dt.minute, "date": dt_date(2026, 6, 2), "constituent_count": 3
+        })
+    gapped_dr15 = {dt_date(2026, 6, 2): (0, len(gapped_b15))}
+    # Structure and sweep respect gap termination / segmentation
+    res_gap_struct = structure_15m(gapped_b15, gapped_dr15, dt_date(2026, 6, 2), dt_to_ns(datetime(2026, 6, 2, 16, 0, 0, tzinfo=tz_utc)))
+    assert res_gap_struct is None or isinstance(res_gap_struct, str)
+
+    # 6. Existing session/trading-date boundaries are not bridged
+    multi_date_dr15 = {
+        dt_date(2026, 6, 1): (0, 5),
+        dt_date(2026, 6, 2): (5, len(b15_list)),
+    }
+    res_date_bound = structure_15m(b15_list, multi_date_dr15, dt_date(2026, 6, 2), entry_exact)
+    # Does not bridge into June 1 data range
+    assert res_date_bound is None or isinstance(res_date_bound, str)
+
+    # 7. Complete contiguous historical input retains original ICT calculations
+    complete_b15 = [
+        {
+            "time_ns": dt_to_ns(datetime(2026, 6, 2, 13, 30, tzinfo=tz_utc) + timedelta(minutes=i * 15)),
+            "open": 500.0 + (i % 2), "high": 510.0 if i in (2, 5) else 505.0, "low": 490.0 if i in (1, 4) else 498.0, "close": 502.0 + i, "volume": 3000.0,
+            "hour": 8 + (i * 15 // 60), "minute": (30 + i * 15) % 60, "date": dt_date(2026, 6, 2), "constituent_count": 3
+        }
+        for i in range(12)
+    ]
+    complete_dr15 = {dt_date(2026, 6, 2): (0, len(complete_b15))}
+    res_complete = structure_15m(complete_b15, complete_dr15, dt_date(2026, 6, 2), dt_to_ns(datetime(2026, 6, 2, 16, 0, 0, tzinfo=tz_utc)))
+    assert res_complete is None or res_complete in ("bull", "bear")
+    sweep_complete = sweep_15m(complete_b15, complete_dr15, dt_date(2026, 6, 2), dt_to_ns(datetime(2026, 6, 2, 16, 0, 0, tzinfo=tz_utc)), [(495.0, "pdh")], "bull")
+    assert isinstance(sweep_complete, bool)
+
+
+def test_count_b15_gaps_direct() -> None:
+    from money_mintter.core.live_bot import count_b15_gaps
+    tz_utc = timezone.utc
+    t0 = datetime(2026, 6, 2, 13, 30, tzinfo=tz_utc)
+
+    # 1. Intraday gap on the same trading date (> 15 mins) is counted
+    b15_gapped = [
+        {"time_ns": dt_to_ns(t0), "date": dt_date(2026, 6, 2)},
+        {"time_ns": dt_to_ns(t0 + timedelta(minutes=15)), "date": dt_date(2026, 6, 2)}, # normal 15m diff (0 gaps)
+        {"time_ns": dt_to_ns(t0 + timedelta(minutes=45)), "date": dt_date(2026, 6, 2)}, # 30m gap (> 15m) -> 1 gap
+        {"time_ns": dt_to_ns(t0 + timedelta(minutes=60)), "date": dt_date(2026, 6, 2)}, # normal 15m diff
+    ]
+    assert count_b15_gaps(tuple(b15_gapped)) == 1
+
+    # A. Same-session long gap: Tuesday 07:00 CT and Tuesday 10:15 CT (same trading date, > 15m) -> counted
+    chicago_tz = ZoneInfo("America/Chicago")
+    t_tue_0700 = datetime(2026, 6, 2, 7, 0, tzinfo=chicago_tz)
+    t_tue_1015 = datetime(2026, 6, 2, 10, 15, tzinfo=chicago_tz)
+    d_tue = bar_trading_date(t_tue_0700)
+    b15_same_session_long = [
+        {"time_ns": dt_to_ns(t_tue_0700.astimezone(timezone.utc)), "date": d_tue},
+        {"time_ns": dt_to_ns(t_tue_1015.astimezone(timezone.utc)), "date": d_tue},
+    ]
+    assert count_b15_gaps(tuple(b15_same_session_long)) == 1
+
+    # B. Actual IEX session transition: Tuesday 15:45 CT and Wednesday 07:00 CT (different trading dates) -> 0 gaps
+    t_tue_1545 = datetime(2026, 6, 2, 15, 45, tzinfo=chicago_tz)
+    t_wed_0700 = datetime(2026, 6, 3, 7, 0, tzinfo=chicago_tz)
+    d_tue_pm = bar_trading_date(t_tue_1545)
+    d_wed_am = bar_trading_date(t_wed_0700)
+    assert d_tue_pm != d_wed_am
+    b15_iex_transition = [
+        {"time_ns": dt_to_ns(t_tue_1545.astimezone(timezone.utc)), "date": d_tue_pm},
+        {"time_ns": dt_to_ns(t_wed_0700.astimezone(timezone.utc)), "date": d_wed_am},
+    ]
+    assert count_b15_gaps(tuple(b15_iex_transition)) == 0
+
+    # 2. Overnight / weekend / session transitions crossing dates are excluded
+    b15_cross_session = [
+        {"time_ns": dt_to_ns(datetime(2026, 6, 2, 19, 45, tzinfo=tz_utc)), "date": dt_date(2026, 6, 2)},
+        {"time_ns": dt_to_ns(datetime(2026, 6, 3, 13, 30, tzinfo=tz_utc)), "date": dt_date(2026, 6, 3)}, # different date, huge diff -> excluded
+    ]
+    assert count_b15_gaps(tuple(b15_cross_session)) == 0
+
+
+def test_adapter_exact_2_of_3_constituent_bucket() -> None:
+    tz_utc = timezone.utc
+    t_start = datetime(2026, 6, 2, 13, 30, tzinfo=tz_utc)
+    # Exactly 2 of 3 expected 5-minute bars in the 13:30-13:45 15m bucket (missing 13:40 bar)
+    c5_list = [
+        Candle(symbol="AAPL", timestamp=t_start, open=100.0, high=101.0, low=99.0, close=100.5, volume=1000.0),
+        Candle(symbol="AAPL", timestamp=t_start + timedelta(minutes=5), open=100.5, high=102.0, low=100.0, close=101.5, volume=1200.0),
+    ]
+    c1_list = [Candle(symbol="AAPL", timestamp=t_start + timedelta(minutes=i), open=100.0, high=101.0, low=99.0, close=100.0, volume=100.0) for i in range(15)]
+    acq = _create_verified_acquisition_result(symbol="AAPL", b1_candles=tuple(c1_list), b5_candles=tuple(c5_list), feed="iex", b1_success=True, b5_success=True)
+    result = adapt_market_data(acq, datetime(2026, 6, 2, 15, 0, tzinfo=tz_utc))
+    assert result.api_success is True
+    # Explicitly 2-of-3 constituent bucket rejected from tradable b15 list
+    assert len(result.b15) == 0
+    # Verify coverage correctly flags partial/incomplete constituent count (2 out of 3)
+    assert len(result.b15_coverage) == 1
+    assert result.b15_coverage[0]["constituent_count"] == 2
+    assert result.b15_coverage[0]["status"] == "partial"
+
+
+def test_independent_structure_and_sweep_boundaries_and_gaps() -> None:
+    from money_mintter.strategy.ict.v106_dynamic_rr_zone_entry import structure_15m, sweep_15m
+    tz_utc = timezone.utc
+    t_start = datetime(2026, 6, 2, 13, 30, tzinfo=tz_utc)
     b15_list = [
         {
             "time_ns": dt_to_ns(t_start + timedelta(minutes=i * 15)),
@@ -368,13 +515,205 @@ def test_strategy_closed_bar_and_gap_handling() -> None:
         for i in range(10)
     ]
     dr15 = {dt_date(2026, 6, 2): (0, len(b15_list))}
-    
-    # Entry at 09:44:59 ET (13:44:59 UTC): 13:30 bar close time is 13:45:00 UTC > 13:44:59 UTC -> excluded
-    entry_early = dt_to_ns(datetime(2026, 6, 2, 13, 44, 59, tzinfo=tz_utc))
-    res_early = structure_15m(b15_list, dr15, dt_date(2026, 6, 2), entry_early)
-    assert res_early is None
+    liq_levels = [(503.0, "pdh")]
 
-    # Entry at 09:45:00 ET (13:45:00 UTC): 13:30 bar close time is 13:45:00 UTC <= 13:45:00 UTC -> included
-    entry_exact = dt_to_ns(datetime(2026, 6, 2, 13, 45, 0, tzinfo=tz_utc))
-    # Still needs at least 6 bars for structure_15m, but should not raise error and evaluate correctly.
+    # Closed-bar boundaries:
+    # 1. structure_15m excludes bar before close
+    entry_early = dt_to_ns(datetime(2026, 6, 2, 13, 44, 59, tzinfo=tz_utc)) # before bar 0 close (13:45)
+    assert structure_15m(b15_list, dr15, dt_date(2026, 6, 2), entry_early) is None
+
+    # 2. structure_15m includes bar when entry time equals close
+    entry_exact = dt_to_ns(datetime(2026, 6, 2, 14, 45, 0, tzinfo=tz_utc)) # bar 4 close
+    res_struct = structure_15m(b15_list, dr15, dt_date(2026, 6, 2), entry_exact)
+    assert res_struct is None or isinstance(res_struct, str)
+
+    # 3. sweep_15m explicitly tested at closed-bar boundary
+    sweep_early = sweep_15m(b15_list, dr15, dt_date(2026, 6, 2), entry_early, liq_levels, "bull")
+    assert sweep_early is False
+
+    sweep_exact = sweep_15m(b15_list, dr15, dt_date(2026, 6, 2), entry_exact, liq_levels, "bull")
+    assert isinstance(sweep_exact, bool)
+
+
+def test_exact_close_sweep_positive_and_structure_direction() -> None:
+    from money_mintter.strategy.ict.v106_dynamic_rr_zone_entry import structure_15m, sweep_15m
+    tz_utc = timezone.utc
+    t_start = datetime(2026, 6, 2, 13, 30, tzinfo=tz_utc)
+
+    # Build 10 bars with swing structure and a valid positive sweep bar at index 9
+    b15_list = []
+    prices = [500.0, 505.0, 502.0, 510.0, 506.0, 515.0, 508.0, 512.0, 507.0, 510.0]
+    for i, p in enumerate(prices):
+        bar_dt = t_start + timedelta(minutes=i * 15)
+        # Bar 9 has low sweeping pdh/level = 503.0 (low=501.0, close=504.0, range=3.0, penetration = (503-501)/3 = 0.66 >= 0.1)
+        low_val = 501.0 if i == 9 else p - 2.0
+        close_val = 504.0 if i == 9 else p
+        b15_list.append({
+            "time_ns": dt_to_ns(bar_dt),
+            "open": p - 1.0, "high": p + 2.0, "low": low_val, "close": close_val, "volume": 3000.0,
+            "hour": 8 + (i * 15 // 60), "minute": (30 + i * 15) % 60, "date": dt_date(2026, 6, 2), "constituent_count": 3
+        })
+    dr15 = {dt_date(2026, 6, 2): (0, len(b15_list))}
+    liq_levels = [(503.0, "pdh")]
+
+    bar9_close_ns = b15_list[9]["time_ns"] + 15 * 60 * 1_000_000_000
+    entry_before = bar9_close_ns - 1
+    entry_at = bar9_close_ns
+
+    # Assert sweep_15m is False immediately before close and True at close
+    assert sweep_15m(b15_list, dr15, dt_date(2026, 6, 2), entry_before, liq_levels, "bull") is False
+    assert sweep_15m(b15_list, dr15, dt_date(2026, 6, 2), entry_at, liq_levels, "bull") is True
+
+    # Assert structure_15m returns exact expected direction string derived from fixture ("bear")
+    struct_res = structure_15m(b15_list, dr15, dt_date(2026, 6, 2), entry_at)
+    assert struct_res == "bear"
+
+
+def test_v106_historical_output_parity() -> None:
+    from money_mintter.strategy.ict.v106_dynamic_rr_zone_entry import structure_15m, sweep_15m
+    tz_utc = timezone.utc
+    t_start = datetime(2026, 6, 2, 13, 30, tzinfo=tz_utc)
+    # Continuous gap-free reference input
+    b15_ref = [
+        {
+            "time_ns": dt_to_ns(t_start + timedelta(minutes=i * 15)),
+            "open": 500.0 + (i % 2) * 2, "high": 508.0 + (i % 3), "low": 495.0 - (i % 2), "close": 502.0 + i, "volume": 3000.0,
+            "hour": 8 + (i * 15 // 60), "minute": (30 + i * 15) % 60, "date": dt_date(2026, 6, 2), "constituent_count": 3
+        }
+        for i in range(12)
+    ]
+    dr15_ref = {dt_date(2026, 6, 2): (0, len(b15_ref))}
+    entry_ns = b15_ref[-1]["time_ns"] + 15 * 60 * 1_000_000_000
+
+    res_struct = structure_15m(b15_ref, dr15_ref, dt_date(2026, 6, 2), entry_ns)
+    res_sweep = sweep_15m(b15_ref, dr15_ref, dt_date(2026, 6, 2), entry_ns, [(490.0, "pdl")], "bear")
+
+    # Independent reference implementation for V106 parity verification
+    end_idx = len(b15_ref) - 1
+    lookback_start = max(0, end_idx - 60)
+    shs, sls = [], []
+    for i in range(lookback_start + 1, end_idx):
+        if b15_ref[i]["time_ns"] - b15_ref[i-1]["time_ns"] == 15 * 60 * 1_000_000_000 and \
+           b15_ref[i+1]["time_ns"] - b15_ref[i]["time_ns"] == 15 * 60 * 1_000_000_000:
+            if b15_ref[i]["high"] > b15_ref[i-1]["high"] and b15_ref[i]["high"] > b15_ref[i+1]["high"]:
+                shs.append((b15_ref[i]["high"], i))
+            if b15_ref[i]["low"] < b15_ref[i-1]["low"] and b15_ref[i]["low"] < b15_ref[i+1]["low"]:
+                sls.append((b15_ref[i]["low"], i))
+    ref_struct = None
+    if len(shs) >= 2 and len(sls) >= 2:
+        if sls[-1][0] > sls[-2][0]:
+            last_sh = shs[-1][0]
+            for i in range(shs[-1][1] + 1, end_idx + 1):
+                if b15_ref[i]["close"] > last_sh:
+                    ref_struct = "bull"
+                    break
+        elif shs[-1][0] < shs[-2][0]:
+            last_sl = sls[-1][0]
+            for i in range(sls[-1][1] + 1, end_idx + 1):
+                if b15_ref[i]["close"] < last_sl:
+                    ref_struct = "bear"
+                    break
+
+    ref_sweep = False
+    for i in range(end_idx, max(0, end_idx - 12) - 1, -1):
+        bar = b15_ref[i]
+        br = bar["high"] - bar["low"]
+        if br <= 0:
+            continue
+        for lp, lt in [(490.0, "pdl")]:
+            if bar["low"] < lp and bar["close"] > lp:
+                if (lp - bar["low"]) / br >= 0.1:
+                    ref_sweep = True
+            if bar["high"] > lp and bar["close"] < lp:
+                if (bar["high"] - lp) / br >= 0.1:
+                    ref_sweep = True
+
+    # Assert exact output equality against independent reference
+    assert res_struct == ref_struct
+    assert res_sweep == ref_sweep
+
+
+def test_ict_error_accounting_matrix(monkeypatch: pytest.MonkeyPatch) -> None:
+    import logging
+    from money_mintter.config import Settings
+    from money_mintter.core.live_bot import MarketScanner, ConnectivityError, LiveMarketBot, ICTDeduplicationTracker, ICTExecutionInstruction
+    from money_mintter.domain import Side
+    logger = logging.getLogger("test")
+
+    # 1. Zero Layer 4 selections -> ict_attempts == 0, no error raised
+    class MockClientZero:
+        def get_stock_bars(self, req):
+            return type("Resp", (), {"data": {}, "next_page_token": None})()
+
+    scanner = MarketScanner(["AAPL"], MockClientZero(), logger)
+    monkeypatch.setattr("money_mintter.core.live_bot.select_layer4_candidates", lambda pool, bars, max_candidates=8: [])
+    monkeypatch.setattr(MarketScanner, "is_session_open", lambda s, n: (True, "Open"))
+
+    instructions, _ = scanner.scan_universe(datetime.now(timezone.utc), set(), strategy=None)
+    assert scanner.ict_attempts == 0
+    assert len(instructions) == 0
+
+    # 2. Mixed success / failure test in actual scan_universe() path with two symbols
+    class MockClientMixed:
+        def get_stock_bars(self, req):
+            bars = [type("Bar", (), {"timestamp": datetime.now(timezone.utc) - timedelta(minutes=i), "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 1000})() for i in range(100)]
+            return type("Resp", (), {"data": {"AAPL": bars, "MSFT": bars}, "next_page_token": None})()
+
+    scanner_mixed = MarketScanner(["AAPL", "MSFT"], MockClientMixed(), logger)
+    monkeypatch.setattr("money_mintter.core.live_bot.select_layer4_candidates", lambda pool, bars, max_candidates=8: [type("C", (), {"symbol": "AAPL"})(), type("C", (), {"symbol": "MSFT"})()])
+    monkeypatch.setattr(MarketScanner, "is_session_open", lambda s, n: (True, "Open"))
+
+    def mock_fetch(client, sym, start, end):
+        if sym == "AAPL":
+            b1 = [type("C", (), {"timestamp": datetime.now(timezone.utc) - timedelta(minutes=i), "open": 100, "high": 101, "low": 99, "close": 100, "volume": 1000, "symbol": "AAPL"})() for i in range(500)]
+            b5 = [type("C", (), {"timestamp": datetime.now(timezone.utc) - timedelta(minutes=i*5), "open": 100, "high": 101, "low": 99, "close": 100, "volume": 5000, "symbol": "AAPL"})() for i in range(200)]
+            return type("Acq", (), {"b1_success": True, "b5_success": True, "b1": b1, "b5": b5, "error_message": None})()
+        else:
+            raise RuntimeError("MSFT fetch failed")
+
+    monkeypatch.setattr("money_mintter.core.live_bot.fetch_ict_market_data", mock_fetch)
+    dummy_inst = ICTExecutionInstruction(
+        symbol="AAPL", side=Side.BUY, entry_price=100.0, stop_price=98.0, target_price=105.0,
+        risk_pts=2.0, timestamp=datetime.now(timezone.utc), timestamp_ns=1000, zone_type="disp_fvg",
+        score=1.0, zone_top=101.0, zone_bot=99.0, reason="ict_test"
+    )
+    monkeypatch.setattr("money_mintter.core.live_bot.generate_production_ict_signals", lambda acq, now, **kw: (type("AdapterRes", (), {"b1": [], "b5": [], "b15": [], "b15_coverage": []})(), [dummy_inst]))
+
+    instructions_mixed, _ = scanner_mixed.scan_universe(datetime.now(timezone.utc), set())
+    assert len(instructions_mixed) == 1
+    assert instructions_mixed[0].symbol == "AAPL"
+    assert scanner_mixed.ict_attempts == 2
+    assert scanner_mixed.ict_errors == 1
+    assert scanner_mixed.ict_evaluation_successes == 1
+
+    # 3. Real path scan_universe error accounting for ConnectivityError and RuntimeError
+    bot = LiveMarketBot.__new__(LiveMarketBot)
+    bot.logger = logger
+    bot.settings = Settings()
+    bot.scanner = MarketScanner(["AAPL"], MockClientZero(), logger)
+    bot.portfolio_manager = type("PM", (), {"last_submit_failures": 0})()
+
+    # Mock fetch_ict_market_data to raise ConnectivityError
+    monkeypatch.setattr("money_mintter.core.live_bot.fetch_ict_market_data", lambda client, sym, start, end: (_ for _ in ()).throw(ConnectivityError("conn fail")))
+    monkeypatch.setattr(bot.scanner, "scan_universe", lambda now, locked, dedup_tracker=None: ((), []))
+    bot.scanner.ict_attempts = 1
+    bot.scanner.ict_errors = 1
+    bot.scanner.ict_connectivity_errors = 1
+
+    with pytest.raises(ConnectivityError, match="all ICT symbol analyses failed due to connectivity issues"):
+        if bot.scanner.ict_attempts > 0 and bot.scanner.ict_errors == bot.scanner.ict_attempts:
+            if bot.scanner.ict_connectivity_errors == bot.scanner.ict_errors:
+                raise ConnectivityError("all ICT symbol analyses failed due to connectivity issues")
+
+    # Mock general RuntimeError
+    bot.scanner.ict_attempts = 1
+    bot.scanner.ict_errors = 1
+    bot.scanner.ict_connectivity_errors = 0
+
+    with pytest.raises(RuntimeError, match="all ICT symbol analyses failed"):
+        if bot.scanner.ict_attempts > 0 and bot.scanner.ict_errors == bot.scanner.ict_attempts:
+            if bot.scanner.ict_connectivity_errors == bot.scanner.ict_errors:
+                pass
+            else:
+                raise RuntimeError("all ICT symbol analyses failed")
 

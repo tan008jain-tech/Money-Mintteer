@@ -215,6 +215,18 @@ def discover_universe(trading_client: TradingClient, logger: logging.Logger, api
     return daily_pool
 
 
+def count_b15_gaps(b15: tuple[dict[str, Any], ...]) -> int:
+    gaps = 0
+    for i in range(1, len(b15)):
+        prev = b15[i-1]
+        curr = b15[i]
+        if prev.get("date") == curr.get("date"):
+            diff_ns = curr["time_ns"] - prev["time_ns"]
+            if diff_ns > 15 * 60 * 1_000_000_000:
+                gaps += 1
+    return gaps
+
+
 class MarketScanner:
     """Object-oriented Market Screener modeled after Freqtrade DataProvider / Lumibot Scanners.
     Responsible for global universe ingestion, session filtering, and candidate scoring.
@@ -229,6 +241,16 @@ class MarketScanner:
         self.last_scan_attempts = 0
         self.last_scan_errors = 0
         self.last_scan_connectivity_errors = 0
+        self.ict_attempts = 0
+        self.ict_acquisition_successes = 0
+        self.ict_evaluation_successes = 0
+        self.ict_errors = 0
+        self.ict_connectivity_errors = 0
+        self.ict_raw_candidates = 0
+        self.ict_entry_mode_passes = 0
+        self.ict_instructions = 0
+        self.last_l2_eligible = 0
+        self.last_l4_selected = 0
 
     @staticmethod
     def is_session_open(symbol: str, now_utc: datetime) -> tuple[bool, str]:
@@ -264,12 +286,22 @@ class MarketScanner:
         self.last_scan_attempts = 0
         self.last_scan_errors = 0
         self.last_scan_connectivity_errors = 0
+        self.ict_attempts = 0
+        self.ict_acquisition_successes = 0
+        self.ict_evaluation_successes = 0
+        self.ict_errors = 0
+        self.ict_connectivity_errors = 0
+        self.ict_raw_candidates = 0
+        self.ict_entry_mode_passes = 0
+        self.ict_instructions = 0
+
         analyzed_candidates: list[tuple[str, float, Side | None, str, float, float, float]] = []
         ict_instructions: list[ICTExecutionInstruction] = []
         dashboard_stocks = []
         locked_normalized = {normalize_symbol(s) for s in locked_symbols}
 
         pool_input = daily_pool if daily_pool is not None else self.global_universe
+        self.last_l2_eligible = len(pool_input)
         self.logger.info(f"Scanning Layer 2 daily asset pool ({len(pool_input)} assets) with core trading hours filtration...")
 
         eligible_symbols = []
@@ -313,7 +345,7 @@ class MarketScanner:
                         symbol_start_dts.append(last_ts - timedelta(minutes=15))
                     else:
                         symbol_start_dts.append(now_utc - timedelta(days=HISTORY_DAYS))
-                
+
                 batch_start_dt = min(symbol_start_dts) if symbol_start_dts else (now_utc - timedelta(days=HISTORY_DAYS))
                 if batch_start_dt.tzinfo is None:
                     batch_start_dt = batch_start_dt.replace(tzinfo=timezone.utc)
@@ -336,7 +368,7 @@ class MarketScanner:
                                 all_bars_data.setdefault(s, []).extend(bars)
                         else:
                             all_bars_data.setdefault(str(sym_key), []).extend(bars)
-                    
+
                     page_token = getattr(bars_response, 'next_page_token', None)
                     if not page_token:
                         break
@@ -416,6 +448,7 @@ class MarketScanner:
                     bars_dict[clean_symbol] = completed_candles
 
         layer4_selected = select_layer4_candidates(pool_input, bars_dict, max_candidates=8)
+        self.last_l4_selected = len(layer4_selected)
         self.logger.info(f"[Layer 4 Selector] Selected {len(layer4_selected)} candidates from pool of {len(pool_input)} symbols.")
 
         if strategy is not None:
@@ -486,13 +519,44 @@ class MarketScanner:
             dedup = dedup_tracker if dedup_tracker is not None else ICTDeduplicationTracker()
             for item in layer4_selected:
                 clean_symbol = item.symbol
+                self.ict_attempts += 1
                 try:
                     start_dt = now_utc - timedelta(days=HISTORY_DAYS)
                     if start_dt.tzinfo is None:
                         start_dt = start_dt.replace(tzinfo=timezone.utc)
 
                     acq_result = fetch_ict_market_data(self.stock_client, clean_symbol, start_dt, now_utc)
-                    _, instructions = generate_production_ict_signals(acq_result, now_utc, dedup_tracker=dedup, _allow_historical_evaluation=False)
+                    if not (acq_result.b1_success and acq_result.b5_success):
+                        self.ict_errors += 1
+                        self.logger.error(f"[ICT Pipeline] symbol={clean_symbol} acquisition=failure error={acq_result.error_message}")
+                        continue
+                    self.ict_acquisition_successes += 1
+
+                    diag = {}
+                    adapter_res, instructions = generate_production_ict_signals(
+                        acq_result, now_utc, dedup_tracker=dedup, _allow_historical_evaluation=False, diagnostics=diag
+                    )
+                    self.ict_evaluation_successes += 1
+
+                    b1_len = len(adapter_res.b1)
+                    b5_len = len(adapter_res.b5)
+                    b15_len = len(adapter_res.b15)
+                    b15_complete = sum(1 for e in adapter_res.b15_coverage if e["status"] == "complete")
+                    b15_partial = sum(1 for e in adapter_res.b15_coverage if e["status"] == "partial")
+                    b15_gaps = count_b15_gaps(adapter_res.b15)
+                    raw_entries = diag.get("raw_entries_count", 0)
+                    entry_mode_passes = diag.get("entry_mode_passes_count", 0)
+                    inst_count = len(instructions)
+
+                    self.ict_raw_candidates += raw_entries
+                    self.ict_entry_mode_passes += entry_mode_passes
+                    self.ict_instructions += inst_count
+
+                    self.logger.info(
+                        f"[ICT Pipeline] symbol={clean_symbol} acquisition=success b1={b1_len} b5={b5_len} adapter=success "
+                        f"b15={b15_len} b15_complete={b15_complete} b15_partial={b15_partial} b15_gaps={b15_gaps} "
+                        f"raw_entries={raw_entries} entry_mode_passes={entry_mode_passes} instructions={inst_count}"
+                    )
 
                     for inst in instructions:
                         ict_instructions.append(inst)
@@ -503,9 +567,9 @@ class MarketScanner:
                             "score": 1.0,
                         })
                 except Exception as sym_ex:
-                    self.last_scan_errors += 1
+                    self.ict_errors += 1
                     if is_connectivity_error(sym_ex):
-                        self.last_scan_connectivity_errors += 1
+                        self.ict_connectivity_errors += 1
                     self.logger.error(f"CRITICAL: ICT acquisition/signal error for {clean_symbol}: {sym_ex}")
             return tuple(ict_instructions), dashboard_stocks
 
@@ -1049,7 +1113,7 @@ class LiveMarketBot:
 
         self.portfolio_manager = LivePortfolioManager(self.trading_client, self.logger)
         self.portfolio_manager.on_unprotected = lambda reason: self.kill_switch.trip(reason)
-        
+
         self._cached_universe: list[str] = []
         self._universe_last_fetched: datetime | None = None
         self._universe_last_failed: datetime | None = None
@@ -1278,11 +1342,24 @@ class LiveMarketBot:
         else:
             dedup = getattr(self, 'ict_dedup_tracker', None)
             ict_instructions, dashboard_stocks = self.scanner.scan_universe(now_utc, locked_symbols_raw, dedup_tracker=dedup)
-            if self.scanner.last_scan_attempts > 0 and self.scanner.last_scan_errors == self.scanner.last_scan_attempts:
-                if self.scanner.last_scan_connectivity_errors == self.scanner.last_scan_errors:
+
+            scan_attempts = getattr(self.scanner, 'last_scan_attempts', 0)
+            scan_errors = getattr(self.scanner, 'last_scan_errors', 0)
+            scan_conn_errors = getattr(self.scanner, 'last_scan_connectivity_errors', 0)
+            if scan_attempts > 0 and scan_errors == scan_attempts:
+                if scan_conn_errors == scan_errors:
                     raise ConnectivityError("all symbol analyses failed due to connectivity issues")
                 else:
                     raise RuntimeError("all symbol analyses failed")
+
+            ict_attempts = getattr(self.scanner, 'ict_attempts', 0)
+            ict_errors = getattr(self.scanner, 'ict_errors', 0)
+            ict_conn_errors = getattr(self.scanner, 'ict_connectivity_errors', 0)
+            if ict_attempts > 0 and ict_errors == ict_attempts:
+                if ict_conn_errors == ict_errors:
+                    raise ConnectivityError("all ICT symbol analyses failed due to connectivity issues")
+                else:
+                    raise RuntimeError("all ICT symbol analyses failed")
             signals = len(ict_instructions)
 
             final_candidates = list(locked_symbols_raw) + [inst.symbol for inst in ict_instructions]
@@ -1305,6 +1382,15 @@ class LiveMarketBot:
                 processed_signals=self.processed_signals,
                 locked_normalized=locked_normalized,
                 open_exposure=open_exposure,
+            )
+
+            self.logger.info(
+                f"[ICT Cycle Summary] l2_eligible={getattr(self.scanner, 'last_l2_eligible', 0)} "
+                f"l4_selected={getattr(self.scanner, 'last_l4_selected', 0)} ict_attempts={ict_attempts} "
+                f"acquisition_successes={getattr(self.scanner, 'ict_acquisition_successes', 0)} evaluation_successes={getattr(self.scanner, 'ict_evaluation_successes', 0)} "
+                f"ict_errors={ict_errors} raw_entries={getattr(self.scanner, 'ict_raw_candidates', 0)} "
+                f"entry_mode_passes={getattr(self.scanner, 'ict_entry_mode_passes', 0)} instructions={getattr(self.scanner, 'ict_instructions', 0)} "
+                f"orders_sent={orders_sent} order_failures={self.portfolio_manager.last_submit_failures}"
             )
 
         if self.portfolio_manager.last_submit_failures > 0 and orders_sent == 0:
