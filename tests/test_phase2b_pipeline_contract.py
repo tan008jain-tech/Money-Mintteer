@@ -405,6 +405,57 @@ def test_empty_layer2_pool_enters_retry_cooldown(monkeypatch):
     assert len(calls) == 2
 
 
+def test_run_cycle_retries_failed_discovery_after_startup_cooldown(monkeypatch):
+    calls = []
+    trading_client = MagicMock()
+    stock_client = MagicMock()
+    monkeypatch.setattr(
+        "money_mintter.core.live_bot.TradingClient",
+        lambda *args, **kwargs: trading_client,
+    )
+    monkeypatch.setattr(
+        "money_mintter.core.live_bot.StockHistoricalDataClient",
+        lambda *args, **kwargs: stock_client,
+    )
+    monkeypatch.setattr(
+        "money_mintter.core.live_bot.apply_default_timeout",
+        lambda *args, **kwargs: None,
+    )
+
+    def staged_discovery(*args, **kwargs):
+        calls.append(True)
+        return [] if len(calls) == 1 else ["AAPL"]
+
+    monkeypatch.setattr("money_mintter.core.live_bot.discover_universe", staged_discovery)
+    bot = LiveMarketBot()
+    assert bot.global_universe == []
+    assert len(calls) == 1
+
+    failed_at = bot._universe_last_failed
+    assert failed_at is not None
+    bot.portfolio_manager.last_equity = 100_000.0
+    bot.portfolio_manager.last_submit_failures = 0
+    bot.portfolio_manager.fetch_account_and_positions = MagicMock(
+        return_value=(100_000.0, 100_000.0, 100_000.0, [], [], set())
+    )
+    bot.portfolio_manager.fetch_open_order_symbols = MagicMock(return_value=set())
+    bot.portfolio_manager.submit_ict_instructions = MagicMock(return_value=0)
+    bot.scanner.scan_universe = MagicMock(return_value=([], []))
+    monkeypatch.setattr(
+        MarketScanner,
+        "is_session_open",
+        staticmethod(lambda symbol, now: (True, "Open")),
+    )
+
+    result = bot.run_cycle(failed_at + timedelta(minutes=65))
+
+    assert len(calls) == 2
+    assert bot.global_universe == ["AAPL"]
+    assert bot.scanner.global_universe == ["AAPL"]
+    assert result["orders_sent"] == 0
+    bot.scanner.scan_universe.assert_called_once()
+
+
 @pytest.mark.parametrize(
     ("feed", "expected_feed"),
     [("iex", DataFeed.IEX), ("sip", DataFeed.SIP)],
