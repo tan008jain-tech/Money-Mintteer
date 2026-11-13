@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import logging
-import tempfile
-from datetime import datetime, timezone, timedelta
-import pytest
+from datetime import datetime, timedelta, timezone
+from typing import Any
+from unittest.mock import MagicMock
 
-from alpaca.trading.enums import AssetStatus, AssetClass
-from money_mintter.core.live_bot import discover_universe, LiveMarketBot, ConnectivityError, MarketScanner
+import pytest
+from alpaca.data.enums import DataFeed
+from alpaca.trading.enums import AssetClass, AssetStatus
+
+from money_mintter.config import Settings
 from money_mintter.core.eligibility import StructuralEligibilityEngine
+from money_mintter.core.live_bot import LiveMarketBot, MarketScanner, ConnectivityError, discover_universe
 from money_mintter.core.suitability import DailySuitabilityEngine, SuitabilityResult
-from money_mintter.core.selector import select_layer4_candidates
+from money_mintter.strategy.ict.acquisition import fetch_ict_market_data
 
 
 class FakeAsset:
@@ -18,7 +22,7 @@ class FakeAsset:
         self.status = status
         self.tradable = tradable
         self.asset_class = AssetClass.US_EQUITY
-        self.name = "Test Stock"
+        self.name = f"{symbol} Common Stock"
         self.exchange = "NASDAQ"
         self.shortable = True
         self.fractionable = True
@@ -26,8 +30,8 @@ class FakeAsset:
 
 
 class MockTradingClient:
-    def __init__(self, assets: list[Any], should_raise: bool = False, return_none: bool = False):
-        self.assets = assets
+    def __init__(self, assets: list[Any] | None = None, should_raise: bool = False, return_none: bool = False):
+        self.assets = assets or []
         self.should_raise = should_raise
         self.return_none = return_none
 
@@ -43,149 +47,287 @@ class MockTradingClient:
 def _setup_env(monkeypatch, tmp_path):
     monkeypatch.setenv("MM_CACHE_DIR", str(tmp_path))
     monkeypatch.setenv("MONEY_MINTTER_TEMP_DIR", str(tmp_path))
+    monkeypatch.setenv("MIN_UNIVERSE_HEALTH", "1")
+    monkeypatch.setenv("MAX_UNIVERSE_CACHE_AGE_HOURS", "24")
+    monkeypatch.setenv("MAX_DAILY_POOL_SIZE", "50")
+    monkeypatch.setenv("ALPACA_HISTORICAL_FEED", "sip")
+    monkeypatch.setenv("ALPACA_REALTIME_FEED", "iex")
+    monkeypatch.setenv("ALPACA_ALLOW_HISTORICAL_FEED_FALLBACK", "false")
+    monkeypatch.delenv("ALPACA_DATA_FEED", raising=False)
 
 
-def test_normal_l1_l2_l4_flow(monkeypatch):
+def _metadata(symbol: str) -> dict[str, Any]:
+    return {
+        "symbol": symbol,
+        "name": f"{symbol} Common Stock",
+        "exchange": "NASDAQ",
+        "shortable": True,
+        "fractionable": True,
+        "marginable": True,
+        "asset_class": "us_equity",
+        "status": "active",
+        "tradable": True,
+    }
+
+
+def test_feed_split_defaults_and_layer2_pool_target(monkeypatch):
+    for key in (
+        "ALPACA_HISTORICAL_FEED",
+        "ALPACA_REALTIME_FEED",
+        "ALPACA_DATA_FEED",
+        "MAX_DAILY_POOL_SIZE",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    settings = Settings()
+    assert settings.alpaca_historical_feed == "sip"
+    assert settings.alpaca_realtime_feed == "iex"
+    assert settings.max_daily_pool_size == 50
+    assert settings.min_universe_health == 50
+    assert settings.max_universe_cache_age_hours == 24.0
+    assert settings.alpaca_allow_historical_feed_fallback is False
+
+
+def test_normal_layer1_layer2_layer4_pipeline(monkeypatch):
     assets = [FakeAsset(f"SYM{i}") for i in range(10)]
-    client = MockTradingClient(assets)
-    logger = logging.getLogger("test_flow")
+    logger = logging.getLogger("test_phase2b_flow")
 
-    # Mock DailySuitabilityEngine evaluate_universe to return a subset
-    monkeypatch.setattr(
-        "money_mintter.core.suitability.DailySuitabilityEngine.evaluate_universe",
-        lambda self, symbols, now=None, force=False: SuitabilityResult(
+    def mock_evaluate(self, symbols, now_utc=None, force_refresh=False):
+        return SuitabilityResult(
             pool=symbols[:5],
             quarantined=[],
             metrics={},
             exclusion_counts={},
-            requested_feed="iex",
-            actual_feed="iex",
-            data_source="iex",
+            requested_feed=self.historical_feed.upper(),
+            actual_feed=self.historical_feed.upper(),
+            data_source=self.historical_feed.upper(),
             generated_at=datetime.now(timezone.utc).isoformat(),
             stale=False,
             cached=False,
             config_signature=self._compute_config_signature(),
             universe_signature=self._compute_universe_signature(symbols),
         )
-    )
-
-    pool = discover_universe(client, logger, api_key="test")
-    assert len(pool) == 5
-    # Proof that Layer 4 receives only validated Layer 2 pool, never raw L1 symbols
-    assert set(pool).issubset({a.symbol for a in assets})
-    assert len(pool) < len(assets)
-
-
-def test_startup_fresh_valid_l2_cache(monkeypatch, tmp_path):
-    cache_dir = str(tmp_path)
-    engine = StructuralEligibilityEngine(cache_dir=cache_dir)
-    now = datetime.now(timezone.utc)
-    engine.save_persisted_cache(["AAPL", "MSFT"], {"AAPL": {}, "MSFT": {}}, now)
-
-    l2_engine = DailySuitabilityEngine(cache_dir=cache_dir)
-    l2_result = SuitabilityResult(
-        pool=["AAPL", "MSFT"],
-        quarantined=[],
-        metrics={},
-        exclusion_counts={},
-        requested_feed="iex",
-        actual_feed="iex",
-        data_source="iex",
-        generated_at=now.isoformat(),
-        stale=False,
-        cached=True,
-        config_signature=l2_engine._compute_config_signature(),
-        universe_signature=l2_engine._compute_universe_signature(["AAPL", "MSFT"]),
-    )
-    l2_engine.save_persisted_pool(l2_result)
-
-    bot = LiveMarketBot()
-    assert bot.global_universe == ["AAPL", "MSFT"]
-
-
-def test_l1_api_exception_none_empty(monkeypatch):
-    logger = logging.getLogger("test_api")
-    client_raise = MockTradingClient([], should_raise=True)
-    with pytest.raises(ConnectivityError):
-        discover_universe(client_raise, logger)
-
-    client_none = MockTradingClient([], return_none=True)
-    with pytest.raises(RuntimeError):
-        discover_universe(client_none, logger)
-
-
-def test_undersized_l1_discovery(monkeypatch):
-    assets = [FakeAsset("AAPL"), FakeAsset("MSFT")]
-    client = MockTradingClient(assets)
-    logger = logging.getLogger("test_undersized")
 
     monkeypatch.setattr(
         "money_mintter.core.suitability.DailySuitabilityEngine.evaluate_universe",
-        lambda self, symbols, now=None, force=False: SuitabilityResult(
+        mock_evaluate,
+    )
+    layer2_pool = discover_universe(MockTradingClient(assets), logger, api_key="test")
+    assert layer2_pool == [f"SYM{i}" for i in range(5)]
+    assert len(layer2_pool) <= 50
+
+    selector_inputs: list[list[str]] = []
+
+    def selector_spy(symbols, bars_dict, max_candidates=8):
+        selector_inputs.append(list(symbols))
+        return []
+
+    monkeypatch.setattr("money_mintter.core.live_bot.select_layer4_candidates", selector_spy)
+
+    class EmptyStockClient:
+        def get_stock_bars(self, request):
+            return MagicMock(data={}, next_page_token=None)
+
+    scanner = MarketScanner(layer2_pool, EmptyStockClient(), logger, data_feed=DataFeed.IEX)
+    monkeypatch.setattr(
+        MarketScanner,
+        "is_session_open",
+        staticmethod(lambda symbol, now: (True, "Open")),
+    )
+    scanner.scan_universe(datetime(2026, 11, 13, 15, 0, tzinfo=timezone.utc), set())
+    assert selector_inputs == [layer2_pool]
+    assert scanner.last_l2_eligible == len(layer2_pool)
+
+
+def test_undersized_layer1_discovery_fails_closed(monkeypatch):
+    monkeypatch.setenv("MIN_UNIVERSE_HEALTH", "50")
+    monkeypatch.setattr(
+        "money_mintter.core.suitability.DailySuitabilityEngine.evaluate_universe",
+        lambda *args, **kwargs: pytest.fail("Layer 2 must not receive an unhealthy Layer 1 universe"),
+    )
+    pool = discover_universe(
+        MockTradingClient([FakeAsset("AAPL"), FakeAsset("MSFT")]),
+        logging.getLogger("test_undersized"),
+    )
+    assert pool == []
+
+
+def test_recent_validated_layer1_cache_reenters_layer2(monkeypatch, tmp_path):
+    monkeypatch.setenv("MIN_UNIVERSE_HEALTH", "50")
+    logger = logging.getLogger("test_l1_cache_fallback")
+    engine = StructuralEligibilityEngine(cache_dir=str(tmp_path))
+    symbols, metadata, _ = engine.filter_universe(
+        [FakeAsset(f"SYM{i:02d}") for i in range(55)],
+        logger,
+    )
+    engine.save_persisted_cache(
+        symbols,
+        metadata,
+        datetime.now(timezone.utc) - timedelta(hours=2),
+    )
+    evaluated_inputs: list[list[str]] = []
+
+    def mock_evaluate(self, eligible_symbols, now_utc=None, force_refresh=False):
+        evaluated_inputs.append(list(eligible_symbols))
+        return SuitabilityResult(
+            pool=eligible_symbols[:7],
+            quarantined=[],
+            metrics={},
+            exclusion_counts={},
+            requested_feed="SIP",
+            actual_feed="SIP",
+            data_source="SIP",
+            generated_at=datetime.now(timezone.utc).isoformat(),
+            stale=False,
+            cached=False,
+            config_signature=self._compute_config_signature(),
+            universe_signature=self._compute_universe_signature(eligible_symbols),
+        )
+
+    monkeypatch.setattr(
+        "money_mintter.core.suitability.DailySuitabilityEngine.evaluate_universe",
+        mock_evaluate,
+    )
+    pool = discover_universe(MockTradingClient(should_raise=True), logger)
+    assert evaluated_inputs == [symbols]
+    assert pool == symbols[:7]
+
+
+def test_expired_layer1_cache_is_rejected(monkeypatch, tmp_path):
+    monkeypatch.setenv("MIN_UNIVERSE_HEALTH", "50")
+    logger = logging.getLogger("test_expired_l1")
+    engine = StructuralEligibilityEngine(cache_dir=str(tmp_path))
+    symbols, metadata, _ = engine.filter_universe(
+        [FakeAsset(f"SYM{i:02d}") for i in range(55)],
+        logger,
+    )
+    engine.save_persisted_cache(
+        symbols,
+        metadata,
+        datetime.now(timezone.utc) - timedelta(hours=25),
+    )
+    cached, _, fetched = engine.load_validated_cache(datetime.now(timezone.utc), 24, 50)
+    assert cached == []
+    assert fetched is None
+    with pytest.raises(ConnectivityError):
+        discover_universe(MockTradingClient(should_raise=True), logger)
+
+
+def test_corrupt_layer1_cache_metadata_is_rejected(tmp_path):
+    engine = StructuralEligibilityEngine(cache_dir=str(tmp_path))
+    engine.save_persisted_cache(
+        ["AAPL", "MSFT"],
+        {"AAPL": {}, "MSFT": {}},
+        datetime.now(timezone.utc),
+    )
+    cached, metadata, fetched = engine.load_validated_cache(datetime.now(timezone.utc), 24, 1)
+    assert cached == []
+    assert metadata == {}
+    assert fetched is None
+
+
+def test_startup_uses_same_discovery_and_layer2_cache_path(monkeypatch, tmp_path):
+    monkeypatch.setenv("MIN_UNIVERSE_HEALTH", "1")
+    cache_dir = str(tmp_path)
+    monkeypatch.setenv("MM_CACHE_DIR", cache_dir)
+    monkeypatch.setenv("MONEY_MINTTER_TEMP_DIR", cache_dir)
+    now = datetime.now(timezone.utc)
+    symbols = ["AAPL", "MSFT"]
+    l1_engine = StructuralEligibilityEngine(cache_dir=cache_dir)
+    l1_engine.save_persisted_cache(
+        symbols,
+        {symbol: _metadata(symbol) for symbol in symbols},
+        now - timedelta(hours=2),
+    )
+    l2_engine = DailySuitabilityEngine(
+        settings=Settings(),
+        cache_dir=cache_dir,
+        historical_feed="sip",
+    )
+    l2_engine.save_persisted_pool(
+        SuitabilityResult(
             pool=symbols,
             quarantined=[],
             metrics={},
             exclusion_counts={},
-            requested_feed="iex",
-            actual_feed="iex",
-            data_source="iex",
-            generated_at=datetime.now(timezone.utc).isoformat(),
+            requested_feed="SIP",
+            actual_feed="SIP",
+            data_source="SIP",
+            generated_at=(now - timedelta(hours=2)).isoformat(),
             stale=False,
-            cached=False,
-            config_signature=self._compute_config_signature(),
-            universe_signature=self._compute_universe_signature(symbols),
+            cached=True,
+            config_signature=l2_engine._compute_config_signature(),
+            universe_signature=l2_engine._compute_universe_signature(symbols),
         )
     )
 
-    pool = discover_universe(client, logger)
-    assert pool == ["AAPL", "MSFT"]
-
-
-def test_incompatible_l2_stale_fallback_disables_new_entries(monkeypatch):
-    client = MockTradingClient([])
-    logger = logging.getLogger("test_fallback")
-
+    trading_client = MagicMock()
+    trading_client.get_all_assets.side_effect = RuntimeError("API unavailable")
     monkeypatch.setattr(
-        "money_mintter.core.suitability.DailySuitabilityEngine.evaluate_universe",
-        lambda self, symbols, now=None, force=False: (_ for _ in ()).throw(RuntimeError("L2 evaluation failed"))
+        "money_mintter.core.live_bot.TradingClient",
+        lambda *args, **kwargs: trading_client,
     )
     monkeypatch.setattr(
-        "money_mintter.core.suitability.DailySuitabilityEngine.load_stale_fallback_pool",
-        lambda self, eligible_symbols=None, max_stale_sessions=3: None
+        "money_mintter.core.live_bot.StockHistoricalDataClient",
+        lambda *args, **kwargs: MagicMock(),
     )
+    monkeypatch.setattr("money_mintter.core.live_bot.apply_default_timeout", lambda *args, **kwargs: None)
 
-    pool = discover_universe(client, logger)
-    assert pool == []
-
-
-def test_layer4_never_receives_raw_l1_symbols():
-    raw_l1 = ["RAW1", "RAW2", "RAW3", "RAW4", "RAW5"]
-    validated_l2 = ["VAL1", "VAL2"]
-    class FakeStockClient:
-        def get_stock_bars(self, req):
-            class FakeBar:
-                close = 100.0
-                high = 101.0
-                low = 99.0
-                volume = 1_000_000
-                vwap = 100.0
-                timestamp = datetime.now(timezone.utc)
-            return type("Resp", (), {"data": {sym: [FakeBar()] for sym in validated_l2}})()
-
-    scanner = MarketScanner(raw_l1, FakeStockClient(), logging.getLogger("test_l4"))
-    # If scanner scans using validated_l2 pool directly or global_universe
-    # We verify select_layer4_candidates receives only validated L2 pool
-    bars_dict = {"VAL1": (), "VAL2": ()}
-    selected = select_layer4_candidates(validated_l2, bars_dict, max_candidates=8)
-    for c in selected:
-        assert c.symbol in validated_l2
-        assert c.symbol not in raw_l1 or c.symbol in validated_l2
-
-
-def test_position_management_continuity_when_new_entries_disabled(monkeypatch):
-    # Verify existing position management methods remain active even when global_universe is empty / new entries disabled
     bot = LiveMarketBot()
-    bot.global_universe = []
-    # Verify portfolio manager or trade manager methods exist and can manage positions
-    assert hasattr(bot, "portfolio_manager")
-    assert hasattr(bot, "kill_switch")
+    assert bot.global_universe == symbols
+    assert bot.scanner.data_feed == DataFeed.IEX
+    assert bot._universe_last_fetched is not None
+    assert abs((bot._universe_last_fetched - (now - timedelta(hours=2))).total_seconds()) < 5
+
+
+def test_refresh_failure_never_reintroduces_raw_layer1_cache(monkeypatch, tmp_path):
+    cache_dir = str(tmp_path)
+    monkeypatch.setenv("MM_CACHE_DIR", cache_dir)
+    monkeypatch.setenv("MONEY_MINTTER_TEMP_DIR", cache_dir)
+    l1_engine = StructuralEligibilityEngine(cache_dir=cache_dir)
+    raw_symbols = [f"RAW{i:02d}" for i in range(55)]
+    l1_engine.save_persisted_cache(
+        raw_symbols,
+        {symbol: _metadata(symbol) for symbol in raw_symbols},
+        datetime.now(timezone.utc),
+    )
+
+    trading_client = MagicMock()
+    monkeypatch.setattr(
+        "money_mintter.core.live_bot.TradingClient",
+        lambda *args, **kwargs: trading_client,
+    )
+    monkeypatch.setattr(
+        "money_mintter.core.live_bot.StockHistoricalDataClient",
+        lambda *args, **kwargs: MagicMock(),
+    )
+    monkeypatch.setattr("money_mintter.core.live_bot.apply_default_timeout", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "money_mintter.core.live_bot.discover_universe",
+        lambda *args, **kwargs: ["VALIDATED_L2"],
+    )
+    bot = LiveMarketBot()
+    bot._cached_universe = ["VALIDATED_L2"]
+    bot._universe_last_fetched = datetime.now(timezone.utc) - timedelta(hours=25)
+    monkeypatch.setattr(
+        "money_mintter.core.live_bot.discover_universe",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("refresh failure")),
+    )
+    universe = bot._get_or_refresh_universe(datetime.now(timezone.utc))
+    assert universe == []
+    assert not set(universe).intersection(raw_symbols)
+    assert bot.global_universe == []
+
+
+@pytest.mark.parametrize(
+    ("feed", "expected_feed"),
+    [("iex", DataFeed.IEX), ("sip", DataFeed.SIP)],
+)
+def test_ict_acquisition_uses_one_explicit_feed_for_both_timeframes(feed, expected_feed):
+    stock_client = MagicMock()
+    stock_client.get_stock_bars.return_value = MagicMock(data={}, next_page_token=None)
+    start = datetime(2026, 11, 13, 13, 0, tzinfo=timezone.utc)
+    end = datetime(2026, 11, 13, 15, 0, tzinfo=timezone.utc)
+    result = fetch_ict_market_data(stock_client, "AAPL", start, end, feed=feed)
+    requested_feeds = [call.args[0].feed for call in stock_client.get_stock_bars.call_args_list]
+    assert requested_feeds == [expected_feed, expected_feed]
+    assert result.feed == feed
