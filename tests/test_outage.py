@@ -190,6 +190,44 @@ def test_flatten_all_never_succeeds_unknown():
     assert len(sleeps) == math.ceil(60 / 15)
 
 
+def test_flatten_all_does_not_report_success_with_open_orders():
+    # A flat position book is not clean if a working order can still open exposure.
+    client = MagicMock()
+    acc = MagicMock()
+    acc.cash = "100000.0"
+    acc.equity = "100000.0"
+    acc.buying_power = "100000.0"
+    client.get_account.return_value = acc
+    client.get_all_positions.return_value = []
+    client.get_orders.return_value = [MagicMock(symbol="AAPL")]
+
+    pm = LivePortfolioManager(client, logging.getLogger("test_flatten_open_orders"))
+    result = pm.flatten_all(sleep_fn=lambda _: None, max_wait_seconds=2, retry_delay=1)
+
+    assert result == ["AAPL"]
+    assert client.cancel_orders.call_count >= 1
+    assert client.close_all_positions.call_count >= 1
+    assert client.get_orders.call_count >= 1
+
+
+def test_flatten_all_requires_successful_open_order_verification():
+    # If order state cannot be fetched, the bot must not claim a verified clean flatten.
+    client = MagicMock()
+    acc = MagicMock()
+    acc.cash = "100000.0"
+    acc.equity = "100000.0"
+    acc.buying_power = "100000.0"
+    client.get_account.return_value = acc
+    client.get_all_positions.return_value = []
+    client.get_orders.side_effect = RuntimeError("orders endpoint unavailable")
+
+    pm = LivePortfolioManager(client, logging.getLogger("test_flatten_unknown_orders"))
+    result = pm.flatten_all(sleep_fn=lambda _: None, max_wait_seconds=2, retry_delay=1)
+
+    assert result == ["UNKNOWN"]
+    assert client.get_orders.call_count >= 1
+
+
 def test_flatten_all_monotonic_deadline_accounts_for_broker_time():
     # Breaks if flatten_all max_wait_seconds does not account for time spent in broker requests using monotonic deadline
     client = MagicMock()
