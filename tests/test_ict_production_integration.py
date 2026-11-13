@@ -296,3 +296,127 @@ def test_market_scanner_ict_historical_lookback_window(monkeypatch: pytest.Monke
 
 
 
+
+
+def _execution_instruction(
+    symbol: str,
+    *,
+    entry: float = 100.0,
+    stop: float = 98.0,
+    target: float = 105.0,
+    timestamp_ns: int = 1000,
+    zone_top: float = 101.0,
+    zone_bot: float = 99.0,
+) -> ICTExecutionInstruction:
+    return ICTExecutionInstruction(
+        symbol=symbol,
+        side=Side.BUY,
+        entry_price=entry,
+        stop_price=stop,
+        target_price=target,
+        risk_pts=abs(entry - stop),
+        timestamp=datetime.now(timezone.utc),
+        timestamp_ns=timestamp_ns,
+        zone_type="disp_fvg",
+        score=1.0,
+        zone_top=zone_top,
+        zone_bot=zone_bot,
+        reason="phase2c_test",
+    )
+
+
+def test_pending_orders_consume_capacity_and_duplicate_symbols_are_filtered(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MAX_PORTFOLIO_RISK_PCT", "3")
+    logger = logging.getLogger("phase2c_capacity")
+    submitted: list[str] = []
+
+    class RecordingBroker:
+        def submit_order(self, req):
+            submitted.append(req.symbol)
+            return type("Order", (), {"order_class": "bracket", "legs": [1, 2], "id": f"id_{req.symbol}"})()
+
+    pm = LivePortfolioManager(RecordingBroker(), logger)
+    settings = Settings()
+    tracker = ICTDeduplicationTracker()
+
+    first_aapl = _execution_instruction("AAPL", timestamp_ns=1, zone_top=101.0, zone_bot=99.0)
+    duplicate_aapl = _execution_instruction("AAPL", timestamp_ns=2, zone_top=102.0, zone_bot=100.0)
+    msft = _execution_instruction("MSFT", timestamp_ns=3)
+    nvda = _execution_instruction("NVDA", timestamp_ns=4)
+
+    sent = pm.submit_ict_instructions(
+        [first_aapl, duplicate_aapl, msft, nvda],
+        locked_symbols={"HELD_POSITION"},
+        account_equity=100_000.0,
+        settings=settings,
+        dedup_tracker=tracker,
+        locked_normalized={"HELD_POSITION", "OPEN_ORDER_1", "OPEN_ORDER_2"},
+        buying_power=100_000.0,
+    )
+
+    # One position + two different-symbol open orders occupy three slots.
+    # Only two slots remain, and the second AAPL instruction cannot use another slot.
+    assert sent == 2
+    assert submitted == ["AAPL", "MSFT"]
+    assert tracker.is_executed("AAPL", "bull", "disp_fvg", 101.0, 99.0)
+    assert not tracker.is_executed("AAPL", "bull", "disp_fvg", 102.0, 100.0)
+    assert tracker.is_executed("MSFT", "bull", "disp_fvg", 101.0, 99.0)
+
+
+def test_risk_or_capital_rejection_backfills_next_candidate(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MAX_OPEN_POSITIONS", "1")
+    monkeypatch.setenv("MAX_PORTFOLIO_RISK_PCT", "3")
+    logger = logging.getLogger("phase2c_backfill")
+    submitted: list[str] = []
+
+    class RecordingBroker:
+        def submit_order(self, req):
+            submitted.append(req.symbol)
+            return type("Order", (), {"order_class": "bracket", "legs": [1, 2], "id": "valid_order"})()
+
+    pm = LivePortfolioManager(RecordingBroker(), logger)
+    settings = Settings()
+    assert settings.max_open_positions == 1
+
+    too_expensive = _execution_instruction("EXPENSIVE", entry=1_000.0, stop=980.0, target=1_050.0)
+    valid = _execution_instruction("VALID", entry=100.0, stop=98.0, target=105.0, timestamp_ns=2)
+
+    sent = pm.submit_ict_instructions(
+        [too_expensive, valid],
+        locked_symbols=set(),
+        account_equity=100_000.0,
+        settings=settings,
+        open_exposure=99_500.0,
+        buying_power=500.0,
+    )
+
+    # EXPENSIVE cannot fit the available $500 allocation. It must not consume the
+    # only slot; VALID is evaluated and submitted instead.
+    assert sent == 1
+    assert submitted == ["VALID"]
+
+
+def test_max_open_positions_setting_is_enforced_against_positions_and_orders(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MAX_OPEN_POSITIONS", "2")
+    logger = logging.getLogger("phase2c_capacity_config")
+    submitted: list[str] = []
+
+    class RecordingBroker:
+        def submit_order(self, req):
+            submitted.append(req.symbol)
+            return type("Order", (), {"order_class": "bracket", "legs": [1, 2], "id": "unexpected"})()
+
+    pm = LivePortfolioManager(RecordingBroker(), logger)
+    settings = Settings()
+    assert settings.max_open_positions == 2
+
+    sent = pm.submit_ict_instructions(
+        [_execution_instruction("AAPL")],
+        locked_symbols={"POSITION_1"},
+        account_equity=100_000.0,
+        settings=settings,
+        locked_normalized={"POSITION_1", "OPEN_ORDER_1"},
+    )
+
+    assert sent == 0
+    assert submitted == []
