@@ -369,6 +369,61 @@ def test_scanner_filters_stale_bars_before_layer4(
 
 
 
+
+def test_scanner_excludes_malformed_symbol_bars_without_aborting_other_symbols(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from money_mintter.core.live_bot import MarketScanner
+
+    now_utc = datetime(2026, 10, 18, 12, 0, 20, tzinfo=timezone.utc)
+    valid_bar = SimpleNamespace(
+        timestamp=now_utc - timedelta(minutes=4),
+        open=100.0,
+        high=101.0,
+        low=99.0,
+        close=100.5,
+        volume=10_000.0,
+    )
+    malformed_bar = SimpleNamespace(
+        timestamp=now_utc - timedelta(minutes=4),
+        open=float("nan"),
+        high=101.0,
+        low=99.0,
+        close=100.5,
+        volume=10_000.0,
+    )
+
+    class StockClient:
+        def get_stock_bars(self, request):
+            return SimpleNamespace(
+                data={"AAPL": [malformed_bar], "MSFT": [valid_bar]},
+                next_page_token=None,
+            )
+
+    scanner = MarketScanner(
+        ["AAPL", "MSFT"], StockClient(), logging.getLogger("malformed_bar_isolation")
+    )
+    selector_inputs: list[list[str]] = []
+
+    def selector_spy(pool, bars, max_candidates=8):
+        selector_inputs.append(list(bars))
+        return []
+
+    monkeypatch.setattr("money_mintter.core.live_bot.select_layer4_candidates", selector_spy)
+    monkeypatch.setattr(
+        MarketScanner,
+        "is_session_open",
+        staticmethod(lambda symbol, now: (True, "Open")),
+    )
+
+    instructions, _ = scanner.scan_universe(now_utc, set(), strategy=None)
+
+    assert instructions == ()
+    assert selector_inputs == [["MSFT"]]
+    assert scanner.last_scan_attempts == 2
+    assert scanner.last_scan_errors == 1
+
+
 def _execution_instruction(
     symbol: str,
     *,
