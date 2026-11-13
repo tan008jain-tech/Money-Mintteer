@@ -287,7 +287,7 @@ def test_market_scanner_ict_historical_lookback_window(monkeypatch: pytest.Monke
 
     now_utc = datetime(2026, 10, 18, 12, 0, 0, tzinfo=timezone.utc)
 
-    recent_ts = now_utc - timedelta(minutes=10)
+    recent_ts = now_utc - timedelta(minutes=4)
     cached_candles = [
         Candle(timestamp=recent_ts - timedelta(minutes=i), open=100.0, high=101.0, low=99.0, close=100.0, volume=1000.0, symbol="AAPL")
         for i in range(5)
@@ -318,6 +318,52 @@ def test_market_scanner_ict_historical_lookback_window(monkeypatch: pytest.Monke
     assert captured_start == expected_start, f"Expected start_dt {expected_start}, got {captured_start}"
     assert captured_start != recent_ts - timedelta(minutes=15)
     assert captured_end == now_utc
+
+
+@pytest.mark.parametrize(
+    ("bar_age_minutes", "expected_symbols"),
+    [(4, ["AAPL"]), (10, [])],
+)
+def test_scanner_filters_stale_bars_before_layer4(
+    monkeypatch: pytest.MonkeyPatch,
+    bar_age_minutes: int,
+    expected_symbols: list[str],
+) -> None:
+    from money_mintter.core.live_bot import MarketScanner
+
+    now_utc = datetime(2026, 10, 18, 12, 0, 20, tzinfo=timezone.utc)
+    raw_bar = SimpleNamespace(
+        timestamp=now_utc - timedelta(minutes=bar_age_minutes),
+        open=100.0,
+        high=101.0,
+        low=99.0,
+        close=100.5,
+        volume=10_000.0,
+    )
+
+    class StockClient:
+        def get_stock_bars(self, request):
+            return SimpleNamespace(data={"AAPL": [raw_bar]}, next_page_token=None)
+
+    scanner = MarketScanner(["AAPL"], StockClient(), logging.getLogger("layer4_freshness"))
+    selector_inputs: list[list[str]] = []
+
+    def selector_spy(pool, bars, max_candidates=8):
+        selector_inputs.append(list(bars))
+        return []
+
+    monkeypatch.setattr("money_mintter.core.live_bot.select_layer4_candidates", selector_spy)
+    monkeypatch.setattr(
+        MarketScanner,
+        "is_session_open",
+        staticmethod(lambda symbol, now: (True, "Open")),
+    )
+
+    instructions, _ = scanner.scan_universe(now_utc, set(), strategy=None)
+
+    assert instructions == ()
+    assert selector_inputs == [expected_symbols]
+    assert scanner.last_l4_selected == 0
 
 
 
