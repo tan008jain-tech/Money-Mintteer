@@ -328,6 +328,7 @@ def test_stale_fallback_fail_closed_universe_mismatch() -> None:
 
 
 def test_feed_retry_non_mixing_multibatch(monkeypatch) -> None:
+    monkeypatch.setenv("ALPACA_ALLOW_HISTORICAL_FEED_FALLBACK", "true")
     settings = Settings()
     with tempfile.TemporaryDirectory() as tmpdir:
         stock_client = MagicMock()
@@ -342,8 +343,7 @@ def test_feed_retry_non_mixing_multibatch(monkeypatch) -> None:
 
         stock_client.get_stock_bars.side_effect = mock_get_bars
 
-        # With IEX fallback enabled via environment variable
-        monkeypatch.setenv("ALPACA_ALLOW_IEX_FALLBACK", "true")
+        # IEX fallback was explicitly enabled before Settings construction.
         engine = DailySuitabilityEngine(settings=settings, stock_client=stock_client, cache_dir=tmpdir, historical_feed="sip")
         
         # When SIP fails and fallback is enabled, evaluate_universe restarts entire evaluation with IEX
@@ -407,6 +407,7 @@ def test_compatibility_validation_independent_of_calendar_fallback() -> None:
 
 
 def test_genuine_multibatch_feed_retry_51_symbols(monkeypatch) -> None:
+    monkeypatch.setenv("ALPACA_ALLOW_HISTORICAL_FEED_FALLBACK", "true")
     settings = Settings()
     with tempfile.TemporaryDirectory() as tmpdir:
         stock_client = MagicMock()
@@ -437,7 +438,6 @@ def test_genuine_multibatch_feed_retry_51_symbols(monkeypatch) -> None:
 
         stock_client.get_stock_bars.side_effect = mock_get_bars
 
-        monkeypatch.setenv("ALPACA_ALLOW_IEX_FALLBACK", "true")
         engine = DailySuitabilityEngine(settings=settings, stock_client=stock_client, cache_dir=tmpdir, historical_feed="sip")
         
         res = engine.evaluate_universe(symbols, now_utc=fixed_now, force_refresh=True)
@@ -498,6 +498,7 @@ def test_genuine_multibatch_feed_retry_51_symbols(monkeypatch) -> None:
 
 
 def test_sip_failure_no_fallback_fails_safely(monkeypatch) -> None:
+    monkeypatch.setenv("ALPACA_ALLOW_HISTORICAL_FEED_FALLBACK", "false")
     settings = Settings()
     with tempfile.TemporaryDirectory() as tmpdir:
         stock_client = MagicMock()
@@ -514,7 +515,6 @@ def test_sip_failure_no_fallback_fails_safely(monkeypatch) -> None:
 
         stock_client.get_stock_bars.side_effect = mock_get_bars
 
-        monkeypatch.setenv("ALPACA_ALLOW_IEX_FALLBACK", "false")
         engine = DailySuitabilityEngine(settings=settings, stock_client=stock_client, cache_dir=tmpdir, historical_feed="sip")
         
         with pytest.raises(RuntimeError, match="Layer 2 historical bar fetch failed and no valid compatible cached pool exists."):
