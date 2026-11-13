@@ -1439,56 +1439,46 @@ class LivePortfolioManager:
                 return item.get(name, default)
             return getattr(item, name, default)
 
+        def _remember_close_responses(responses: Any, phase: str) -> None:
+            for response in responses or []:
+                status = _field(response, "status", 0)
+                try:
+                    status_code = int(status or 0)
+                except (TypeError, ValueError):
+                    status_code = 0
+                body = _field(response, "body")
+                symbol = _field(response, "symbol") or _field(body, "symbol")
+                order_id = _field(response, "order_id") or _field(body, "id")
+                if status_code == 200 and symbol and order_id:
+                    close_order_symbols[str(order_id)] = normalize_symbol(str(symbol))
+                elif symbol:
+                    self.logger.error(
+                        f"{phase} liquidation request for {symbol} was not accepted "
+                        f"(status={status_code}); it will be retried after order-state verification."
+                    )
+
         while True:
             real_elapsed = time.monotonic() - start_time
             elapsed = max(real_elapsed, total_slept)
             if elapsed >= max_wait_seconds:
                 break
 
-            # The first close request atomically cancels outstanding orders and
-            # submits one liquidation order per open position. Subsequent passes
-            # never cancel a tracked liquidation order that is still working.
-            if first_close_attempt:
+            # A close request cancels outstanding orders and submits one
+            # liquidation order per position. Subsequent retries happen only
+            # after verifying there is no still-working close order to cancel.
+            if first_close_attempt or retry_symbols:
+                phase = "Initial" if first_close_attempt else "Retry"
+                retry_symbols.clear()
                 try:
                     self.trading_client.cancel_orders()
                 except Exception as exc:
-                    self.logger.error(f"Error cancelling orders before flatten: {exc}")
+                    self.logger.error(f"Error cancelling orders before {phase.lower()} flatten: {exc}")
                 try:
-                    responses = self.trading_client.close_all_positions(cancel_orders=True) or []
-                    for response in responses:
-                        status = _field(response, "status", 0)
-                        try:
-                            status_code = int(status or 0)
-                        except (TypeError, ValueError):
-                            status_code = 0
-                        body = _field(response, "body")
-                        symbol = _field(response, "symbol") or _field(body, "symbol")
-                        order_id = _field(response, "order_id") or _field(body, "id")
-                        if status_code == 200 and symbol and order_id:
-                            close_order_symbols[str(order_id)] = normalize_symbol(str(symbol))
-                        elif symbol:
-                            self.logger.error(
-                                f"Initial liquidation request for {symbol} was not accepted "
-                                f"(status={status_code}); it will be retried after order-state verification."
-                            )
+                    responses = self.trading_client.close_all_positions(cancel_orders=True)
+                    _remember_close_responses(responses, phase)
                 except Exception as exc:
-                    self.logger.error(f"Error initiating close_all_positions: {exc}")
+                    self.logger.error(f"Error during {phase.lower()} close_all_positions: {exc}")
                 first_close_attempt = False
-                retry_symbols.clear()
-
-            elif retry_symbols:
-                # Retry only symbols with a verified remaining position and no
-                # currently working order. Never cancel a tracked close order.
-                symbols_to_retry = sorted(retry_symbols)
-                retry_symbols.clear()
-                for symbol in symbols_to_retry:
-                    try:
-                        close_order = self.trading_client.close_position(symbol)
-                        order_id = _field(close_order, "id")
-                        if order_id:
-                            close_order_symbols[str(order_id)] = normalize_symbol(symbol)
-                    except Exception as exc:
-                        self.logger.error(f"Error retrying liquidation for {symbol}: {exc}")
 
             try:
                 _, _, _, open_positions, _, _ = self.fetch_account_and_positions()
@@ -1538,10 +1528,9 @@ class LivePortfolioManager:
                         close_order_symbols.get(str(order_id)) == normalized_symbol
                     )
 
-                    # A tracked close order is safe to leave working only while
-                    # the corresponding position still exists. If the position
-                    # is already flat, cancel it to prevent an unintended reverse
-                    # position from an over-close.
+                    # Keep a tracked liquidation order working only while its
+                    # corresponding position still exists. If the position is
+                    # already flat, cancel it to avoid opening a reverse position.
                     if tracked_close and normalized_symbol in position_symbols:
                         active_close_symbols.add(normalized_symbol)
                     else:
@@ -1567,16 +1556,14 @@ class LivePortfolioManager:
                     remaining = position_symbols | open_order_symbols
                     last_successful_remaining = sorted(remaining)
 
-                    # Retry liquidation only after every open order for the
-                    # symbol has disappeared and no tracked close order remains.
+                    # Retry only after every open order for the remaining
+                    # position has disappeared. This avoids cancelling the
+                    # liquidation order submitted by the previous attempt.
                     retry_symbols = {
                         symbol for symbol in position_symbols
                         if symbol not in active_close_symbols
                         and symbol not in open_order_symbols
                     }
-
-                    # If other untracked orders are still open, wait for their
-                    # cancellation before sending another liquidation request.
                     if had_untracked_orders:
                         retry_symbols.clear()
 
