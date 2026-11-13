@@ -5,6 +5,7 @@ import json
 import os
 import tempfile
 import hashlib
+from math import isfinite
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
@@ -487,6 +488,7 @@ class DailySuitabilityEngine:
             "high_volatility_quarantine": 0,
             "no_bars": 0,
             "api_error": 0,
+            "invalid_daily_data": 0,
         }
 
         eligible_candidates: list[tuple[str, float, float]] = []
@@ -513,11 +515,63 @@ class DailySuitabilityEngine:
                 continue
 
             completed_bars = []
+            seen_daily_timestamps: set[datetime] = set()
+            malformed_reason = None
             for b in raw_bars:
-                b_dt = b.timestamp.replace(tzinfo=timezone.utc) if b.timestamp.tzinfo is None else b.timestamp
+                try:
+                    raw_timestamp = b.timestamp
+                    if not isinstance(raw_timestamp, datetime):
+                        raise ValueError("invalid timestamp type")
+                    b_dt = (
+                        raw_timestamp.replace(tzinfo=timezone.utc)
+                        if raw_timestamp.tzinfo is None
+                        else raw_timestamp.astimezone(timezone.utc)
+                    )
+                    bar_values = (
+                        float(b.open),
+                        float(b.high),
+                        float(b.low),
+                        float(b.close),
+                        float(b.volume),
+                    )
+                    if not all(isfinite(value) for value in bar_values):
+                        raise ValueError("non-finite OHLCV value")
+                    open_price, high_price, low_price, close_price, volume = bar_values
+                    if min(open_price, high_price, low_price, close_price) <= 0:
+                        raise ValueError("non-positive OHLC price")
+                    if low_price > min(open_price, close_price) or high_price < max(open_price, close_price):
+                        raise ValueError("invalid OHLC geometry")
+                    if volume < 0:
+                        raise ValueError("negative volume")
+                    if b_dt in seen_daily_timestamps:
+                        raise ValueError("duplicate daily-bar timestamp")
+                except (AttributeError, TypeError, ValueError, OverflowError) as bar_error:
+                    malformed_reason = str(bar_error)
+                    break
+
+                seen_daily_timestamps.add(b_dt)
                 b_ny_date = b_dt.astimezone(ny_tz).date()
                 if b_ny_date < today_ny_date:
                     completed_bars.append((b_dt, b))
+
+            if malformed_reason is not None:
+                exclusion_counts["invalid_daily_data"] += 1
+                metrics[sym] = SymbolSuitabilityMetrics(
+                    symbol=sym,
+                    latest_close=0.0,
+                    median_close_5=0.0,
+                    median_dollar_volume_20=0.0,
+                    valid_bar_count=0,
+                    atr_14=0.0,
+                    atr_pct=0.0,
+                    data_source=actual_feed_used,
+                    status="excluded",
+                    exclusion_reason="invalid_daily_data",
+                )
+                self.logger.warning(
+                    f"[Layer 2 Suitability] Excluding {sym}: malformed daily bars ({malformed_reason})."
+                )
+                continue
 
             completed_bars.sort(key=lambda x: x[0])
             lookback_n = self.settings.lookback_sessions
@@ -584,8 +638,11 @@ class DailySuitabilityEngine:
             for b in window_bars:
                 c = float(b.close)
                 v = float(b.volume)
-                vwap = float(b.vwap) if hasattr(b, "vwap") and b.vwap is not None else 0.0
-                price_to_use = vwap if vwap > 0 else c
+                try:
+                    vwap = float(b.vwap) if hasattr(b, "vwap") and b.vwap is not None else 0.0
+                except (TypeError, ValueError, OverflowError):
+                    vwap = 0.0
+                price_to_use = vwap if isfinite(vwap) and vwap > 0 else c
                 dollar_volumes.append(price_to_use * v)
 
             sorted_dv = sorted(dollar_volumes)
