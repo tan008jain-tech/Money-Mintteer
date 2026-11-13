@@ -696,7 +696,26 @@ def test_ict_error_accounting_matrix(monkeypatch: pytest.MonkeyPatch) -> None:
         risk_pts=2.0, timestamp=datetime.now(timezone.utc), timestamp_ns=1000, zone_type="disp_fvg",
         score=1.0, zone_top=101.0, zone_bot=99.0, reason="ict_test"
     )
-    monkeypatch.setattr("money_mintter.core.live_bot.generate_production_ict_signals", lambda acq, now, **kw: (type("AdapterRes", (), {"b1": [], "b5": [], "b15": [], "b15_coverage": []})(), [dummy_inst]))
+    def mock_generate_production_ict_signals(acq, now, **kwargs):
+        latest_complete_bar_ns = int(
+            (now - timedelta(minutes=1)).timestamp() * 1_000_000_000
+        )
+        adapter_result = type(
+            "AdapterRes",
+            (),
+            {
+                "b1": [{"time_ns": latest_complete_bar_ns}],
+                "b5": [{"time_ns": latest_complete_bar_ns}],
+                "b15": [],
+                "b15_coverage": [],
+            },
+        )()
+        return adapter_result, [dummy_inst]
+
+    monkeypatch.setattr(
+        "money_mintter.core.live_bot.generate_production_ict_signals",
+        mock_generate_production_ict_signals,
+    )
 
     instructions_mixed, _ = scanner_mixed.scan_universe(datetime.now(timezone.utc), set())
     assert len(instructions_mixed) == 1
