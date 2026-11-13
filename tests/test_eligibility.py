@@ -121,10 +121,27 @@ def test_cache_first_startup_and_timestamp_preservation(monkeypatch, tmp_path):
     engine = StructuralEligibilityEngine(cache_dir=cache_dir)
     monkeypatch.setenv("MM_CACHE_DIR", cache_dir)
     monkeypatch.setenv("MONEY_MINTTER_TEMP_DIR", cache_dir)
-    monkeypatch.setenv("ALPACA_DATA_FEED", "SIP")
+    monkeypatch.setenv("MIN_UNIVERSE_HEALTH", "1")
+    monkeypatch.setenv("ALPACA_HISTORICAL_FEED", "sip")
+    monkeypatch.setenv("ALPACA_REALTIME_FEED", "iex")
+    monkeypatch.setenv("ALPACA_ALLOW_HISTORICAL_FEED_FALLBACK", "false")
 
     fresh_time = datetime.now(timezone.utc) - timedelta(hours=2)
-    engine.save_persisted_cache(["AAPL", "MSFT"], {"AAPL": {}, "MSFT": {}}, fresh_time)
+    valid_metadata = {
+        symbol: {
+            "symbol": symbol,
+            "name": f"{symbol} Common Stock",
+            "exchange": "NASDAQ",
+            "shortable": True,
+            "fractionable": True,
+            "marginable": True,
+            "asset_class": "us_equity",
+            "status": "active",
+            "tradable": True,
+        }
+        for symbol in ("AAPL", "MSFT")
+    }
+    engine.save_persisted_cache(["AAPL", "MSFT"], valid_metadata, fresh_time)
 
     from money_mintter.core.suitability import DailySuitabilityEngine, SuitabilityResult
     l2_engine = DailySuitabilityEngine(cache_dir=cache_dir, historical_feed="sip")
@@ -142,6 +159,16 @@ def test_cache_first_startup_and_timestamp_preservation(monkeypatch, tmp_path):
         config_signature=l2_engine._compute_config_signature(),
         universe_signature=l2_engine._compute_universe_signature(["AAPL", "MSFT"]),
     ))
+
+    from unittest.mock import MagicMock
+    trading_client = MagicMock()
+    trading_client.get_all_assets.side_effect = RuntimeError("API unavailable")
+    monkeypatch.setattr("money_mintter.core.live_bot.TradingClient", lambda *args, **kwargs: trading_client)
+    monkeypatch.setattr(
+        "money_mintter.core.live_bot.StockHistoricalDataClient",
+        lambda *args, **kwargs: MagicMock(),
+    )
+    monkeypatch.setattr("money_mintter.core.live_bot.apply_default_timeout", lambda *args, **kwargs: None)
 
     bot = LiveMarketBot()
     assert bot.global_universe == ["AAPL", "MSFT"]
@@ -164,10 +191,14 @@ def test_cache_first_startup_and_timestamp_preservation(monkeypatch, tmp_path):
         universe_signature=l2_engine._compute_universe_signature(["AAPL", "MSFT"]),
     ))
 
-    monkeypatch.setattr("money_mintter.core.live_bot.discover_universe", lambda client, logger, api_key: (_ for _ in ()).throw(RuntimeError("API down")))
+    monkeypatch.setattr(
+        "money_mintter.core.live_bot.discover_universe",
+        lambda client, logger, api_key: (_ for _ in ()).throw(RuntimeError("API down")),
+    )
     bot2 = LiveMarketBot()
-    assert sorted(bot2._cached_universe) == ["AAPL", "MSFT"]
-    assert bot2._universe_last_fetched == stale_time
+    assert bot2._cached_universe == []
+    assert bot2.global_universe == []
+    assert bot2._universe_last_fetched is None
 
 
 def test_refresh_cooldown_prevents_repeated_api_retries(monkeypatch, tmp_path):
@@ -193,10 +224,10 @@ def test_refresh_cooldown_prevents_repeated_api_retries(monkeypatch, tmp_path):
 
     now = datetime.now(timezone.utc)
     univ1 = bot._get_or_refresh_universe(now)
-    assert univ1 == ["AAPL", "MSFT"]
+    assert univ1 == []
     assert call_count == 1
 
     now_soon = now + timedelta(minutes=10)
     univ2 = bot._get_or_refresh_universe(now_soon)
-    assert univ2 == ["AAPL", "MSFT"]
+    assert univ2 == []
     assert call_count == 1
