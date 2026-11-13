@@ -39,13 +39,18 @@ class StructuralEligibilityEngine:
         if isinstance(asset, dict):
             symbol = str(asset.get("symbol", "")).upper().strip()
             status = str(asset.get("status", "")).lower()
-            tradable = bool(asset.get("tradable", False))
+            tradable_value = asset.get("tradable", False)
+            if not isinstance(tradable_value, bool):
+                return False, "invalid_tradable_metadata", None
+            tradable = tradable_value
             asset_class = str(asset.get("asset_class") or asset.get("class", "")).lower()
             exchange = str(asset.get("exchange", "")).upper().strip()
             name = str(asset.get("name", "")).strip()
-            shortable = bool(asset.get("shortable", False))
-            fractionable = bool(asset.get("fractionable", False))
-            marginable = bool(asset.get("marginable", False))
+            # Optional capability flags are informational for Layer 1. Treat
+            # malformed cache values as false rather than using bool("false").
+            shortable = asset.get("shortable") is True
+            fractionable = asset.get("fractionable") is True
+            marginable = asset.get("marginable") is True
         else:
             symbol = str(getattr(asset, "symbol", "")).upper().strip()
             status_val = getattr(asset, "status", "")
