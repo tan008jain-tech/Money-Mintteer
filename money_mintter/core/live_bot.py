@@ -1499,20 +1499,30 @@ class LivePortfolioManager:
             if elapsed >= max_wait_seconds:
                 break
 
-            # A close request cancels outstanding orders and submits one
-            # liquidation order per position. Subsequent retries happen only
-            # after verifying there is no still-working close order to cancel.
-            if first_close_attempt or retry_symbols:
-                phase = "Initial" if first_close_attempt else "Retry"
-                retry_symbols.clear()
+            # The first pass cancels outstanding orders and liquidates all
+            # positions atomically. Later retries are symbol-scoped: never call
+            # close_all_positions again while another symbol has a working close
+            # order, because that would cancel and recreate unrelated liquidations.
+            if first_close_attempt:
+                phase = "Initial"
                 try:
-                    # Alpaca's close_all_positions(cancel_orders=True) performs
-                    # order cancellation and liquidation as one broker operation.
                     responses = self.trading_client.close_all_positions(cancel_orders=True)
                     _remember_close_responses(responses, phase)
                 except Exception as exc:
-                    self.logger.error(f"Error during {phase.lower()} close_all_positions: {exc}")
+                    self.logger.error(f"Error during initial close_all_positions: {exc}")
                 first_close_attempt = False
+            elif retry_symbols:
+                phase = "Retry"
+                symbols_to_retry = sorted(retry_symbols)
+                retry_symbols.clear()
+                for symbol in symbols_to_retry:
+                    try:
+                        response = self.trading_client.close_position(symbol)
+                        _remember_close_responses([response], phase)
+                    except Exception as exc:
+                        self.logger.error(
+                            f"Error retrying liquidation for {symbol}: {exc}"
+                        )
 
             try:
                 _, _, _, open_positions, _, _ = self.fetch_account_and_positions()
