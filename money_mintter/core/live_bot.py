@@ -1430,47 +1430,162 @@ class LivePortfolioManager:
         total_slept = 0.0
         effective_delay = min(retry_delay, 15)
         last_successful_remaining: list[str] | None = None
+        close_order_symbols: dict[str, str] = {}
+        first_close_attempt = True
+        retry_symbols: set[str] = set()
+
+        def _field(item: Any, name: str, default: Any = None) -> Any:
+            if isinstance(item, dict):
+                return item.get(name, default)
+            return getattr(item, name, default)
+
         while True:
             real_elapsed = time.monotonic() - start_time
             elapsed = max(real_elapsed, total_slept)
             if elapsed >= max_wait_seconds:
                 break
 
+            # The first close request atomically cancels outstanding orders and
+            # submits one liquidation order per open position. Subsequent passes
+            # never cancel a tracked liquidation order that is still working.
+            if first_close_attempt:
+                try:
+                    self.trading_client.cancel_orders()
+                except Exception as exc:
+                    self.logger.error(f"Error cancelling orders before flatten: {exc}")
+                try:
+                    responses = self.trading_client.close_all_positions(cancel_orders=True) or []
+                    for response in responses:
+                        status = _field(response, "status", 0)
+                        try:
+                            status_code = int(status or 0)
+                        except (TypeError, ValueError):
+                            status_code = 0
+                        body = _field(response, "body")
+                        symbol = _field(response, "symbol") or _field(body, "symbol")
+                        order_id = _field(response, "order_id") or _field(body, "id")
+                        if status_code == 200 and symbol and order_id:
+                            close_order_symbols[str(order_id)] = normalize_symbol(str(symbol))
+                        elif symbol:
+                            self.logger.error(
+                                f"Initial liquidation request for {symbol} was not accepted "
+                                f"(status={status_code}); it will be retried after order-state verification."
+                            )
+                except Exception as exc:
+                    self.logger.error(f"Error initiating close_all_positions: {exc}")
+                first_close_attempt = False
+                retry_symbols.clear()
+
+            elif retry_symbols:
+                # Retry only symbols with a verified remaining position and no
+                # currently working order. Never cancel a tracked close order.
+                symbols_to_retry = sorted(retry_symbols)
+                retry_symbols.clear()
+                for symbol in symbols_to_retry:
+                    try:
+                        close_order = self.trading_client.close_position(symbol)
+                        order_id = _field(close_order, "id")
+                        if order_id:
+                            close_order_symbols[str(order_id)] = normalize_symbol(symbol)
+                    except Exception as exc:
+                        self.logger.error(f"Error retrying liquidation for {symbol}: {exc}")
+
             try:
-                self.trading_client.cancel_orders()
-            except Exception as exc:
-                self.logger.error(f"Error cancelling orders during flatten_all: {exc}")
+                _, _, _, open_positions, _, _ = self.fetch_account_and_positions()
+                position_symbols = {
+                    normalize_symbol(str(position["symbol"]))
+                    for position in open_positions
+                    if str(position.get("symbol", "")).strip()
+                }
+                if len(position_symbols) != len(open_positions):
+                    raise RuntimeError("position snapshot contains an empty or invalid symbol")
 
-            real_elapsed = time.monotonic() - start_time
-            elapsed = max(real_elapsed, total_slept)
-            if elapsed >= max_wait_seconds:
-                break
+                open_orders = self.trading_client.get_orders(
+                    GetOrdersRequest(status=QueryOrderStatus.OPEN)
+                )
+                open_order_symbols: set[str] = set()
+                active_close_symbols: set[str] = set()
+                had_untracked_orders = False
+                unknown_order_state = False
 
-            try:
-                self.trading_client.close_all_positions(cancel_orders=True)
-            except Exception as exc:
-                self.logger.error(f"Error closing all positions during flatten_all: {exc}")
+                for order in open_orders:
+                    order_id = _field(order, "id")
+                    order_symbol = _field(order, "symbol")
+                    if not order_id or not order_symbol or not str(order_symbol).strip():
+                        unknown_order_state = True
+                        if order_id:
+                            try:
+                                self.trading_client.cancel_order_by_id(order_id)
+                            except Exception as exc:
+                                self.logger.error(
+                                    f"Unable to cancel unidentified open order {order_id}: {exc}"
+                                )
+                        continue
 
-            real_elapsed = time.monotonic() - start_time
-            elapsed = max(real_elapsed, total_slept)
-            if elapsed >= max_wait_seconds:
-                break
+                    normalized_symbol = normalize_symbol(str(order_symbol))
+                    if not normalized_symbol:
+                        unknown_order_state = True
+                        try:
+                            self.trading_client.cancel_order_by_id(order_id)
+                        except Exception as exc:
+                            self.logger.error(
+                                f"Unable to cancel open order {order_id} with invalid symbol: {exc}"
+                            )
+                        continue
 
-            try:
-                _, _, _, open_pos, _, _ = self.fetch_account_and_positions()
-                remaining_positions = {p["symbol"] for p in open_pos}
-                remaining_orders = self.fetch_open_order_symbols()
-                remaining = sorted(remaining_positions | remaining_orders)
-                last_successful_remaining = remaining
-                if not remaining:
+                    open_order_symbols.add(normalized_symbol)
+                    tracked_close = (
+                        close_order_symbols.get(str(order_id)) == normalized_symbol
+                    )
+
+                    # A tracked close order is safe to leave working only while
+                    # the corresponding position still exists. If the position
+                    # is already flat, cancel it to prevent an unintended reverse
+                    # position from an over-close.
+                    if tracked_close and normalized_symbol in position_symbols:
+                        active_close_symbols.add(normalized_symbol)
+                    else:
+                        had_untracked_orders = True
+                        try:
+                            self.trading_client.cancel_order_by_id(order_id)
+                        except Exception as exc:
+                            self.logger.error(
+                                f"Error cancelling untracked open order {order_id} "
+                                f"({normalized_symbol}): {exc}"
+                            )
+
+                if not position_symbols and not open_order_symbols and not unknown_order_state:
                     return []
+
+                if unknown_order_state:
+                    self.logger.error(
+                        "Unable to fully identify open broker orders during flatten verification."
+                    )
+                    last_successful_remaining = ["UNKNOWN"]
+                    retry_symbols.clear()
+                else:
+                    remaining = position_symbols | open_order_symbols
+                    last_successful_remaining = sorted(remaining)
+
+                    # Retry liquidation only after every open order for the
+                    # symbol has disappeared and no tracked close order remains.
+                    retry_symbols = {
+                        symbol for symbol in position_symbols
+                        if symbol not in active_close_symbols
+                        and symbol not in open_order_symbols
+                    }
+
+                    # If other untracked orders are still open, wait for their
+                    # cancellation before sending another liquidation request.
+                    if had_untracked_orders:
+                        retry_symbols.clear()
+
             except Exception as exc:
                 self.logger.error(
                     f"Error verifying positions/open orders during flatten_all: {exc}"
                 )
-                # A successful position snapshot alone is not enough to declare
-                # a clean flatten. Any failed part of the verification is UNKNOWN.
                 last_successful_remaining = ["UNKNOWN"]
+                retry_symbols.clear()
 
             real_elapsed = time.monotonic() - start_time
             elapsed = max(real_elapsed, total_slept)
@@ -1486,6 +1601,7 @@ class LivePortfolioManager:
         if last_successful_remaining is not None:
             return last_successful_remaining
         return ["UNKNOWN"]
+
 
 
 class LiveMarketBot:
