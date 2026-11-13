@@ -21,9 +21,7 @@ class Candle:
         prices = (self.open, self.high, self.low, self.close)
         if any(not isfinite(price) for price in prices):
             raise ValueError("candle prices must be finite")
-        if not isfinite(self.volume):
-            raise ValueError("candle volume must be finite")
-        if any(price <= 0 for price in prices):
+        # Volume validity is handled by Layer 4's activity-baseline fallback.\n        # Non-finite volume must not discard otherwise valid OHLC movement data.\n        if any(price <= 0 for price in prices):
             raise ValueError("candle prices must be positive")
         if self.low > min(self.open, self.close) or self.high < max(self.open, self.close):
             raise ValueError("candle OHLC geometry is invalid")
