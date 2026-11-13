@@ -180,7 +180,7 @@ def test_fix_a_slot_starvation_and_filtering(monkeypatch: pytest.MonkeyPatch) ->
         is_diagnostic=False,
     )
 
-    # 3 locked symbols out of 5 max slots -> 2 active untraded slots available.
+    # 3 positions plus one pending order occupy 4 of 5 slots -> 1 slot available.
     locked_symbols = {"MSFT", "LOCKED1", "LOCKED2"}
     instructions = [
         inst_slash,
@@ -205,15 +205,15 @@ def test_fix_a_slot_starvation_and_filtering(monkeypatch: pytest.MonkeyPatch) ->
 
     # Verification:
     # - Invalid, locked, pending, executed, and processed instructions filtered out without consuming slots.
-    # - More eligible candidates (TSLA, NVDA, META) than available slots (2).
-    # - Original priority preserved (TSLA and NVDA submitted first).
-    # - Submission count never exceeding available slots (2).
+    # - More eligible candidates (TSLA, NVDA, META) than available slots (1).
+    # - Original priority preserved (TSLA submitted first).
+    # - Pending order consumes a slot; submission count stays within capacity.
     # - Actual submitted symbols verified via recording broker.
-    assert sent == 2
-    assert broker.submitted == ["TSLA", "NVDA"]
-    assert len(broker.submitted) <= 2
+    assert sent == 1
+    assert broker.submitted == ["TSLA"]
+    assert len(broker.submitted) <= 1
     assert tracker.is_executed("TSLA", "bull", "disp_fvg", 252.0, 248.0)
-    assert tracker.is_executed("NVDA", "bull", "disp_fvg", 305.0, 295.0)
+    assert not tracker.is_executed("NVDA", "bull", "disp_fvg", 305.0, 295.0)
 
 
 def test_fix_b_layer2_cache_reuse_and_fallback(tmp_path) -> None:
