@@ -1360,12 +1360,19 @@ class LivePortfolioManager:
 
             try:
                 _, _, _, open_pos, _, _ = self.fetch_account_and_positions()
-                remaining = [p["symbol"] for p in open_pos]
+                remaining_positions = {p["symbol"] for p in open_pos}
+                remaining_orders = self.fetch_open_order_symbols()
+                remaining = sorted(remaining_positions | remaining_orders)
                 last_successful_remaining = remaining
                 if not remaining:
                     return []
             except Exception as exc:
-                self.logger.error(f"Error fetching open positions during flatten_all verification: {exc}")
+                self.logger.error(
+                    f"Error verifying positions/open orders during flatten_all: {exc}"
+                )
+                # A successful position snapshot alone is not enough to declare
+                # a clean flatten. Any failed part of the verification is UNKNOWN.
+                last_successful_remaining = ["UNKNOWN"]
 
             real_elapsed = time.monotonic() - start_time
             elapsed = max(real_elapsed, total_slept)
@@ -1633,6 +1640,28 @@ class LiveMarketBot:
         if self.kill_switch.tripped:
             self.logger.critical(f"Kill switch tripped: {self.kill_switch.reason}")
             return {"evaluated": 0, "signals": 0, "orders_sent": 0, "halted": True}
+
+        # Recheck the universe at the start of each cycle, but only contact
+        # discovery when the validated Layer 2 cache has expired or a prior
+        # failure's retry cooldown has elapsed. This makes startup outages
+        # recoverable without repeatedly hitting the APIs during a healthy session.
+        max_cache_age = timedelta(hours=self.settings.max_universe_cache_age_hours)
+        cache_expired = (
+            self._universe_last_fetched is not None
+            and (now_utc - self._universe_last_fetched) > max_cache_age
+        )
+        retry_due = (
+            self._universe_last_failed is not None
+            and now_utc >= self._universe_last_failed
+            and (now_utc - self._universe_last_failed)
+            >= timedelta(minutes=self._universe_retry_cooldown_minutes)
+        )
+        no_initial_cache = (
+            self._universe_last_failed is None
+            and self._universe_last_fetched is None
+        )
+        if retry_due or cache_expired or no_initial_cache:
+            self._get_or_refresh_universe(now_utc)
 
         self.latest_state["cash"] = account_cash
         self.latest_state["equity"] = account_equity
