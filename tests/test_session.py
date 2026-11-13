@@ -40,6 +40,11 @@ class FakeTradingClient:
         return []
 
     def close_all_positions(self, cancel_orders: bool | None = None):
+        # Alpaca performs this cancellation inside the close-all request when
+        # cancel_orders=True; model that atomic API contract in this fake.
+        if cancel_orders:
+            self.call_order.append("cancel_orders")
+            self.cancel_orders_calls += 1
         self.call_order.append("close_all_positions")
         self.close_all_positions_calls += 1
         if self.close_all_positions_raises:
@@ -289,6 +294,8 @@ def test_halt_is_immediate(monkeypatch):
             events.append("cancel_orders")
             return super().cancel_orders()
         def close_all_positions(self, cancel_orders=None):
+            if cancel_orders:
+                events.append("cancel_orders")
             events.append("close_all_positions")
             return super().close_all_positions(cancel_orders)
 
@@ -328,10 +335,11 @@ def test_cutoff_and_flatten_timing(monkeypatch):
     clock = FakeClock(is_open=True, next_open=t_open, next_close=t_close)
     cancel_time = None
     class TimingClient(FakeTradingClient):
-        def cancel_orders(self):
+        def close_all_positions(self, cancel_orders=None):
             nonlocal cancel_time
-            cancel_time = current_time
-            return super().cancel_orders()
+            if cancel_orders:
+                cancel_time = current_time
+            return super().close_all_positions(cancel_orders)
 
     current_time = t_open
     client = TimingClient(clock, positions=[])
