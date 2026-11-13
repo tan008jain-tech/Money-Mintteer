@@ -1243,12 +1243,18 @@ class LiveMarketBot:
         self._last_outage_log_time: datetime | None = None
 
     def _get_or_refresh_universe(self, now_utc: datetime) -> list[str]:
+        max_cache_age = timedelta(hours=self.settings.max_universe_cache_age_hours)
+        cooldown_delta = timedelta(minutes=self._universe_retry_cooldown_minutes)
+        retry_due = (
+            self._universe_last_failed is not None
+            and (now_utc - self._universe_last_failed) >= cooldown_delta
+        )
         refresh_interval_expired = (
             not self._cached_universe
             or self._universe_last_fetched is None
-            or (now_utc - self._universe_last_fetched) > timedelta(hours=24)
+            or (now_utc - self._universe_last_fetched) > max_cache_age
+            or retry_due
         )
-        cooldown_delta = timedelta(minutes=self._universe_retry_cooldown_minutes)
         in_cooldown = (
             self._universe_last_failed is not None
             and (now_utc - self._universe_last_failed) < cooldown_delta
