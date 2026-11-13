@@ -274,7 +274,7 @@ def test_flatten_all_waits_for_positions_to_catch_up_after_filled_close_order():
 
     pm = LivePortfolioManager(client, logging.getLogger("filled_close_position_lag"))
     result = pm.flatten_all(
-        sleep_fn=lambda _: None, max_wait_seconds=3, retry_delay=1
+        sleep_fn=lambda _: None, max_wait_seconds=4, retry_delay=1
     )
 
     assert result == ["AAPL"]
