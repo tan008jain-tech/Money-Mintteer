@@ -533,3 +533,43 @@ def test_execution_preflight_fails_closed_without_quote_client() -> None:
 
     assert sent == 0
     assert submitted == []
+
+
+
+def test_executable_quote_is_side_aware_and_uses_configured_feed() -> None:
+    logger = logging.getLogger("phase2c_side_aware_quote")
+    pm = LivePortfolioManager(
+        object(),
+        logger,
+        stock_client=FakeQuoteClient({"AAPL": 100.0}),
+    )
+    settings = Settings()
+
+    buy_price = pm._get_executable_price("AAPL", Side.BUY, 100.0, settings)
+    sell_price = pm._get_executable_price("AAPL", Side.SELL, 100.0, settings)
+
+    assert buy_price == pytest.approx(100.01)
+    assert sell_price == pytest.approx(99.99)
+
+
+def test_execution_preflight_rejects_excessive_quote_deviation() -> None:
+    logger = logging.getLogger("phase2c_quote_deviation")
+    submitted: list[str] = []
+
+    class Broker:
+        def submit_order(self, req):
+            submitted.append(req.symbol)
+            return type("Order", (), {"order_class": "bracket", "legs": [1, 2], "id": "deviation"})()
+
+    pm = LivePortfolioManager(
+        Broker(),
+        logger,
+        stock_client=FakeQuoteClient(
+            {"AAPL": 100.0},
+            quote_overrides={"AAPL": (101.00, 101.02)},
+        ),
+    )
+    sent = pm.submit_ict_instructions([_execution_instruction("AAPL")], set(), 100_000.0, Settings())
+
+    assert sent == 0
+    assert submitted == []
