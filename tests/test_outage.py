@@ -206,8 +206,8 @@ def test_flatten_all_does_not_report_success_with_open_orders():
     result = pm.flatten_all(sleep_fn=lambda _: None, max_wait_seconds=2, retry_delay=1)
 
     assert result == ["AAPL"]
-    assert client.cancel_orders.call_count >= 1
-    assert client.close_all_positions.call_count >= 1
+    client.close_all_positions.assert_called_with(cancel_orders=True)
+    client.cancel_orders.assert_not_called()
     assert client.get_orders.call_count >= 1
 
 
