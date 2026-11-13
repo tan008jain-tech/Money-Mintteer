@@ -109,10 +109,10 @@ class Settings:
         default_factory=lambda: _env_text("ALPACA_DATA_FEED", "iex")
     )
     alpaca_historical_feed: str = field(
-        default_factory=lambda: _env_text("ALPACA_HISTORICAL_FEED", _env_text("ALPACA_DATA_FEED", "sip"))
+        default_factory=lambda: _env_text("ALPACA_HISTORICAL_FEED", "sip")
     )
     alpaca_realtime_feed: str = field(
-        default_factory=lambda: _env_text("ALPACA_REALTIME_FEED", "iex")
+        default_factory=lambda: _env_text("ALPACA_REALTIME_FEED", _env_text("ALPACA_DATA_FEED", "iex"))
     )
     alpaca_allow_historical_feed_fallback: bool = field(
         default_factory=lambda: _env_bool(
