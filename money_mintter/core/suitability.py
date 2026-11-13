@@ -238,6 +238,12 @@ class DailySuitabilityEngine:
             return None
 
         now_utc = datetime.now(timezone.utc)
+        if gen_dt > now_utc + timedelta(minutes=5):
+            self.logger.warning(
+                "[Layer 2 Suitability] Stale fallback rejected: cache generation timestamp "
+                "is more than five minutes in the future."
+            )
+            return None
 
         # 2. Validate configuration signature independently
         try:
@@ -367,6 +373,7 @@ class DailySuitabilityEngine:
                     if gen_dt.tzinfo is None:
                         gen_dt = gen_dt.replace(tzinfo=timezone.utc)
 
+                    timestamp_not_future = gen_dt <= now_utc + timedelta(minutes=5)
                     session_expired = self._is_session_expired(gen_dt, now_utc)
                     config_matches = bool(cached_result.config_signature) and cached_result.config_signature == current_config_sig
                     universe_matches = bool(cached_result.universe_signature) and cached_result.universe_signature == current_universe_sig
@@ -380,7 +387,7 @@ class DailySuitabilityEngine:
                     pool_compatible = self._is_pool_compatible(
                         cached_result.pool, eligible_symbols
                     )
-                    if is_fresh and has_pool and pool_compatible and not session_expired and config_matches and universe_matches and feed_matches:
+                    if is_fresh and has_pool and pool_compatible and timestamp_not_future and not session_expired and config_matches and universe_matches and feed_matches:
                         self.logger.info(
                             f"[Layer 2 Suitability] Reusing cached daily pool (pool size: {len(cached_result.pool)}, "
                             f"stale: {cached_result.stale})"
@@ -390,7 +397,8 @@ class DailySuitabilityEngine:
                         self.logger.info(
                             f"[Layer 2 Suitability] Cache invalidated due to change in (fresh={is_fresh}, has_pool={has_pool}, session_expired={session_expired}, "
                             f"config_matches={config_matches}, universe_matches={universe_matches}, "
-                            f"feed_matches={feed_matches}, pool_compatible={pool_compatible})."
+                            f"feed_matches={feed_matches}, pool_compatible={pool_compatible}, "
+                            f"timestamp_not_future={timestamp_not_future})."
                         )
                 except Exception:
                     pass
