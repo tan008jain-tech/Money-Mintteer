@@ -99,6 +99,37 @@ def test_malformed_cache_data_handled_safely(tmp_path):
     assert fetched_at is None
 
 
+def test_layer1_cache_rejects_string_false_tradable_flag(tmp_path):
+    engine = StructuralEligibilityEngine(cache_dir=str(tmp_path))
+    metadata = {
+        "AAPL": {
+            "symbol": "AAPL",
+            "name": "Apple Inc Common Stock",
+            "exchange": "NASDAQ",
+            "shortable": True,
+            "fractionable": True,
+            "marginable": True,
+            "asset_class": "us_equity",
+            "status": "active",
+            "tradable": "false",
+        }
+    }
+    engine.save_persisted_cache(
+        ["AAPL"], metadata, datetime.now(timezone.utc)
+    )
+
+    cached_symbols, cached_metadata, fetched_at = engine.load_validated_cache(
+        now_utc=datetime.now(timezone.utc),
+        max_age_hours=24,
+        min_symbols=1,
+    )
+
+    assert cached_symbols == []
+    assert cached_metadata == {}
+    assert fetched_at is None
+    assert engine.evaluate_asset(metadata["AAPL"])[1] == "invalid_tradable_metadata"
+
+
 def test_atomic_cache_replacement(tmp_path):
     cache_dir = str(tmp_path)
     engine = StructuralEligibilityEngine(cache_dir=cache_dir)
