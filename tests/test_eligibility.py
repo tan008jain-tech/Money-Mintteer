@@ -121,12 +121,13 @@ def test_cache_first_startup_and_timestamp_preservation(monkeypatch, tmp_path):
     engine = StructuralEligibilityEngine(cache_dir=cache_dir)
     monkeypatch.setenv("MM_CACHE_DIR", cache_dir)
     monkeypatch.setenv("MONEY_MINTTER_TEMP_DIR", cache_dir)
+    monkeypatch.setenv("ALPACA_DATA_FEED", "SIP")
 
     fresh_time = datetime.now(timezone.utc) - timedelta(hours=2)
     engine.save_persisted_cache(["AAPL", "MSFT"], {"AAPL": {}, "MSFT": {}}, fresh_time)
 
     from money_mintter.core.suitability import DailySuitabilityEngine, SuitabilityResult
-    l2_engine = DailySuitabilityEngine(cache_dir=cache_dir)
+    l2_engine = DailySuitabilityEngine(cache_dir=cache_dir, historical_feed="sip")
     l2_engine.save_persisted_pool(SuitabilityResult(
         pool=["AAPL", "MSFT"],
         quarantined=[],
@@ -165,7 +166,7 @@ def test_cache_first_startup_and_timestamp_preservation(monkeypatch, tmp_path):
 
     monkeypatch.setattr("money_mintter.core.live_bot.discover_universe", lambda client, logger, api_key: (_ for _ in ()).throw(RuntimeError("API down")))
     bot2 = LiveMarketBot()
-    assert bot2._cached_universe == ["AAPL", "MSFT"]
+    assert sorted(bot2._cached_universe) == ["AAPL", "MSFT"]
     assert bot2._universe_last_fetched == stale_time
 
 
