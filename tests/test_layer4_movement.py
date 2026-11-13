@@ -23,16 +23,17 @@ def test_candle_creation_and_malformed() -> None:
         Candle("AAPL", t, 100.0, 98.0, 99.0, 101.0, 1000.0)
 
 
-def test_candle_rejects_non_finite_ohlcv_values() -> None:
+def test_candle_rejects_non_finite_prices_but_preserves_volume_fallback() -> None:
     t = datetime(2026, 10, 1, 9, 30, tzinfo=timezone.utc)
 
     for invalid_price in (float("nan"), float("inf"), float("-inf")):
         with pytest.raises(ValueError, match="finite"):
             Candle("AAPL", t, invalid_price, 102.0, 99.0, 101.0, 1000.0)
 
-    for invalid_volume in (float("nan"), float("inf"), float("-inf")):
-        with pytest.raises(ValueError, match="finite"):
-            Candle("AAPL", t, 100.0, 102.0, 99.0, 101.0, invalid_volume)
+    # Layer 4 deliberately falls back to movement-only scoring when activity
+    # volume is non-finite. Do not reject a geometrically valid OHLC candle.
+    candle = Candle("AAPL", t, 100.0, 102.0, 99.0, 101.0, float("inf"))
+    assert candle.range == 3.0
 
 
 def test_atr_availability_boundary() -> None:
