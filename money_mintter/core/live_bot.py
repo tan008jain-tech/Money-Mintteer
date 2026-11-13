@@ -534,6 +534,9 @@ class MarketScanner:
         minute = (now_utc.minute // 5) * 5
         bar_time = now_utc.replace(minute=minute, second=0, microsecond=0)
         expected_last_bar_start = bar_time - timedelta(minutes=5)
+        expected_last_1m_bar_start = (
+            now_utc.replace(second=0, microsecond=0) - timedelta(minutes=1)
+        )
         fresh_bars_dict: dict[str, list[Candle]] = {}
         for symbol, candles in bars_dict.items():
             if not candles:
@@ -546,10 +549,10 @@ class MarketScanner:
                 )
                 for candle in candles
             )
-            if latest_ts < expected_last_bar_start:
+            if latest_ts < expected_last_1m_bar_start:
                 self.logger.warning(
-                    f"stale bars (Layer 4) for {symbol}: latest={latest_ts}, "
-                    f"expected>={expected_last_bar_start}; excluding before selection"
+                    f"stale bars (Layer 4) for {symbol}: latest_1m={latest_ts}, "
+                    f"expected_1m>={expected_last_1m_bar_start}; excluding before selection"
                 )
                 continue
             fresh_bars_dict[symbol] = list(candles)
@@ -665,13 +668,14 @@ class MarketScanner:
                         latest_b5_ns / 1_000_000_000, tz=timezone.utc
                     )
                     if (
-                        latest_b1_ts < expected_last_bar_start
+                        latest_b1_ts < expected_last_1m_bar_start
                         or latest_b5_ts < expected_last_bar_start
                     ):
                         self.logger.warning(
                             f"[ICT Pipeline] symbol={clean_symbol} stale dedicated acquisition: "
-                            f"latest_1m={latest_b1_ts}, latest_5m={latest_b5_ts}, "
-                            f"expected>={expected_last_bar_start}; executable instructions discarded"
+                            f"latest_1m={latest_b1_ts} expected_1m>={expected_last_1m_bar_start}; "
+                            f"latest_5m={latest_b5_ts} expected_5m>={expected_last_bar_start}; "
+                            "executable instructions discarded"
                         )
                         continue
                     self.ict_evaluation_successes += 1
