@@ -279,7 +279,10 @@ def test_flatten_all_waits_for_positions_to_catch_up_after_filled_close_order():
 
     assert result == ["AAPL"]
     assert client.close_all_positions.call_count == 2
-    client.get_order_by_id.assert_called_once_with("filled-close-1")
+    reconciled_order_ids = [
+        call.args[0] for call in client.get_order_by_id.call_args_list
+    ]
+    assert reconciled_order_ids == ["filled-close-1", "filled-close-2"]
 
 
 def test_flatten_all_retries_position_after_close_order_rejection():
