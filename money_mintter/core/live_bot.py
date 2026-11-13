@@ -486,18 +486,25 @@ class MarketScanner:
                 self._candle_cache[clean_symbol] = completed_cached
                 symbol_candles = completed_cached
             else:
-                new_candles = [
-                    Candle(
-                        timestamp=b.timestamp.replace(tzinfo=timezone.utc) if b.timestamp.tzinfo is None else b.timestamp,
-                        open=float(b.open),
-                        high=float(b.high),
-                        low=float(b.low),
-                        close=float(b.close),
-                        volume=float(b.volume),
-                        symbol=clean_symbol,
+                try:
+                    new_candles = [
+                        Candle(
+                            timestamp=b.timestamp.replace(tzinfo=timezone.utc) if b.timestamp.tzinfo is None else b.timestamp,
+                            open=float(b.open),
+                            high=float(b.high),
+                            low=float(b.low),
+                            close=float(b.close),
+                            volume=float(b.volume),
+                            symbol=clean_symbol,
+                        )
+                        for b in symbol_bars
+                    ]
+                except (AttributeError, TypeError, ValueError) as bar_error:
+                    self.last_scan_errors += 1
+                    self.logger.error(
+                        f"Excluding {clean_symbol}: malformed one-minute OHLCV response: {bar_error}"
                     )
-                    for b in symbol_bars
-                ]
+                    continue
                 completed_new_candles = [
                     c for c in new_candles
                     if c.timestamp + timedelta(minutes=1) <= now_utc
