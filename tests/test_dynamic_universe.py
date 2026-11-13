@@ -40,7 +40,7 @@ def _mock_suitability_evaluation(monkeypatch, tmp_path):
     from money_mintter.core.suitability import SuitabilityResult
     def mock_evaluate(self, eligible_symbols, now_utc=None, force_refresh=False):
         return SuitabilityResult(
-            pool=eligible_symbols,
+            pool=eligible_symbols[: self.settings.max_daily_pool_size],
             quarantined=[],
             metrics={},
             exclusion_counts={},
@@ -64,12 +64,12 @@ def test_discovery_24_assets():
     assert len(universe) == 24
 
 
-def test_discovery_100_assets():
+def test_discovery_100_assets_respects_layer2_pool_cap():
     assets = [FakeAsset(f"SYM{i}", AssetStatus.ACTIVE, True) for i in range(100)]
     client = FakeTradingClient(assets)
     logger = logging.getLogger("test_disc")
     universe = discover_universe(client, logger, api_key="real_key")
-    assert len(universe) == 100
+    assert len(universe) == 50
 
 
 def test_discovery_filters_inactive_non_tradable_duplicates_and_slashes():
