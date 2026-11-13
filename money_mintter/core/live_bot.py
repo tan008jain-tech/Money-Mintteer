@@ -1494,6 +1494,7 @@ class LivePortfolioManager:
                     GetOrdersRequest(status=QueryOrderStatus.OPEN)
                 )
                 open_order_symbols: set[str] = set()
+                open_order_ids: set[str] = set()
                 active_close_symbols: set[str] = set()
                 had_untracked_orders = False
                 unknown_order_state = False
@@ -1523,9 +1524,11 @@ class LivePortfolioManager:
                             )
                         continue
 
+                    order_id_text = str(order_id)
+                    open_order_ids.add(order_id_text)
                     open_order_symbols.add(normalized_symbol)
                     tracked_close = (
-                        close_order_symbols.get(str(order_id)) == normalized_symbol
+                        close_order_symbols.get(order_id_text) == normalized_symbol
                     )
 
                     # Keep a tracked liquidation order working only while its
@@ -1542,6 +1545,52 @@ class LivePortfolioManager:
                                 f"Error cancelling untracked open order {order_id} "
                                 f"({normalized_symbol}): {exc}"
                             )
+
+                # If a close order is temporarily absent from the OPEN list,
+                # query its id before assuming it has terminated. This avoids
+                # duplicate liquidation orders during broker-list visibility lag.
+                active_order_statuses = {
+                    "new", "accepted", "pending_new", "partially_filled",
+                    "pending_cancel", "pending_replace", "accepted_for_bidding", "stopped",
+                }
+                terminal_order_statuses = {
+                    "filled", "canceled", "expired", "rejected", "replaced",
+                }
+                for order_id, normalized_symbol in list(close_order_symbols.items()):
+                    if order_id in open_order_ids:
+                        continue
+                    try:
+                        close_order = self.trading_client.get_order_by_id(order_id)
+                        status = _field(close_order, "status")
+                        status_value = getattr(status, "value", status)
+                        status_text = str(status_value).lower()
+                    except Exception as exc:
+                        self.logger.error(
+                            f"Unable to reconcile close order {order_id}: {exc}"
+                        )
+                        unknown_order_state = True
+                        continue
+
+                    if status_text in active_order_statuses:
+                        open_order_symbols.add(normalized_symbol)
+                        if normalized_symbol in position_symbols:
+                            active_close_symbols.add(normalized_symbol)
+                        else:
+                            had_untracked_orders = True
+                            try:
+                                self.trading_client.cancel_order_by_id(order_id)
+                            except Exception as exc:
+                                self.logger.error(
+                                    f"Unable to cancel close order {order_id} after its position closed: {exc}"
+                                )
+                    elif status_text in terminal_order_statuses:
+                        close_order_symbols.pop(order_id, None)
+                    else:
+                        self.logger.error(
+                            f"Unrecognized status {status_text!r} for close order {order_id}; "
+                            "flatten state remains unverified."
+                        )
+                        unknown_order_state = True
 
                 if not position_symbols and not open_order_symbols and not unknown_order_state:
                     return []
