@@ -1441,6 +1441,11 @@ class LivePortfolioManager:
         close_order_symbols: dict[str, str] = {}
         first_close_attempt = True
         retry_symbols: set[str] = set()
+        cycle_number = 0
+        # Filled market orders and the positions endpoint can become visible
+        # at slightly different times. Require two later position snapshots
+        # before retrying a close that the order endpoint already reports filled.
+        filled_order_confirmation_checks: dict[str, int] = {}
 
         def _field(item: Any, name: str, default: Any = None) -> Any:
             if isinstance(item, dict):
@@ -1466,6 +1471,8 @@ class LivePortfolioManager:
                     )
 
         while True:
+            cycle_number += 1
+            newly_filled_symbols: set[str] = set()
             real_elapsed = time.monotonic() - start_time
             elapsed = max(real_elapsed, total_slept)
             if elapsed >= max_wait_seconds:
@@ -1591,6 +1598,9 @@ class LivePortfolioManager:
                                 )
                     elif status_text in terminal_order_statuses:
                         close_order_symbols.pop(order_id, None)
+                        if status_text == "filled":
+                            filled_order_confirmation_checks[normalized_symbol] = cycle_number
+                            newly_filled_symbols.add(normalized_symbol)
                     else:
                         self.logger.error(
                             f"Unrecognized status {status_text!r} for close order {order_id}; "
@@ -1614,11 +1624,34 @@ class LivePortfolioManager:
                     # Retry only after every open order for the remaining
                     # position has disappeared. This avoids cancelling the
                     # liquidation order submitted by the previous attempt.
+                    # A filled close order may be ahead of the positions
+                    # endpoint. Wait for two subsequent position snapshots before
+                    # retrying, and cancel the pending retry if the position disappears.
+                    ready_after_fill: set[str] = set()
+                    for symbol, last_checked_cycle in list(
+                        filled_order_confirmation_checks.items()
+                    ):
+                        if symbol in newly_filled_symbols:
+                            continue
+                        if symbol not in position_symbols:
+                            filled_order_confirmation_checks.pop(symbol, None)
+                            continue
+                        if cycle_number > last_checked_cycle:
+                            checks = 1 + (last_checked_cycle if last_checked_cycle == cycle_number else 0)
+                            # Store the number of successful post-fill position
+                            # confirmations in the value (1, then 2).
+                            if checks >= 2:
+                                ready_after_fill.add(symbol)
+                                filled_order_confirmation_checks.pop(symbol, None)
+                            else:
+                                filled_order_confirmation_checks[symbol] = cycle_number
+
                     retry_symbols = {
                         symbol for symbol in position_symbols
                         if symbol not in active_close_symbols
                         and symbol not in open_order_symbols
-                    }
+                        and symbol not in filled_order_confirmation_checks
+                    } | ready_after_fill
                     if had_untracked_orders:
                         retry_symbols.clear()
 
