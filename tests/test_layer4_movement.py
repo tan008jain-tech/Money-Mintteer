@@ -23,6 +23,18 @@ def test_candle_creation_and_malformed() -> None:
         Candle("AAPL", t, 100.0, 98.0, 99.0, 101.0, 1000.0)
 
 
+def test_candle_rejects_non_finite_ohlcv_values() -> None:
+    t = datetime(2026, 10, 1, 9, 30, tzinfo=timezone.utc)
+
+    for invalid_price in (float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(ValueError, match="finite"):
+            Candle("AAPL", t, invalid_price, 102.0, 99.0, 101.0, 1000.0)
+
+    for invalid_volume in (float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(ValueError, match="finite"):
+            Candle("AAPL", t, 100.0, 102.0, 99.0, 101.0, invalid_volume)
+
+
 def test_atr_availability_boundary() -> None:
     start = datetime(2026, 10, 1, 9, 30, tzinfo=timezone.utc)
     bars = []
