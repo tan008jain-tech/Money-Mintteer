@@ -195,6 +195,68 @@ class StructuralEligibilityEngine:
             logging.getLogger("MoneyMintterMasterBlueprint").warning(f"[Universe Layer 1] Failed to load/validate persisted cache: {exc}")
         return [], {}, None
 
+    def load_validated_cache(
+        self,
+        now_utc: datetime | None = None,
+        max_age_hours: float = 24.0,
+        min_symbols: int = 1,
+    ) -> tuple[list[str], dict[str, dict[str, Any]], datetime | None]:
+        """Load a recent Layer 1 cache and revalidate each symbol's structural metadata."""
+        logger = logging.getLogger("MoneyMintterMasterBlueprint")
+        now_utc = now_utc or datetime.now(timezone.utc)
+        if now_utc.tzinfo is None:
+            now_utc = now_utc.replace(tzinfo=timezone.utc)
+        symbols, metadata, fetched_at = self.load_persisted_cache()
+        if not symbols or fetched_at is None:
+            logger.warning("[Universe Layer 1] Cache rejected: missing symbols or fetched_at timestamp.")
+            return [], {}, None
+        if max_age_hours <= 0 or min_symbols <= 0:
+            logger.warning("[Universe Layer 1] Cache rejected: invalid age or minimum-size policy.")
+            return [], {}, None
+        age_hours = (now_utc - fetched_at).total_seconds() / 3600.0
+        if age_hours < -0.0833 or age_hours > max_age_hours:
+            logger.warning(
+                f"[Universe Layer 1] Cache rejected: age={age_hours:.2f}h outside [0,{max_age_hours:.2f}]h."
+            )
+            return [], {}, None
+        if len(symbols) < min_symbols:
+            logger.warning(
+                f"[Universe Layer 1] Cache rejected: {len(symbols)} symbols below health floor {min_symbols}."
+            )
+            return [], {}, None
+
+        validated_symbols: list[str] = []
+        validated_metadata: dict[str, dict[str, Any]] = {}
+        seen: set[str] = set()
+        for raw_symbol in symbols:
+            if not isinstance(raw_symbol, str):
+                logger.warning("[Universe Layer 1] Cache rejected: non-string symbol found.")
+                return [], {}, None
+            symbol = raw_symbol.upper().strip()
+            if not symbol or symbol != raw_symbol or symbol in seen or "/" in symbol or any(ch.isspace() for ch in symbol):
+                logger.warning(f"[Universe Layer 1] Cache rejected: invalid or duplicate symbol {raw_symbol!r}.")
+                return [], {}, None
+            cached_meta = metadata.get(symbol)
+            if not isinstance(cached_meta, dict):
+                logger.warning(f"[Universe Layer 1] Cache rejected: structural metadata missing for {symbol}.")
+                return [], {}, None
+            eligible, reason, normalized_meta = self.evaluate_asset(cached_meta)
+            if not eligible or not normalized_meta or normalized_meta.get("symbol") != symbol:
+                logger.warning(
+                    f"[Universe Layer 1] Cache rejected: {symbol} failed structural revalidation ({reason})."
+                )
+                return [], {}, None
+            seen.add(symbol)
+            validated_symbols.append(symbol)
+            validated_metadata[symbol] = normalized_meta
+
+        validated_symbols.sort()
+        logger.info(
+            f"[Universe Layer 1] Revalidated persisted cache: {len(validated_symbols)} symbols, "
+            f"age={age_hours:.2f}h, max_age={max_age_hours:.2f}h."
+        )
+        return validated_symbols, validated_metadata, fetched_at
+
     def save_persisted_cache(self, symbols: list[str], metadata: dict[str, dict[str, Any]], fetched_at: datetime) -> None:
         """Atomic and interruption-safe cache replacement using temporary file rename."""
         try:
