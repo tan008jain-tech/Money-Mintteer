@@ -73,6 +73,92 @@ def test_result_interface_alignment() -> None:
         assert res.actual_feed == res.data_source
 
 
+@pytest.mark.parametrize(
+    ("field", "invalid_value"),
+    [
+        ("open", float("nan")),
+        ("high", float("inf")),
+        ("low", float("-inf")),
+        ("close", float("nan")),
+        ("volume", float("inf")),
+        ("volume", -1.0),
+    ],
+)
+def test_layer2_excludes_symbol_with_malformed_daily_ohlcv(
+    field: str,
+    invalid_value: float,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        stock_client = MagicMock()
+        bars = create_bars_for_symbol(
+            base_price=100.0, num_bars=20, daily_volume=500_000.0
+        )
+        setattr(bars[5], field, invalid_value)
+        stock_client.get_stock_bars.return_value = MagicMock(
+            data={"BADDAILY": bars}, next_page_token=None
+        )
+
+        engine = DailySuitabilityEngine(
+            settings=Settings(),
+            stock_client=stock_client,
+            cache_dir=tmpdir,
+            historical_feed="sip",
+        )
+        result = engine.evaluate_universe(["BADDAILY"], force_refresh=True)
+
+        assert "BADDAILY" not in result.pool
+        assert result.metrics["BADDAILY"].status == "excluded"
+        assert result.metrics["BADDAILY"].exclusion_reason == "invalid_daily_data"
+        assert result.exclusion_counts["invalid_daily_data"] == 1
+
+
+def test_layer2_excludes_symbol_with_duplicate_daily_bar_timestamp() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        stock_client = MagicMock()
+        bars = create_bars_for_symbol(
+            base_price=100.0, num_bars=20, daily_volume=500_000.0
+        )
+        bars[10].timestamp = bars[9].timestamp
+        stock_client.get_stock_bars.return_value = MagicMock(
+            data={"DUPDAILY": bars}, next_page_token=None
+        )
+
+        engine = DailySuitabilityEngine(
+            settings=Settings(),
+            stock_client=stock_client,
+            cache_dir=tmpdir,
+            historical_feed="sip",
+        )
+        result = engine.evaluate_universe(["DUPDAILY"], force_refresh=True)
+
+        assert "DUPDAILY" not in result.pool
+        assert result.metrics["DUPDAILY"].exclusion_reason == "invalid_daily_data"
+
+
+def test_layer2_uses_close_when_daily_vwap_is_non_finite() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        stock_client = MagicMock()
+        bars = create_bars_for_symbol(
+            base_price=100.0, num_bars=20, daily_volume=500_000.0
+        )
+        for bar in bars:
+            bar.vwap = float("inf")
+        stock_client.get_stock_bars.return_value = MagicMock(
+            data={"VWAPFALLBACK": bars}, next_page_token=None
+        )
+
+        engine = DailySuitabilityEngine(
+            settings=Settings(),
+            stock_client=stock_client,
+            cache_dir=tmpdir,
+            historical_feed="sip",
+        )
+        result = engine.evaluate_universe(["VWAPFALLBACK"], force_refresh=True)
+
+        assert "VWAPFALLBACK" in result.pool
+        assert result.metrics["VWAPFALLBACK"].median_dollar_volume_20 > 10_000_000.0
+
+
 def test_no_raw_layer1_fallback_on_failure() -> None:
     settings = Settings()
     with tempfile.TemporaryDirectory() as tmpdir:
