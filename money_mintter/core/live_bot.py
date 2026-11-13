@@ -832,11 +832,22 @@ class LivePortfolioManager:
         account_cash = float(account.cash)
         account_equity = float(account.equity)
         buying_power = float(account.buying_power)
+        if not all(isfinite(value) for value in (account_cash, account_equity, buying_power)):
+            raise RuntimeError(
+                "Alpaca account snapshot contains non-finite cash, equity, or buying power"
+            )
+        if account_equity <= 0:
+            raise RuntimeError("Alpaca account equity is not positive; new entries disabled")
 
         if not hasattr(self, 'last_equity') or self.last_equity is None:
             if hasattr(account, 'last_equity') and account.last_equity is not None:
                 try:
-                    self.last_equity = float(account.last_equity)
+                    candidate_last_equity = float(account.last_equity)
+                    self.last_equity = (
+                        candidate_last_equity
+                        if isfinite(candidate_last_equity) and candidate_last_equity > 0
+                        else account_equity
+                    )
                 except (ValueError, TypeError):
                     self.last_equity = account_equity
             else:
@@ -853,6 +864,14 @@ class LivePortfolioManager:
             avg_entry = float(p.avg_entry_price)
             curr_price = float(p.current_price) if hasattr(p, 'current_price') else avg_entry
             unrealized_pnl = float(p.unrealized_pl) if hasattr(p, 'unrealized_pl') else 0.0
+            if not all(isfinite(value) for value in (qty, avg_entry, curr_price, unrealized_pnl)):
+                raise RuntimeError(
+                    f"Alpaca position snapshot contains non-finite values for {sym}"
+                )
+            if qty == 0 or avg_entry <= 0 or curr_price <= 0:
+                raise RuntimeError(
+                    f"Alpaca position snapshot contains invalid quantity or prices for {sym}"
+                )
             side_str = "BUY" if qty > 0 else "SELL"
             sl_price = avg_entry * 0.98 if qty > 0 else avg_entry * 1.02
             tp_price = avg_entry * 1.05 if qty > 0 else avg_entry * 0.95
