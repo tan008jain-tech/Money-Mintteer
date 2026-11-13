@@ -35,6 +35,20 @@ class FakeQuoteClient:
         return quotes
 
 
+
+def test_open_order_reconciliation_fails_closed_on_missing_symbol() -> None:
+    logger = logging.getLogger("missing_open_order_symbol")
+    client = SimpleNamespace(
+        get_orders=lambda request: [
+            SimpleNamespace(id="unknown-order", symbol=None)
+        ]
+    )
+    pm = LivePortfolioManager(client, logger)
+
+    with pytest.raises(RuntimeError, match="missing or invalid symbol"):
+        pm.fetch_open_order_symbols()
+
+
 def test_ict_instruction_capacity_block_recoverability(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MAX_PORTFOLIO_RISK_PCT", "3")
     logger = logging.getLogger("test")
