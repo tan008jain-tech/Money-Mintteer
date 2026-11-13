@@ -1218,6 +1218,7 @@ class LiveMarketBot:
         )
         if data_feed_enum == DataFeed.IEX:
             self.logger.warning(
+                "IEX feed carries only a fraction of market volume; relative volume confirmation is unreliable. "
                 "Layer 4 and ICT use IEX for timely intraday data; Layer 2 historical suitability "
                 "uses the separately configured historical feed."
             )
