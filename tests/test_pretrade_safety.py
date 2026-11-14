@@ -217,6 +217,36 @@ def test_missing_symbol_open_order_is_reconciled_by_id_before_flattening():
     assert client.close_calls == ["AAPL"]
 
 
+def test_successful_bulk_close_without_symbol_or_order_id_fails_closed():
+    class UnidentifiedBulkCloseBroker(FakeFlattenBroker):
+        def __init__(self):
+            super().__init__()
+            self.bulk_close_responses = [
+                SimpleNamespace(
+                    status=200,
+                    order_id=None,
+                    symbol=None,
+                    body=None,
+                )
+            ]
+            self.position_open = False
+
+        def get_orders(self, request):
+            return []
+
+    client = UnidentifiedBulkCloseBroker()
+    manager = LivePortfolioManager(
+        client, logging.getLogger("flatten_unidentified_bulk_response")
+    )
+
+    remaining = manager.flatten_all(
+        sleep_fn=lambda _: None, max_wait_seconds=3, retry_delay=1
+    )
+
+    assert remaining == ["UNKNOWN"]
+    assert client.close_calls == []
+
+
 def test_filled_unidentified_order_fails_closed():
     class FilledUnidentifiedBroker(FakeFlattenBroker):
         def __init__(self):

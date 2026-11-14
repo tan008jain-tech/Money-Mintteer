@@ -1880,7 +1880,9 @@ class LivePortfolioManager:
                 if unidentified_order_ids:
                     unknown_order_state = True
 
-                if unknown_close_response and (position_symbols or open_order_symbols):
+                if unknown_close_response:
+                    # A nominally successful close with no symbol/order ID cannot
+                    # be reconciled. Do not declare success even if snapshots look flat.
                     unknown_order_state = True
                 if untrackable_close_symbols.intersection(position_symbols):
                     unknown_order_state = True
