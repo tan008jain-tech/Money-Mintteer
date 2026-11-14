@@ -585,6 +585,10 @@ def test_mid_session_outage_continuation_and_flatten():
 
     bot.run_once = mock_run_once
     bot.portfolio_manager.flatten_all = MagicMock(return_value=[])
+    bot.portfolio_manager.fetch_account_and_positions = MagicMock(
+        return_value=(100000.0, 100000.0, 100000.0, [], [], set())
+    )
+    bot.portfolio_manager.fetch_open_order_symbols = MagicMock(return_value=set())
 
     current_time = now_val
     def mock_now():

@@ -731,6 +731,7 @@ class LivePortfolioManager:
         self.stock_client = stock_client
         self.last_equity: float | None = None
         self.last_submit_failures = 0
+        self.last_flatten_errors = 0
         self._last_equity_date = None
         self.on_unprotected: Any | None = None
 
@@ -816,6 +817,17 @@ class LivePortfolioManager:
                 )
                 return None
 
+            midpoint = (bid + ask) / 2.0
+            spread_pct = (ask - bid) / midpoint
+            if spread_pct > settings.max_quote_spread_pct:
+                self.logger.info(
+                    f"Skipping {symbol}: quote spread={spread_pct:.4%} exceeds "
+                    f"{settings.max_quote_spread_pct:.4%} from {feed_label} "
+                    f"(bid={bid:.4f}, ask={ask:.4f}, midpoint={midpoint:.4f}) "
+                    "[REJECTED_QUOTE_SPREAD]"
+                )
+                return None
+
             executable_price = ask if side is Side.BUY else bid
             deviation = abs(executable_price - signal_entry_price) / signal_entry_price
             if deviation > settings.max_execution_price_deviation_pct:
@@ -829,7 +841,8 @@ class LivePortfolioManager:
 
             self.logger.info(
                 f"[Execution Quote] {symbol} feed={feed_label} bid={bid:.4f} ask={ask:.4f} "
-                f"executable={executable_price:.4f} age={quote_age:.2f}s deviation={deviation:.4%}"
+                f"executable={executable_price:.4f} age={quote_age:.2f}s "
+                f"spread={spread_pct:.4%} deviation={deviation:.4%}"
             )
             return executable_price
         except Exception as exc:
@@ -1449,46 +1462,166 @@ class LivePortfolioManager:
         return orders_sent
 
     def flatten_all(self, sleep_fn=time.sleep, retries: int = 3, retry_delay: int = 5, max_wait_seconds: int = 0) -> list[str]:
+        """Cancel outstanding orders and liquidate positions with broker-side reconciliation.
+
+        Alpaca's bulk endpoint returns ClosePositionResponse objects (HTTP status plus
+        order_id), while close_position() returns an Order object (id/status). Both
+        response shapes are tracked explicitly so an active liquidation is never
+        mistaken for an unrelated order and cancelled by the retry loop.
+        """
         if max_wait_seconds <= 0:
             try:
                 max_wait_seconds = Settings().flatten_max_wait_seconds
             except Exception:
                 max_wait_seconds = 600
 
+        self.last_flatten_errors = 0
         start_time = time.monotonic()
         total_slept = 0.0
         effective_delay = min(retry_delay, 15)
         last_successful_remaining: list[str] | None = None
         close_order_symbols: dict[str, str] = {}
+        cancellation_order_symbols: dict[str, str] = {}
+        unidentified_order_ids: set[str] = set()
+        cancel_requested_order_ids: set[str] = set()
         first_close_attempt = True
         retry_symbols: set[str] = set()
         cycle_number = 0
-        # Filled market orders and the positions endpoint can become visible
-        # at slightly different times. Require two later position snapshots
-        # before retrying a close that the order endpoint already reports filled.
+        # A filled close/cancel order may be visible before the positions endpoint
+        # catches up. Require two later position snapshots before reissuing a close.
         filled_order_confirmation_checks: dict[str, tuple[int, int]] = {}
+        untrackable_close_symbols: set[str] = set()
+        unknown_close_response = False
+        unidentified_order_without_id = False
+
+        active_order_statuses = {
+            "new", "accepted", "pending_new", "partially_filled",
+            "pending_cancel", "pending_replace", "accepted_for_bidding", "stopped",
+        }
+        pending_cancel_statuses = {"pending_cancel", "pending_replace"}
+        terminal_order_statuses = {
+            "filled", "canceled", "expired", "rejected", "replaced",
+        }
 
         def _field(item: Any, name: str, default: Any = None) -> Any:
             if isinstance(item, dict):
                 return item.get(name, default)
             return getattr(item, name, default)
 
+        def _status_text(item: Any) -> str:
+            status = _field(item, "status")
+            value = getattr(status, "value", status)
+            return str(value).strip().lower() if value is not None else ""
+
+        def _body_details(body: Any) -> str:
+            names = ("code", "message", "available", "existing_qty", "held_for_orders")
+            parts: list[str] = []
+            for name in names:
+                value = _field(body, name)
+                if value is not None:
+                    parts.append(f"{name}={value}")
+            return ", ".join(parts) if parts else repr(body)
+
+        def _response_items(responses: Any) -> list[Any]:
+            if responses is None:
+                return []
+            if isinstance(responses, (list, tuple)):
+                return list(responses)
+            return [responses]
+
         def _remember_close_responses(responses: Any, phase: str) -> None:
-            for response in responses or []:
-                status = _field(response, "status", 0)
-                try:
-                    status_code = int(status or 0)
-                except (TypeError, ValueError):
-                    status_code = 0
+            nonlocal unknown_close_response
+            for response in _response_items(responses):
+                raw_status = _field(response, "status")
                 body = _field(response, "body")
-                symbol = _field(response, "symbol") or _field(body, "symbol")
-                order_id = _field(response, "order_id") or _field(body, "id")
-                if status_code == 200 and symbol and order_id:
-                    close_order_symbols[str(order_id)] = normalize_symbol(str(symbol))
-                elif symbol:
+                raw_symbol = _field(response, "symbol") or _field(body, "symbol")
+                symbol = normalize_symbol(str(raw_symbol)) if raw_symbol else ""
+                response_order_id = _field(response, "order_id")
+                has_http_status = isinstance(raw_status, int) and not isinstance(raw_status, bool)
+
+                # close_all_positions() returns ClosePositionResponse: HTTP status,
+                # order_id, symbol and either an Order body or failure-details body.
+                if response_order_id is not None or has_http_status:
+                    try:
+                        status_code = int(raw_status) if raw_status is not None else 0
+                    except (TypeError, ValueError):
+                        status_code = 0
+                    order_id = response_order_id or _field(body, "id")
+                    if status_code == 200 and order_id and symbol:
+                        order_id_text = str(order_id)
+                        close_order_symbols[order_id_text] = symbol
+                        self.logger.info(
+                            f"[Flatten] {phase} bulk-close accepted: symbol={symbol} "
+                            f"order_id={order_id_text}"
+                        )
+                    else:
+                        self.last_flatten_errors += 1
+                        details = _body_details(body)
+                        self.logger.error(
+                            f"{phase} liquidation request for {symbol or 'UNKNOWN'} was not accepted "
+                            f"(http_status={status_code}, details={details})"
+                        )
+                        if status_code == 200 and (not order_id or not symbol):
+                            if symbol:
+                                untrackable_close_symbols.add(symbol)
+                            else:
+                                unknown_close_response = True
+                    continue
+
+                # close_position() returns Order, not ClosePositionResponse.
+                order_id = _field(response, "id")
+                order_status = _status_text(response)
+                if order_id and symbol:
+                    order_id_text = str(order_id)
+                    close_order_symbols[order_id_text] = symbol
+                    self.logger.info(
+                        f"[Flatten] {phase} individual close order tracked: "
+                        f"symbol={symbol} order_id={order_id_text} "
+                        f"status={order_status or 'unknown'}"
+                    )
+                else:
+                    self.last_flatten_errors += 1
                     self.logger.error(
-                        f"{phase} liquidation request for {symbol} was not accepted "
-                        f"(status={status_code}); it will be retried after order-state verification."
+                        f"{phase} close_position returned an untrackable response "
+                        f"(symbol={symbol or 'missing'}, order_id={order_id or 'missing'}, "
+                        f"status={order_status or 'missing'})"
+                    )
+                    if symbol:
+                        untrackable_close_symbols.add(symbol)
+                    else:
+                        unknown_close_response = True
+
+        def _request_cancel(order_id: str, symbol: str, order_status: str, phase: str) -> None:
+            if symbol:
+                cancellation_order_symbols[order_id] = symbol
+                unidentified_order_ids.discard(order_id)
+            else:
+                unidentified_order_ids.add(order_id)
+            if order_status in pending_cancel_statuses:
+                return
+            if order_id in cancel_requested_order_ids:
+                return
+
+            # Record before the request. If the request races with a fill or another
+            # cancellation, the next cycle reconciles by ID instead of repeating DELETE.
+            cancel_requested_order_ids.add(order_id)
+            try:
+                self.trading_client.cancel_order_by_id(order_id)
+            except Exception as exc:
+                message = str(exc)
+                lowered = message.lower()
+                if "pending cancel" in lowered or (
+                    "already" in lowered and "filled" in lowered
+                ):
+                    self.logger.info(
+                        f"[Flatten] Cancellation for {order_id} ({symbol or 'UNKNOWN'}) is already "
+                        f"in progress or terminal: {message}"
+                    )
+                else:
+                    self.last_flatten_errors += 1
+                    self.logger.error(
+                        f"{phase} cancellation request failed for order {order_id} "
+                        f"({symbol or 'UNKNOWN'}): {message}"
                     )
 
         while True:
@@ -1499,16 +1632,15 @@ class LivePortfolioManager:
             if elapsed >= max_wait_seconds:
                 break
 
-            # The first pass cancels outstanding orders and liquidates all
-            # positions atomically. Later retries are symbol-scoped: never call
-            # close_all_positions again while another symbol has a working close
-            # order, because that would cancel and recreate unrelated liquidations.
+            # The bulk request runs once. All later liquidation retries are
+            # symbol-scoped so another working close order cannot be cancelled.
             if first_close_attempt:
                 phase = "Initial"
                 try:
                     responses = self.trading_client.close_all_positions(cancel_orders=True)
                     _remember_close_responses(responses, phase)
                 except Exception as exc:
+                    self.last_flatten_errors += 1
                     self.logger.error(f"Error during initial close_all_positions: {exc}")
                 first_close_attempt = False
             elif retry_symbols:
@@ -1518,8 +1650,9 @@ class LivePortfolioManager:
                 for symbol in symbols_to_retry:
                     try:
                         response = self.trading_client.close_position(symbol)
-                        _remember_close_responses([response], phase)
+                        _remember_close_responses(response, phase)
                     except Exception as exc:
+                        self.last_flatten_errors += 1
                         self.logger.error(
                             f"Error retrying liquidation for {symbol}: {exc}"
                         )
@@ -1549,115 +1682,228 @@ class LivePortfolioManager:
                     if not order_id or not order_symbol or not str(order_symbol).strip():
                         unknown_order_state = True
                         if order_id:
-                            try:
-                                self.trading_client.cancel_order_by_id(order_id)
-                            except Exception as exc:
-                                self.logger.error(
-                                    f"Unable to cancel unidentified open order {order_id}: {exc}"
-                                )
+                            _request_cancel(
+                                str(order_id), "", _status_text(order),
+                                "Unidentified open-order",
+                            )
+                        else:
+                            unidentified_order_without_id = True
                         continue
 
                     normalized_symbol = normalize_symbol(str(order_symbol))
                     if not normalized_symbol:
                         unknown_order_state = True
-                        try:
-                            self.trading_client.cancel_order_by_id(order_id)
-                        except Exception as exc:
-                            self.logger.error(
-                                f"Unable to cancel open order {order_id} with invalid symbol: {exc}"
-                            )
+                        _request_cancel(
+                            str(order_id), "", _status_text(order),
+                            "Invalid-symbol open-order",
+                        )
                         continue
 
                     order_id_text = str(order_id)
+                    order_status = _status_text(order)
+                    tracked_symbol = close_order_symbols.get(order_id_text)
+                    cancelling_symbol = cancellation_order_symbols.get(order_id_text)
+                    if (
+                        (tracked_symbol and tracked_symbol != normalized_symbol)
+                        or (cancelling_symbol and cancelling_symbol != normalized_symbol)
+                    ):
+                        unknown_order_state = True
+                        self.logger.error(
+                            f"Broker order identity mismatch for {order_id_text}: "
+                            f"reported_symbol={normalized_symbol}, tracked_close={tracked_symbol}, "
+                            f"tracked_cancel={cancelling_symbol}"
+                        )
+                        continue
+
+                    if order_status not in active_order_statuses:
+                        unknown_order_state = True
+                        open_order_ids.add(order_id_text)
+                        open_order_symbols.add(normalized_symbol)
+                        self.logger.error(
+                            f"Unrecognized status {order_status!r} for open order "
+                            f"{order_id_text} ({normalized_symbol}); treating it as active "
+                            "because it was returned by the OPEN-order query."
+                        )
+                        continue
+
                     open_order_ids.add(order_id_text)
                     open_order_symbols.add(normalized_symbol)
-                    tracked_close = (
-                        close_order_symbols.get(order_id_text) == normalized_symbol
-                    )
+                    tracked_close = tracked_symbol == normalized_symbol
 
-                    # Keep a tracked liquidation order working only while its
-                    # corresponding position still exists. If the position is
-                    # already flat, cancel it to avoid opening a reverse position.
                     if tracked_close and normalized_symbol in position_symbols:
                         active_close_symbols.add(normalized_symbol)
-                    else:
-                        had_untracked_orders = True
-                        try:
-                            self.trading_client.cancel_order_by_id(order_id)
-                        except Exception as exc:
-                            self.logger.error(
-                                f"Error cancelling untracked open order {order_id} "
-                                f"({normalized_symbol}): {exc}"
-                            )
+                        continue
 
-                # If a close order is temporarily absent from the OPEN list,
-                # query its id before assuming it has terminated. This avoids
-                # duplicate liquidation orders during broker-list visibility lag.
-                active_order_statuses = {
-                    "new", "accepted", "pending_new", "partially_filled",
-                    "pending_cancel", "pending_replace", "accepted_for_bidding", "stopped",
-                }
-                terminal_order_statuses = {
-                    "filled", "canceled", "expired", "rejected", "replaced",
-                }
-                for order_id, normalized_symbol in list(close_order_symbols.items()):
+                    # This is either an existing order being cancelled by the bulk
+                    # request, or a tracked close order whose position has already
+                    # disappeared. Never issue a duplicate cancel while cancellation
+                    # is pending, and never submit another close while it remains open.
+                    had_untracked_orders = True
+                    _request_cancel(
+                        order_id_text,
+                        normalized_symbol,
+                        order_status,
+                        "Tracked-close" if tracked_close else "Existing-open-order",
+                    )
+
+                # Orders that disappear from OPEN are reconciled by ID. This is
+                # essential for pending-cancel bracket legs and individual close
+                # orders: absence from OPEN alone is not proof of cancellation/fill.
+                reconciled_ids: dict[str, str] = dict(cancellation_order_symbols)
+                for order_id, symbol in close_order_symbols.items():
+                    prior = reconciled_ids.get(order_id)
+                    if prior is not None and prior != symbol:
+                        unknown_order_state = True
+                        self.logger.error(
+                            f"Conflicting symbol mappings for broker order {order_id}: "
+                            f"close={symbol}, cancellation={prior}"
+                        )
+                    reconciled_ids[order_id] = symbol
+
+                for order_id, normalized_symbol in list(reconciled_ids.items()):
                     if order_id in open_order_ids:
                         continue
                     try:
-                        close_order = self.trading_client.get_order_by_id(order_id)
-                        status = _field(close_order, "status")
-                        status_value = getattr(status, "value", status)
-                        status_text = str(status_value).lower()
+                        reconciled_order = self.trading_client.get_order_by_id(order_id)
+                        status_text = _status_text(reconciled_order)
+                        reported_symbol = _field(reconciled_order, "symbol")
+                        if reported_symbol and normalize_symbol(str(reported_symbol)) != normalized_symbol:
+                            raise RuntimeError(
+                                f"order symbol mismatch: expected {normalized_symbol}, "
+                                f"received {reported_symbol}"
+                            )
                     except Exception as exc:
+                        self.last_flatten_errors += 1
                         self.logger.error(
-                            f"Unable to reconcile close order {order_id}: {exc}"
+                            f"Unable to reconcile broker order {order_id} "
+                            f"({normalized_symbol}): {exc}"
                         )
                         unknown_order_state = True
                         continue
 
                     if status_text in active_order_statuses:
                         open_order_symbols.add(normalized_symbol)
-                        if normalized_symbol in position_symbols:
+                        if (
+                            order_id in close_order_symbols
+                            and normalized_symbol in position_symbols
+                        ):
                             active_close_symbols.add(normalized_symbol)
                         else:
                             had_untracked_orders = True
-                            try:
-                                self.trading_client.cancel_order_by_id(order_id)
-                            except Exception as exc:
-                                self.logger.error(
-                                    f"Unable to cancel close order {order_id} after its position closed: {exc}"
-                                )
+                            _request_cancel(
+                                order_id, normalized_symbol, status_text,
+                                "Reconciled-open-order",
+                            )
                     elif status_text in terminal_order_statuses:
                         close_order_symbols.pop(order_id, None)
+                        cancellation_order_symbols.pop(order_id, None)
+                        cancel_requested_order_ids.discard(order_id)
                         if status_text == "filled":
-                            filled_order_confirmation_checks[normalized_symbol] = (cycle_number, 0)
+                            filled_order_confirmation_checks[normalized_symbol] = (
+                                cycle_number, 0
+                            )
                             newly_filled_symbols.add(normalized_symbol)
                     else:
                         self.logger.error(
-                            f"Unrecognized status {status_text!r} for close order {order_id}; "
-                            "flatten state remains unverified."
+                            f"Unrecognized status {status_text!r} for broker order "
+                            f"{order_id}; flatten state remains unverified."
                         )
                         unknown_order_state = True
+
+                # An OPEN order with a missing/invalid symbol is still tracked by
+                # broker ID. Do not let it disappear from the OPEN list and silently
+                # become forgotten: reconcile it by ID until it is terminal and
+                # identifiable. A filled order with no symbol remains UNKNOWN because
+                # it cannot safely be associated with a position snapshot.
+                for order_id in list(unidentified_order_ids):
+                    if order_id in open_order_ids:
+                        unknown_order_state = True
+                        continue
+                    try:
+                        unidentified_order = self.trading_client.get_order_by_id(order_id)
+                        status_text = _status_text(unidentified_order)
+                        reported_symbol = _field(unidentified_order, "symbol")
+                        normalized_symbol = (
+                            normalize_symbol(str(reported_symbol))
+                            if reported_symbol and str(reported_symbol).strip()
+                            else ""
+                        )
+                    except Exception as exc:
+                        self.last_flatten_errors += 1
+                        self.logger.error(
+                            f"Unable to reconcile unidentified broker order {order_id}: {exc}"
+                        )
+                        unknown_order_state = True
+                        continue
+
+                    if status_text in terminal_order_statuses:
+                        if status_text == "filled":
+                            if normalized_symbol:
+                                unidentified_order_ids.discard(order_id)
+                                filled_order_confirmation_checks[normalized_symbol] = (
+                                    cycle_number, 0
+                                )
+                                newly_filled_symbols.add(normalized_symbol)
+                            else:
+                                unknown_order_state = True
+                                self.logger.error(
+                                    f"Unidentified broker order {order_id} filled without a "
+                                    "verifiable symbol; flatten state remains UNKNOWN."
+                                )
+                        else:
+                            unidentified_order_ids.discard(order_id)
+                            cancel_requested_order_ids.discard(order_id)
+                            if normalized_symbol:
+                                cancellation_order_symbols.pop(order_id, None)
+                    elif status_text in active_order_statuses:
+                        unknown_order_state = True
+                        if normalized_symbol:
+                            unidentified_order_ids.discard(order_id)
+                            had_untracked_orders = True
+                            open_order_symbols.add(normalized_symbol)
+                            _request_cancel(
+                                order_id, normalized_symbol, status_text,
+                                "Reconciled-unidentified-order",
+                            )
+                        else:
+                            _request_cancel(
+                                order_id, "", status_text,
+                                "Reconciled-unidentified-order",
+                            )
+                    else:
+                        unknown_order_state = True
+                        self.logger.error(
+                            f"Unrecognized status {status_text!r} for unidentified "
+                            f"broker order {order_id}; flatten state remains UNKNOWN."
+                        )
+
+                if unidentified_order_ids:
+                    unknown_order_state = True
+
+                if unknown_close_response:
+                    # A nominally successful close with no symbol/order ID cannot
+                    # be reconciled. Do not declare success even if snapshots look flat.
+                    unknown_order_state = True
+                if untrackable_close_symbols.intersection(position_symbols):
+                    unknown_order_state = True
 
                 if not position_symbols and not open_order_symbols and not unknown_order_state:
                     return []
 
                 if unknown_order_state:
                     self.logger.error(
-                        "Unable to fully identify open broker orders during flatten verification."
+                        "Unable to fully identify or reconcile broker positions/orders "
+                        "during flatten verification."
                     )
-                    last_successful_remaining = ["UNKNOWN"]
+                    if unidentified_order_ids or unidentified_order_without_id:
+                        last_successful_remaining = ["UNKNOWN"]
+                    else:
+                        last_successful_remaining = sorted(position_symbols | open_order_symbols) or ["UNKNOWN"]
                     retry_symbols.clear()
                 else:
                     remaining = position_symbols | open_order_symbols
                     last_successful_remaining = sorted(remaining)
 
-                    # Retry only after every open order for the remaining
-                    # position has disappeared. This avoids cancelling the
-                    # liquidation order submitted by the previous attempt.
-                    # A filled close order may be ahead of the positions
-                    # endpoint. Wait for two subsequent position snapshots before
-                    # retrying, and cancel the pending retry if the position disappears.
                     ready_after_fill: set[str] = set()
                     for symbol, (last_checked_cycle, checks) in list(
                         filled_order_confirmation_checks.items()
@@ -1682,11 +1928,13 @@ class LivePortfolioManager:
                         if symbol not in active_close_symbols
                         and symbol not in open_order_symbols
                         and symbol not in filled_order_confirmation_checks
+                        and symbol not in untrackable_close_symbols
                     } | ready_after_fill
                     if had_untracked_orders:
                         retry_symbols.clear()
 
             except Exception as exc:
+                self.last_flatten_errors += 1
                 self.logger.error(
                     f"Error verifying positions/open orders during flatten_all: {exc}"
                 )
@@ -1709,7 +1957,6 @@ class LivePortfolioManager:
         return ["UNKNOWN"]
 
 
-
 class LiveMarketBot:
     """Master Orchestrator class managing the trading lifecycle, dashboard server, and execution loops."""
     def __init__(self) -> None:
@@ -1723,7 +1970,8 @@ class LiveMarketBot:
             f"commission_per_order_usd={self.settings.commission_per_order_usd}, "
             f"commission_per_share_usd={self.settings.commission_per_share_usd}, "
             f"max_single_position_pct={self.settings.max_single_position_pct}, "
-            f"risk_per_trade_pct={self.settings.risk_per_trade_pct}"
+            f"risk_per_trade_pct={self.settings.risk_per_trade_pct}, "
+            f"max_quote_spread_pct={self.settings.max_quote_spread_pct}"
         )
 
         api_key = self.settings.alpaca_api_key or os.getenv("APCA_API_KEY_ID", "") or os.getenv("APCA_API_KEY", "")
@@ -2171,20 +2419,93 @@ class LiveMarketBot:
         orders_sent_total = 0
         errors = 0
         trading_started = False
+        self.latest_state["final_account_snapshot_verified"] = False
 
         def _safe_flatten() -> list[str]:
+            def _record_flatten_error() -> None:
+                try:
+                    self.portfolio_manager.last_flatten_errors = (
+                        getattr(self.portfolio_manager, "last_flatten_errors", 0) + 1
+                    )
+                except Exception:
+                    self.logger.error("Unable to increment flatten error counter.")
+
             try:
-                res_pos = self.portfolio_manager.flatten_all(sleep_fn, max_wait_seconds=self.settings.flatten_max_wait_seconds)
+                res_pos = self.portfolio_manager.flatten_all(
+                    sleep_fn,
+                    max_wait_seconds=self.settings.flatten_max_wait_seconds,
+                )
             except Exception as exc:
+                _record_flatten_error()
                 self.logger.critical(f"flatten_all raised exception: {exc}")
                 res_pos = ["UNKNOWN"]
 
             if res_pos:
                 if res_pos == ["UNKNOWN"]:
-                    self.logger.critical(f"POSITIONS MAY STILL BE OPEN: {res_pos} (position state could not be verified)")
+                    self.logger.critical(
+                        f"POSITIONS MAY STILL BE OPEN: {res_pos} "
+                        "(position state could not be verified; broker order state may also be unresolved)"
+                    )
                 else:
                     self.logger.critical(f"POSITIONS MAY STILL BE OPEN: {res_pos}")
-            return res_pos
+                return res_pos
+
+            # Take a fresh account/positions/orders snapshot after liquidation.
+            # The last normal cycle's equity is not the final session equity.
+            try:
+                (
+                    final_cash,
+                    final_equity,
+                    final_buying_power,
+                    final_positions,
+                    final_dashboard_positions,
+                    final_locked_symbols,
+                ) = self.portfolio_manager.fetch_account_and_positions()
+                final_open_order_symbols = self.portfolio_manager.fetch_open_order_symbols()
+
+                self.latest_state["cash"] = final_cash
+                self.latest_state["equity"] = final_equity
+                self.latest_state["open_positions"] = final_dashboard_positions
+                self.latest_state["final_account_snapshot_verified"] = True
+
+                remaining_symbols = {
+                    normalize_symbol(str(position["symbol"]))
+                    for position in final_positions
+                    if str(position.get("symbol", "")).strip()
+                }
+                remaining_symbols.update(
+                    normalize_symbol(str(symbol))
+                    for symbol in final_locked_symbols
+                    if str(symbol).strip()
+                )
+                remaining_symbols.update(
+                    normalize_symbol(str(symbol))
+                    for symbol in final_open_order_symbols
+                    if str(symbol).strip()
+                )
+                remaining_symbols.discard("")
+
+                self.logger.info(
+                    f"[Final Broker Snapshot] equity=${final_equity:.2f} "
+                    f"cash=${final_cash:.2f} buying_power=${final_buying_power:.2f} "
+                    f"positions={len(final_positions)} "
+                    f"open_order_symbols={len(final_open_order_symbols)}"
+                )
+                if remaining_symbols:
+                    remaining = sorted(remaining_symbols)
+                    _record_flatten_error()
+                    self.logger.critical(
+                        f"Final broker snapshot is not flat; positions/open orders remain: {remaining}"
+                    )
+                    return remaining
+            except Exception as exc:
+                _record_flatten_error()
+                self.logger.critical(
+                    f"Unable to verify final broker account/positions/orders snapshot: {exc}"
+                )
+                return ["UNKNOWN"]
+
+            return []
 
         try:
             try:
@@ -2309,19 +2630,42 @@ class LiveMarketBot:
             return {"status": status, "cycles": cycles, "orders_sent": orders_sent_total, "errors": errors, "remaining": remaining}
 
     def _log_session_summary(self, status: str, cycles: int, orders_sent: int, errors: int) -> None:
-        if cycles == 0:
-            self.logger.info(f"[Session Summary] status={status}, cycles={cycles}, orders_sent={orders_sent}, errors={errors}, equity=n/a")
-        else:
-            equity = self.latest_state.get("equity", 100000.0)
-            last_eq = self.portfolio_manager.last_equity
-            change_str = ""
+        flatten_errors = getattr(self.portfolio_manager, "last_flatten_errors", 0)
+        snapshot_verified = bool(
+            self.latest_state.get("final_account_snapshot_verified", False)
+        )
+        snapshot_label = "verified" if snapshot_verified else "unverified"
+
+        if cycles == 0 and not snapshot_verified:
+            self.logger.info(
+                f"[Session Summary] status={status}, cycles={cycles}, orders_sent={orders_sent}, "
+                f"cycle_errors={errors}, flatten_errors={flatten_errors}, "
+                f"final_account_snapshot={snapshot_label}, equity=n/a"
+            )
+            return
+
+        equity = self.latest_state.get("equity")
+        last_eq = self.portfolio_manager.last_equity
+        change_str = ""
+        if equity is not None:
+            equity_value = float(equity)
             if last_eq is not None and last_eq > 0:
-                diff = equity - last_eq
+                diff = equity_value - last_eq
                 pct = (diff / last_eq) * 100.0
-                change_str = f", equity=${equity:.2f}, change=${diff:+.2f} ({pct:+.2f}%) vs last_equity=${last_eq:.2f}"
+                change_str = (
+                    f", equity=${equity_value:.2f}, change=${diff:+.2f} ({pct:+.2f}%) "
+                    f"vs last_equity=${last_eq:.2f}"
+                )
             else:
-                change_str = f", equity=${equity:.2f}"
-            self.logger.info(f"[Session Summary] status={status}, cycles={cycles}, orders_sent={orders_sent}, errors={errors}{change_str}")
+                change_str = f", equity=${equity_value:.2f}"
+        else:
+            change_str = ", equity=n/a"
+
+        self.logger.info(
+            f"[Session Summary] status={status}, cycles={cycles}, orders_sent={orders_sent}, "
+            f"cycle_errors={errors}, flatten_errors={flatten_errors}, "
+            f"final_account_snapshot={snapshot_label}{change_str}"
+        )
 
 
 def _sleep_until(target_dt: datetime, now_fn, sleep_fn) -> None:
