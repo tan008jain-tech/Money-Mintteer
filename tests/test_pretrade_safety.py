@@ -244,6 +244,90 @@ def test_filled_unidentified_order_fails_closed():
     assert client.close_calls == []
 
 
+def _session_bot_for_snapshot_test(
+    *,
+    account_snapshot_error: Exception | None = None,
+):
+    from money_mintter.core.live_bot import LiveMarketBot
+
+    bot = LiveMarketBot.__new__(LiveMarketBot)
+    bot.logger = logging.getLogger("final_snapshot_test")
+    bot.settings = Settings()
+    moment = datetime(2026, 11, 13, 20, 0, tzinfo=timezone.utc)
+    bot.trading_client = SimpleNamespace(
+        get_clock=lambda: SimpleNamespace(
+            is_open=True,
+            next_open=moment - __import__("datetime").timedelta(hours=6),
+            next_close=moment + __import__("datetime").timedelta(minutes=5),
+        )
+    )
+
+    class Portfolio:
+        last_equity = 2071.08
+        last_flatten_errors = 0
+
+        def flatten_all(self, *args, **kwargs):
+            return []
+
+        def fetch_account_and_positions(self):
+            if account_snapshot_error is not None:
+                raise account_snapshot_error
+            return (
+                1200.00,
+                2071.26,
+                2071.26,
+                [],
+                [],
+                set(),
+            )
+
+        def fetch_open_order_symbols(self):
+            return set()
+
+    bot.portfolio_manager = Portfolio()
+    bot.latest_state = {
+        "equity": 2071.08,
+        "cash": 1000.00,
+        "open_positions": [],
+        "final_account_snapshot_verified": False,
+    }
+    return bot, moment
+
+
+def test_session_summary_uses_post_flatten_broker_equity(caplog):
+    bot, moment = _session_bot_for_snapshot_test()
+
+    with caplog.at_level(logging.INFO):
+        result = bot.run_session(
+            now_fn=lambda: moment,
+            sleep_fn=lambda _: None,
+        )
+
+    assert result["status"] == "completed"
+    assert bot.latest_state["equity"] == pytest.approx(2071.26)
+    assert bot.latest_state["cash"] == pytest.approx(1200.00)
+    assert bot.latest_state["final_account_snapshot_verified"] is True
+    assert "[Final Broker Snapshot] equity=$2071.26" in caplog.text
+    assert "final_account_snapshot=verified" in caplog.text
+
+
+def test_session_cannot_complete_when_post_flatten_snapshot_fails(caplog):
+    bot, moment = _session_bot_for_snapshot_test(
+        account_snapshot_error=RuntimeError("broker snapshot unavailable")
+    )
+
+    with caplog.at_level(logging.CRITICAL):
+        result = bot.run_session(
+            now_fn=lambda: moment,
+            sleep_fn=lambda _: None,
+        )
+
+    assert result["status"] == "flatten_incomplete"
+    assert result["remaining"] == ["UNKNOWN"]
+    assert bot.latest_state["final_account_snapshot_verified"] is False
+    assert "Unable to verify final broker account/positions/orders snapshot" in caplog.text
+
+
 def test_quote_spread_gate_rejects_wide_iex_reference_quote():
     manager = LivePortfolioManager(
         object(),
