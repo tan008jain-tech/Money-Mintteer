@@ -1714,9 +1714,12 @@ class LivePortfolioManager:
 
                     if order_status not in active_order_statuses:
                         unknown_order_state = True
+                        open_order_ids.add(order_id_text)
+                        open_order_symbols.add(normalized_symbol)
                         self.logger.error(
                             f"Unrecognized status {order_status!r} for open order "
-                            f"{order_id_text} ({normalized_symbol}); flatten state remains unverified."
+                            f"{order_id_text} ({normalized_symbol}); treating it as active "
+                            "because it was returned by the OPEN-order query."
                         )
                         continue
 
@@ -1887,7 +1890,7 @@ class LivePortfolioManager:
                         "Unable to fully identify or reconcile broker positions/orders "
                         "during flatten verification."
                     )
-                    last_successful_remaining = ["UNKNOWN"]
+                    last_successful_remaining = sorted(position_symbols | open_order_symbols) or ["UNKNOWN"]
                     retry_symbols.clear()
                 else:
                     remaining = position_symbols | open_order_symbols
@@ -2424,7 +2427,7 @@ class LiveMarketBot:
                 if res_pos == ["UNKNOWN"]:
                     self.logger.critical(
                         f"POSITIONS MAY STILL BE OPEN: {res_pos} "
-                        "(position/order state could not be verified)"
+                        "(position state could not be verified; broker order state may also be unresolved)"
                     )
                 else:
                     self.logger.critical(f"POSITIONS MAY STILL BE OPEN: {res_pos}")

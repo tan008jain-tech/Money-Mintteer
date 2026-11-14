@@ -128,7 +128,9 @@ def test_close_position_order_response_is_tracked_and_never_cancelled(caplog):
     manager = LivePortfolioManager(client, logging.getLogger("flatten_order_response"))
 
     with caplog.at_level(logging.INFO):
-        remaining = manager.flatten_all(sleep_fn=lambda _: None, max_wait_seconds=5)
+        remaining = manager.flatten_all(
+            sleep_fn=lambda _: None, max_wait_seconds=10, retry_delay=1
+        )
 
     assert remaining == []
     assert client.close_calls == ["AAPL"]
@@ -159,7 +161,9 @@ def test_existing_order_cancel_is_requested_at_most_once_and_reconciled(
     client = FakeFlattenBroker(original_order=original_order)
     manager = LivePortfolioManager(client, logging.getLogger("flatten_cancel_race"))
 
-    remaining = manager.flatten_all(sleep_fn=lambda _: None, max_wait_seconds=6)
+    remaining = manager.flatten_all(
+        sleep_fn=lambda _: None, max_wait_seconds=10, retry_delay=1
+    )
 
     assert remaining == []
     assert client.cancel_calls == (
@@ -203,7 +207,9 @@ def test_missing_symbol_open_order_is_reconciled_by_id_before_flattening():
     client = MissingSymbolBroker()
     manager = LivePortfolioManager(client, logging.getLogger("flatten_unknown_order_symbol"))
 
-    remaining = manager.flatten_all(sleep_fn=lambda _: None, max_wait_seconds=6)
+    remaining = manager.flatten_all(
+        sleep_fn=lambda _: None, max_wait_seconds=10, retry_delay=1
+    )
 
     assert remaining == []
     assert client.cancel_calls.count("unknown-symbol-order") == 1
