@@ -92,6 +92,9 @@ class Settings:
     max_execution_price_deviation_pct: float = field(
         default_factory=lambda: _env_percent("MAX_EXECUTION_PRICE_DEVIATION_PCT", 0.01)
     )
+    max_quote_spread_pct: float = field(
+        default_factory=lambda: _env_percent("MAX_QUOTE_SPREAD_PCT", 0.01)
+    )
     commission_per_order_usd: float = field(
         default_factory=lambda: _env_float("COMMISSION_PER_ORDER_USD", 0.35)
     )
@@ -248,6 +251,8 @@ class Settings:
             raise ValueError("QUOTE_MAX_FUTURE_SKEW_SECONDS must be >= 0")
         if not 0 < self.max_execution_price_deviation_pct <= 1:
             raise ValueError("MAX_EXECUTION_PRICE_DEVIATION_PCT must be in (0, 100]")
+        if not 0 < self.max_quote_spread_pct <= 1:
+            raise ValueError("MAX_QUOTE_SPREAD_PCT must be in (0, 100]")
         if self.commission_per_order_usd < 0:
             raise ValueError("COMMISSION_PER_ORDER_USD must be >= 0")
         if self.commission_per_share_usd < 0:
