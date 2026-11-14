@@ -1492,6 +1492,7 @@ class LivePortfolioManager:
         filled_order_confirmation_checks: dict[str, tuple[int, int]] = {}
         untrackable_close_symbols: set[str] = set()
         unknown_close_response = False
+        unidentified_order_without_id = False
 
         active_order_statuses = {
             "new", "accepted", "pending_new", "partially_filled",
@@ -1685,6 +1686,8 @@ class LivePortfolioManager:
                                 str(order_id), "", _status_text(order),
                                 "Unidentified open-order",
                             )
+                        else:
+                            unidentified_order_without_id = True
                         continue
 
                     normalized_symbol = normalize_symbol(str(order_symbol))
@@ -1890,7 +1893,10 @@ class LivePortfolioManager:
                         "Unable to fully identify or reconcile broker positions/orders "
                         "during flatten verification."
                     )
-                    last_successful_remaining = sorted(position_symbols | open_order_symbols) or ["UNKNOWN"]
+                    if unidentified_order_ids or unidentified_order_without_id:
+                        last_successful_remaining = ["UNKNOWN"]
+                    else:
+                        last_successful_remaining = sorted(position_symbols | open_order_symbols) or ["UNKNOWN"]
                     retry_symbols.clear()
                 else:
                     remaining = position_symbols | open_order_symbols
