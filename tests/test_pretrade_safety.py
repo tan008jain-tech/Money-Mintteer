@@ -326,6 +326,7 @@ def test_session_cannot_complete_when_post_flatten_snapshot_fails(caplog):
     assert result["status"] == "flatten_incomplete"
     assert result["remaining"] == ["UNKNOWN"]
     assert bot.latest_state["final_account_snapshot_verified"] is False
+    assert bot.portfolio_manager.last_flatten_errors == 1
     assert "Unable to verify final broker account/positions/orders snapshot" in caplog.text
 
 

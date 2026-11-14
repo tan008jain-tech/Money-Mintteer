@@ -2420,12 +2420,21 @@ class LiveMarketBot:
         self.latest_state["final_account_snapshot_verified"] = False
 
         def _safe_flatten() -> list[str]:
+            def _record_flatten_error() -> None:
+                try:
+                    self.portfolio_manager.last_flatten_errors = (
+                        getattr(self.portfolio_manager, "last_flatten_errors", 0) + 1
+                    )
+                except Exception:
+                    self.logger.error("Unable to increment flatten error counter.")
+
             try:
                 res_pos = self.portfolio_manager.flatten_all(
                     sleep_fn,
                     max_wait_seconds=self.settings.flatten_max_wait_seconds,
                 )
             except Exception as exc:
+                _record_flatten_error()
                 self.logger.critical(f"flatten_all raised exception: {exc}")
                 res_pos = ["UNKNOWN"]
 
@@ -2482,11 +2491,13 @@ class LiveMarketBot:
                 )
                 if remaining_symbols:
                     remaining = sorted(remaining_symbols)
+                    _record_flatten_error()
                     self.logger.critical(
                         f"Final broker snapshot is not flat; positions/open orders remain: {remaining}"
                     )
                     return remaining
             except Exception as exc:
+                _record_flatten_error()
                 self.logger.critical(
                     f"Unable to verify final broker account/positions/orders snapshot: {exc}"
                 )
