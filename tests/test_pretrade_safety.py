@@ -285,6 +285,7 @@ def _session_bot_for_snapshot_test(
             return set()
 
     bot.portfolio_manager = Portfolio()
+    bot.kill_switch = SimpleNamespace(tripped=False, reason="")
     bot.latest_state = {
         "equity": 2071.08,
         "cash": 1000.00,
