@@ -170,6 +170,74 @@ def test_existing_order_cancel_is_requested_at_most_once_and_reconciled(
     assert client.cancel_calls.count("protective-order-1") <= 1
 
 
+def test_missing_symbol_open_order_is_reconciled_by_id_before_flattening():
+    class MissingSymbolBroker(FakeFlattenBroker):
+        def __init__(self):
+            super().__init__()
+            self.unknown_order = SimpleNamespace(
+                id="unknown-symbol-order",
+                symbol=None,
+                status="new",
+            )
+            self._unknown_cancelled = False
+
+        def get_orders(self, request):
+            if not self._unknown_cancelled:
+                return [self.unknown_order]
+            return super().get_orders(request)
+
+        def cancel_order_by_id(self, order_id):
+            if str(order_id) == self.unknown_order.id:
+                self.cancel_calls.append(str(order_id))
+                self.unknown_order.status = "canceled"
+                self._unknown_cancelled = True
+                return
+            super().cancel_order_by_id(order_id)
+
+        def get_order_by_id(self, order_id):
+            if str(order_id) == self.unknown_order.id:
+                self.get_order_by_id_calls.append(str(order_id))
+                return self.unknown_order
+            return super().get_order_by_id(order_id)
+
+    client = MissingSymbolBroker()
+    manager = LivePortfolioManager(client, logging.getLogger("flatten_unknown_order_symbol"))
+
+    remaining = manager.flatten_all(sleep_fn=lambda _: None, max_wait_seconds=6)
+
+    assert remaining == []
+    assert client.cancel_calls.count("unknown-symbol-order") == 1
+    assert client.get_order_by_id_calls.count("unknown-symbol-order") == 1
+    assert client.close_calls == ["AAPL"]
+
+
+def test_filled_unidentified_order_fails_closed():
+    class FilledUnidentifiedBroker(FakeFlattenBroker):
+        def __init__(self):
+            super().__init__()
+            self.unknown_order = SimpleNamespace(
+                id="unknown-filled-order",
+                symbol=None,
+                status="filled",
+            )
+
+        def get_orders(self, request):
+            return [self.unknown_order]
+
+        def get_order_by_id(self, order_id):
+            self.get_order_by_id_calls.append(str(order_id))
+            return self.unknown_order
+
+    client = FilledUnidentifiedBroker()
+    manager = LivePortfolioManager(client, logging.getLogger("flatten_filled_unknown_order"))
+
+    remaining = manager.flatten_all(sleep_fn=lambda _: None, max_wait_seconds=2)
+
+    assert remaining == ["UNKNOWN"]
+    assert "unknown-filled-order" in client.get_order_by_id_calls
+    assert client.close_calls == []
+
+
 def test_quote_spread_gate_rejects_wide_iex_reference_quote():
     manager = LivePortfolioManager(
         object(),

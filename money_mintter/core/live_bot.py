@@ -1482,6 +1482,7 @@ class LivePortfolioManager:
         last_successful_remaining: list[str] | None = None
         close_order_symbols: dict[str, str] = {}
         cancellation_order_symbols: dict[str, str] = {}
+        unidentified_order_ids: set[str] = set()
         cancel_requested_order_ids: set[str] = set()
         first_close_attempt = True
         retry_symbols: set[str] = set()
@@ -1592,6 +1593,9 @@ class LivePortfolioManager:
         def _request_cancel(order_id: str, symbol: str, order_status: str, phase: str) -> None:
             if symbol:
                 cancellation_order_symbols[order_id] = symbol
+                unidentified_order_ids.discard(order_id)
+            else:
+                unidentified_order_ids.add(order_id)
             if order_status in pending_cancel_statuses:
                 return
             if order_id in cancel_requested_order_ids:
@@ -1799,6 +1803,76 @@ class LivePortfolioManager:
                             f"{order_id}; flatten state remains unverified."
                         )
                         unknown_order_state = True
+
+                # An OPEN order with a missing/invalid symbol is still tracked by
+                # broker ID. Do not let it disappear from the OPEN list and silently
+                # become forgotten: reconcile it by ID until it is terminal and
+                # identifiable. A filled order with no symbol remains UNKNOWN because
+                # it cannot safely be associated with a position snapshot.
+                for order_id in list(unidentified_order_ids):
+                    if order_id in open_order_ids:
+                        unknown_order_state = True
+                        continue
+                    try:
+                        unidentified_order = self.trading_client.get_order_by_id(order_id)
+                        status_text = _status_text(unidentified_order)
+                        reported_symbol = _field(unidentified_order, "symbol")
+                        normalized_symbol = (
+                            normalize_symbol(str(reported_symbol))
+                            if reported_symbol and str(reported_symbol).strip()
+                            else ""
+                        )
+                    except Exception as exc:
+                        self.last_flatten_errors += 1
+                        self.logger.error(
+                            f"Unable to reconcile unidentified broker order {order_id}: {exc}"
+                        )
+                        unknown_order_state = True
+                        continue
+
+                    if status_text in terminal_order_statuses:
+                        if status_text == "filled":
+                            if normalized_symbol:
+                                unidentified_order_ids.discard(order_id)
+                                filled_order_confirmation_checks[normalized_symbol] = (
+                                    cycle_number, 0
+                                )
+                                newly_filled_symbols.add(normalized_symbol)
+                            else:
+                                unknown_order_state = True
+                                self.logger.error(
+                                    f"Unidentified broker order {order_id} filled without a "
+                                    "verifiable symbol; flatten state remains UNKNOWN."
+                                )
+                        else:
+                            unidentified_order_ids.discard(order_id)
+                            cancel_requested_order_ids.discard(order_id)
+                            if normalized_symbol:
+                                cancellation_order_symbols.pop(order_id, None)
+                    elif status_text in active_order_statuses:
+                        unknown_order_state = True
+                        if normalized_symbol:
+                            unidentified_order_ids.discard(order_id)
+                            had_untracked_orders = True
+                            open_order_symbols.add(normalized_symbol)
+                            _request_cancel(
+                                order_id, normalized_symbol, status_text,
+                                "Reconciled-unidentified-order",
+                            )
+                        else:
+                            _request_cancel(
+                                order_id, "", status_text,
+                                "Reconciled-unidentified-order",
+                            )
+                    else:
+                        unknown_order_state = True
+                        self.logger.error(
+                            f"Unrecognized status {status_text!r} for unidentified "
+                            f"broker order {order_id}; flatten state remains UNKNOWN."
+                        )
+
+                if unidentified_order_ids:
+                    unknown_order_state = True
 
                 if unknown_close_response and (position_symbols or open_order_symbols):
                     unknown_order_state = True
