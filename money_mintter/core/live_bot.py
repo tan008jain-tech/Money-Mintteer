@@ -23,6 +23,7 @@ from alpaca.data.enums import DataFeed
 from alpaca.common.exceptions import APIError
 
 from money_mintter.config import Settings
+from money_mintter.core.logging_storage import create_logging_file_handlers
 from money_mintter.core.eligibility import StructuralEligibilityEngine
 from money_mintter.core.suitability import DailySuitabilityEngine
 from money_mintter.core.killswitch import KillSwitch
@@ -2176,19 +2177,14 @@ class LiveMarketBot:
         log_dir_env = os.getenv("MM_LOG_DIR", "logs")
         log_dir = Path(log_dir_env) if 'Path' in globals() else __import__('pathlib').Path(log_dir_env)
         log_dir.mkdir(exist_ok=True, parents=True)
-        today_str = datetime.now(timezone.utc).strftime('%Y%m%d')
-        daily_log = log_dir / f"live_market_{today_str}.log"
-        master_log = log_dir / "live_market.log"
-
         logger = logging.getLogger("MoneyMintterMasterBlueprint")
         logger.setLevel(logging.INFO)
         logger.handlers.clear()
 
         formatter = logging.Formatter("%(asctime)s [%(levelname)s] [%(name)s] %(message)s")
 
-        fh_daily = logging.FileHandler(daily_log, encoding="utf-8")
+        fh_daily, fh_master = create_logging_file_handlers(log_dir)
         fh_daily.setFormatter(formatter)
-        fh_master = logging.FileHandler(master_log, encoding="utf-8")
         fh_master.setFormatter(formatter)
         sh = logging.StreamHandler(sys.stdout)
         sh.setFormatter(formatter)
