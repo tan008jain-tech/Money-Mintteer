@@ -1166,7 +1166,7 @@ class LivePortfolioManager:
                         created_at=_plain_for_journal(
                             _value_for_journal(activity, "created_at")
                         ),
-                        description=_value_for_journal(
+                        description=_plain_for_journal(
                             _value_for_journal(activity, "description")
                         ),
                     )
@@ -2924,12 +2924,7 @@ class LiveMarketBot:
         self.logger.info(" PAPER TRADING SESSION ORCHESTRATION ACTIVE       ")
         self.logger.info("==================================================")
 
-        session_start = now_fn()
-        if not isinstance(session_start, datetime):
-            raise ValueError("session clock must return a datetime")
-        if session_start.tzinfo is None or session_start.utcoffset() is None:
-            session_start = session_start.replace(tzinfo=timezone.utc)
-        self._session_start_utc = session_start.astimezone(timezone.utc)
+        self._session_start_utc: datetime | None = None
 
         cycles = 0
         orders_sent_total = 0
@@ -3057,6 +3052,14 @@ class LiveMarketBot:
             next_close = getattr(clock, 'next_close', None)
 
             now = now_fn()
+            if self._session_start_utc is None:
+                if not isinstance(now, datetime):
+                    raise ValueError("session clock must return a datetime")
+                session_start = now
+                if session_start.tzinfo is None or session_start.utcoffset() is None:
+                    session_start = session_start.replace(tzinfo=timezone.utc)
+                self._session_start_utc = session_start.astimezone(timezone.utc)
+
             if not is_open:
                 if next_open is not None:
                     if next_open.tzinfo is None:
