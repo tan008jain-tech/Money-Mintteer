@@ -2938,6 +2938,8 @@ class LiveMarketBot:
         self.latest_state["final_account_snapshot_verified"] = False
 
         def _safe_flatten() -> list[str]:
+            pre_flatten_positions = list(self.latest_state.get("open_positions", []))
+
             def _record_flatten_error() -> None:
                 try:
                     self.portfolio_manager.last_flatten_errors = (
@@ -3019,8 +3021,7 @@ class LiveMarketBot:
                 if journal is not None:
                     try:
                         self.portfolio_manager.reconcile_order_journal()
-                        previous_positions = self.latest_state.get("open_positions", [])
-                        for position in previous_positions:
+                        for position in pre_flatten_positions:
                             symbol = str(position.get("symbol", "")).strip()
                             if not symbol:
                                 continue

@@ -12,8 +12,8 @@ def test_session_summary_reports_fill_gross_and_observed_fees_without_fabricatin
     caplog,
 ):
     journal = OrderLifecycleJournal(tmp_path / "order_lifecycle.jsonl")
-    start = datetime(2026, 11, 19, 14, 0, tzinfo=timezone.utc)
-    end = start + timedelta(hours=1)
+    start = datetime.now(timezone.utc) - timedelta(hours=1)
+    end = start + timedelta(minutes=30)
     journal.append(
         "entry_order_submitted",
         parent_order={"order_id": "entry", "order_role": "entry"},
