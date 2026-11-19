@@ -1143,6 +1143,7 @@ class LivePortfolioManager:
         locked_normalized: set[str] | None = None,
         open_exposure: float = 0.0,
         buying_power: float | None = None,
+        execution_time_utc: datetime | None = None,
     ) -> int:
         """Submit at most one instruction per symbol within combined position/order/pending capacity.
 
@@ -1152,6 +1153,14 @@ class LivePortfolioManager:
         """
         orders_sent = 0
         self.last_submit_failures = 0
+        execution_now = execution_time_utc or datetime.now(timezone.utc)
+        if execution_now.tzinfo is None or execution_now.utcoffset() is None:
+            self.logger.error(
+                "[Execution] Rejecting ICT instructions: execution time must be timezone-aware "
+                "[REJECTED_INVALID_EXECUTION_TIME]"
+            )
+            return 0
+        execution_now = execution_now.astimezone(timezone.utc)
         if account_equity <= 0:
             self.logger.warning("[Execution] New entries disabled: account equity is not positive.")
             return 0
@@ -1190,6 +1199,33 @@ class LivePortfolioManager:
         eligible: list[ICTExecutionInstruction] = []
         seen_batch_symbols: set[str] = set()
         for inst in instructions:
+            signal_time = getattr(inst, "timestamp", None)
+            if (
+                not isinstance(signal_time, datetime)
+                or signal_time.tzinfo is None
+                or signal_time.utcoffset() is None
+            ):
+                self.logger.info(
+                    f"Skipping {getattr(inst, 'symbol', 'UNKNOWN')}: ICT signal timestamp is "
+                    "missing, malformed, or timezone-naive "
+                    "[REJECTED_INVALID_ICT_SIGNAL_TIMESTAMP]"
+                )
+                continue
+            signal_age_seconds = (
+                execution_now - signal_time.astimezone(timezone.utc)
+            ).total_seconds()
+            if (
+                signal_age_seconds < 0
+                or signal_age_seconds >= settings.ict_signal_max_age_seconds
+            ):
+                self.logger.info(
+                    f"Skipping {getattr(inst, 'symbol', 'UNKNOWN')}: ICT signal age "
+                    f"{signal_age_seconds:.2f}s outside allowed range "
+                    f"[0, {settings.ict_signal_max_age_seconds:.2f}) "
+                    "[REJECTED_STALE_ICT_SIGNAL]"
+                )
+                continue
+
             sym = str(inst.symbol).strip()
             norm_sym = normalize_symbol(sym)
             if not norm_sym or "/" in sym:
@@ -2351,6 +2387,7 @@ class LiveMarketBot:
                 locked_normalized=locked_normalized,
                 open_exposure=open_exposure,
                 buying_power=buying_power,
+                execution_time_utc=datetime.now(timezone.utc),
             )
 
             self.logger.info(
