@@ -83,8 +83,6 @@ def snapshot_order(
         for key, value in fields.items()
         if value is not None
     }
-    if fields["id"] if "id" in fields else False:
-        pass
     if snapshot.get("order_id") is not None:
         snapshot["order_id"] = str(snapshot["order_id"])
     if snapshot.get("client_order_id") is not None:

@@ -189,3 +189,179 @@ def test_incomplete_final_jsonl_record_is_ignored_but_interior_corruption_is_not
         assert "invalid JSON" in str(exc)
     else:
         raise AssertionError("completed malformed record must fail closed")
+
+
+def test_ict_submission_persists_intent_and_broker_parent_child_ids(tmp_path, monkeypatch):
+    import logging
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+
+    from money_mintter.config import Settings
+    from money_mintter.core.live_bot import LivePortfolioManager
+    from money_mintter.domain import Side
+    from money_mintter.strategy.ict.integration import ICTExecutionInstruction
+
+    monkeypatch.setenv("MAX_PORTFOLIO_RISK_PCT", "3")
+    journal = OrderLifecycleJournal(tmp_path / "order_lifecycle.jsonl")
+
+    class Quotes:
+        def get_stock_latest_quote(self, request):
+            now = datetime.now(timezone.utc)
+            return {
+                symbol: SimpleNamespace(
+                    timestamp=now,
+                    bid_price=99.99,
+                    ask_price=100.01,
+                )
+                for symbol in request.symbol_or_symbols
+            }
+
+    class Broker:
+        def __init__(self):
+            self.request = None
+
+        def submit_order(self, request):
+            self.request = request
+            existing = journal.read_events()
+            assert existing and existing[-1]["event_type"] == "entry_intent"
+            return SimpleNamespace(
+                id="parent-order-id",
+                client_order_id=request.client_order_id,
+                order_class="bracket",
+                legs=[
+                    SimpleNamespace(
+                        id="take-profit-id",
+                        type="limit",
+                        group_role="take_profit",
+                        symbol="AAPL",
+                        side="sell",
+                        qty="10",
+                    ),
+                    SimpleNamespace(
+                        id="stop-loss-id",
+                        type="stop",
+                        group_role="stop_loss",
+                        symbol="AAPL",
+                        side="sell",
+                        qty="10",
+                    ),
+                ],
+            )
+
+    broker = Broker()
+    manager = LivePortfolioManager(
+        broker,
+        logging.getLogger("order_journal_execution"),
+        stock_client=Quotes(),
+        order_journal=journal,
+    )
+    now = datetime.now(timezone.utc)
+    instruction = ICTExecutionInstruction(
+        symbol="AAPL",
+        side=Side.BUY,
+        entry_price=100.0,
+        stop_price=98.0,
+        target_price=105.0,
+        risk_pts=2.0,
+        timestamp=now,
+        timestamp_ns=1_000_000,
+        zone_type="disp_fvg",
+        score=1,
+        zone_top=101.0,
+        zone_bot=99.0,
+        reason="journal_test",
+    )
+
+    sent = manager.submit_ict_instructions(
+        [instruction],
+        set(),
+        100_000.0,
+        Settings(),
+        execution_time_utc=now,
+    )
+
+    events = journal.read_events()
+    assert sent == 1
+    assert broker.request is not None
+    assert broker.request.client_order_id.startswith("mm-ict-")
+    assert [event["event_type"] for event in events] == [
+        "entry_intent",
+        "entry_order_submitted",
+    ]
+    assert events[0]["client_order_id"] == broker.request.client_order_id
+    assert events[1]["parent_order"]["order_id"] == "parent-order-id"
+    assert {leg["order_role"] for leg in events[1]["child_orders"]} == {
+        "take_profit",
+        "stop_loss",
+    }
+
+
+def test_ict_submission_fails_closed_when_intent_cannot_be_persisted(monkeypatch):
+    import logging
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+
+    from money_mintter.config import Settings
+    from money_mintter.core.live_bot import LivePortfolioManager
+    from money_mintter.domain import Side
+    from money_mintter.strategy.ict.integration import ICTExecutionInstruction
+
+    monkeypatch.setenv("MAX_PORTFOLIO_RISK_PCT", "3")
+
+    class BrokenJournal:
+        def append(self, event_type, **payload):
+            raise OSError("disk unavailable")
+
+    class Broker:
+        def __init__(self):
+            self.submissions = 0
+
+        def submit_order(self, request):
+            self.submissions += 1
+            return SimpleNamespace(order_class="bracket", legs=[1, 2])
+
+    class Quotes:
+        def get_stock_latest_quote(self, request):
+            now = datetime.now(timezone.utc)
+            return {
+                symbol: SimpleNamespace(
+                    timestamp=now,
+                    bid_price=99.99,
+                    ask_price=100.01,
+                )
+                for symbol in request.symbol_or_symbols
+            }
+
+    broker = Broker()
+    manager = LivePortfolioManager(
+        broker,
+        logging.getLogger("order_journal_fail_closed"),
+        stock_client=Quotes(),
+        order_journal=BrokenJournal(),
+    )
+    now = datetime.now(timezone.utc)
+    instruction = ICTExecutionInstruction(
+        symbol="AAPL",
+        side=Side.BUY,
+        entry_price=100.0,
+        stop_price=98.0,
+        target_price=105.0,
+        risk_pts=2.0,
+        timestamp=now,
+        timestamp_ns=1,
+        zone_type="disp_fvg",
+        score=1,
+        zone_top=101.0,
+        zone_bot=99.0,
+        reason="journal_failure_test",
+    )
+
+    sent = manager.submit_ict_instructions(
+        [instruction],
+        set(),
+        100_000.0,
+        Settings(),
+        execution_time_utc=now,
+    )
+    assert sent == 0
+    assert broker.submissions == 0

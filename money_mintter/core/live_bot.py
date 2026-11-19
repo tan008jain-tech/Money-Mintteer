@@ -15,7 +15,7 @@ from uuid import uuid4
 from dotenv import load_dotenv
 
 from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import MarketOrderRequest, TakeProfitRequest, StopLossRequest, GetOrdersRequest, GetAssetsRequest
+from alpaca.trading.requests import MarketOrderRequest, TakeProfitRequest, StopLossRequest, GetOrdersRequest, GetAssetsRequest, GetOrderByIdRequest
 from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus, OrderClass, AssetClass, AssetStatus
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest, StockLatestQuoteRequest
@@ -886,12 +886,18 @@ class LivePortfolioManager:
 
         resolved_client_ids = set()
         for event in events:
-            if event.get("event_type") in {
-                "entry_order_submitted", "entry_order_recovered", "entry_submission_rejected"
-            }:
+            event_type = event.get("event_type")
+            if event_type == "entry_submission_rejected":
                 client_id = event.get("client_order_id")
                 if client_id:
                     resolved_client_ids.add(str(client_id))
+            elif event_type in {"entry_order_submitted", "entry_order_recovered"}:
+                parent = event.get("parent_order") or {}
+                children = event.get("child_orders") or []
+                if parent.get("order_id") and len(children) >= 2:
+                    client_id = event.get("client_order_id")
+                    if client_id:
+                        resolved_client_ids.add(str(client_id))
 
         # Recover requests whose submit response was ambiguous, using the stable
         # client_order_id written before the broker request was sent.
@@ -911,10 +917,30 @@ class LivePortfolioManager:
                         client_order_id=client_id,
                     )
                     parent_id = parent.get("order_id")
+                    recovered_order = recovered
+                    get_order_by_id_for_recovery = getattr(
+                        self.trading_client, "get_order_by_id", None
+                    )
+                    if parent_id and callable(get_order_by_id_for_recovery):
+                        try:
+                            recovered_order = get_order_by_id_for_recovery(
+                                parent_id, GetOrderByIdRequest(nested=True)
+                            )
+                        except Exception as nested_exc:
+                            self.logger.warning(
+                                f"[Order Journal] Could not retrieve nested bracket legs for "
+                                f"client_order_id={client_id}: {nested_exc}"
+                            )
                     children = [
                         snapshot_order(leg, parent_order_id=parent_id)
-                        for leg in (_value_for_journal(recovered, "legs") or [])
+                        for leg in (_value_for_journal(recovered_order, "legs") or [])
                     ]
+                    if len(children) < 2:
+                        self.logger.warning(
+                            f"[Order Journal] Bracket legs remain unverified for "
+                            f"client_order_id={client_id}; retaining unresolved recovery state."
+                        )
+                        continue
                     journal.append(
                         "entry_order_recovered",
                         client_order_id=client_id,
@@ -1342,40 +1368,11 @@ class LivePortfolioManager:
                 self.logger.info(f"Candidate {sym}: score={sc:.2f}, side={side_val}, entry=${curr_price:.2f}, stop=${sl_price:.2f}, target=${tp_price:.2f}, stop_pct={stop_pct:.2f}%, target_pct={target_pct:.2f}%, rr={rr:.2f}, notional_cap=${notional_cap:.2f}, qty={qty}, gross=${gross:.2f}, cost=${cost:.2f}, decision={decision}")
 
                 alpaca_side = OrderSide.BUY if side_val is Side.BUY else OrderSide.SELL
-                client_order_id = f"mm-ict-{uuid4().hex}"
-                if self.order_journal is not None:
-                    try:
-                        self.order_journal.append(
-                            "entry_intent",
-                            client_order_id=client_order_id,
-                            symbol=sym,
-                            strategy="ict_v106",
-                            side=str(side_val.value if hasattr(side_val, "value") else side_val),
-                            quantity=qty,
-                            signal_timestamp=inst.timestamp.isoformat(),
-                            signal_timestamp_ns=inst.timestamp_ns,
-                            signal_entry_price=signal_entry_price,
-                            executable_reference_price=curr_price,
-                            stop_price=sl_price,
-                            target_price=tp_price,
-                            zone_type=inst.zone_type,
-                            zone_top=inst.zone_top,
-                            zone_bot=inst.zone_bot,
-                        )
-                    except Exception as journal_exc:
-                        self.last_submit_failures += 1
-                        self.logger.critical(
-                            f"[Order Journal] Refusing new {sym} entry because intent could not be persisted: "
-                            f"{journal_exc}"
-                        )
-                        continue
-
                 order_req = MarketOrderRequest(
                     symbol=sym,
                     qty=qty,
                     side=alpaca_side,
                     time_in_force=TimeInForce.DAY,
-                    client_order_id=client_order_id,
                     order_class=OrderClass.BRACKET,
                     take_profit=TakeProfitRequest(limit_price=round(tp_price, 2)),
                     stop_loss=StopLossRequest(stop_price=round(sl_price, 2))
@@ -1622,6 +1619,7 @@ class LivePortfolioManager:
 
             decision_obj = None
             submission_attempted = False
+            client_order_id: str | None = None
             try:
                 if side_val is Side.BUY:
                     decision_obj = risk_engine.size_long(
@@ -1684,11 +1682,40 @@ class LivePortfolioManager:
                 )
 
                 alpaca_side = OrderSide.BUY if side_val is Side.BUY else OrderSide.SELL
+                client_order_id = f"mm-ict-{uuid4().hex}"
+                if self.order_journal is not None:
+                    try:
+                        self.order_journal.append(
+                            "entry_intent",
+                            client_order_id=client_order_id,
+                            symbol=sym,
+                            strategy="ict_v106",
+                            side=str(side_val.value if hasattr(side_val, "value") else side_val),
+                            quantity=qty,
+                            signal_timestamp=inst.timestamp.isoformat(),
+                            signal_timestamp_ns=inst.timestamp_ns,
+                            signal_entry_price=signal_entry_price,
+                            executable_reference_price=curr_price,
+                            stop_price=sl_price,
+                            target_price=tp_price,
+                            zone_type=inst.zone_type,
+                            zone_top=inst.zone_top,
+                            zone_bot=inst.zone_bot,
+                        )
+                    except Exception as journal_exc:
+                        self.last_submit_failures += 1
+                        self.logger.critical(
+                            f"[Order Journal] Refusing new {sym} entry because intent could not be persisted: "
+                            f"{journal_exc}"
+                        )
+                        continue
+
                 order_req = MarketOrderRequest(
                     symbol=sym,
                     qty=qty,
                     side=alpaca_side,
                     time_in_force=TimeInForce.DAY,
+                    client_order_id=client_order_id,
                     order_class=OrderClass.BRACKET,
                     take_profit=TakeProfitRequest(limit_price=round(tp_price, 2)),
                     stop_loss=StopLossRequest(stop_price=round(sl_price, 2)),
@@ -1787,7 +1814,7 @@ class LivePortfolioManager:
                 self.last_submit_failures += 1
                 self.logger.error(f"Failed to submit bracket order for {sym}: {ord_err}")
                 if is_broker_rejection(ord_err):
-                    if self.order_journal is not None:
+                    if self.order_journal is not None and client_order_id is not None:
                         try:
                             self.order_journal.append(
                                 "entry_submission_rejected",
@@ -1803,7 +1830,7 @@ class LivePortfolioManager:
                         dedup_tracker.clear_pending(sym, side_str, inst.zone_type, inst.zone_top, inst.zone_bot)
                     self.logger.info(f"Broker definitively rejected {sym}; no slot/risk reservation retained.")
                 elif submission_attempted:
-                    if self.order_journal is not None:
+                    if self.order_journal is not None and client_order_id is not None:
                         try:
                             self.order_journal.append(
                                 "entry_submission_uncertain",
