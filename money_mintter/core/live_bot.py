@@ -1499,7 +1499,6 @@ class LivePortfolioManager:
             getattr(self, "order_journal", None) is not None
             and not getattr(self, "order_journal_healthy", True)
         ):
-            self.last_submit_failures = 1
             self.logger.critical(
                 "[Execution] New ICT entries disabled because the order journal is not healthy; "
                 "existing position management remains available."
@@ -1754,12 +1753,12 @@ class LivePortfolioManager:
                             zone_bot=inst.zone_bot,
                         )
                     except Exception as journal_exc:
-                        self.last_submit_failures += 1
+                        self.order_journal_healthy = False
                         self.logger.critical(
                             f"[Order Journal] Refusing new {sym} entry because intent could not be persisted: "
-                            f"{journal_exc}"
+                            f"{journal_exc}; remaining new entries in this cycle are blocked."
                         )
-                        continue
+                        return orders_sent
 
                 order_req = MarketOrderRequest(
                     symbol=sym,
@@ -2029,7 +2028,7 @@ class LivePortfolioManager:
                                 )
                             except Exception as journal_exc:
                                 self.logger.critical(
-                                    f"[Order Journal] Could not persist EOD close {order_id_text}: {journal_exc}"
+                                    f"[Order Journal] Could not persist flatten close {order_id_text}: {journal_exc}"
                                 )
                         self.logger.info(
                             f"[Flatten] {phase} bulk-close accepted: symbol={symbol} "
@@ -2068,7 +2067,7 @@ class LivePortfolioManager:
                             )
                         except Exception as journal_exc:
                             self.logger.critical(
-                                f"[Order Journal] Could not persist EOD close {order_id_text}: {journal_exc}"
+                                f"[Order Journal] Could not persist flatten close {order_id_text}: {journal_exc}"
                             )
                     self.logger.info(
                         f"[Flatten] {phase} individual close order tracked: "

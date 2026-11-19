@@ -367,6 +367,7 @@ def test_ict_submission_fails_closed_when_intent_cannot_be_persisted(monkeypatch
     )
     assert sent == 0
     assert broker.submissions == 0
+    assert manager.last_submit_failures == 0
 
 
 
@@ -452,6 +453,7 @@ def test_broken_journal_blocks_new_ict_entries_but_does_not_require_broker_calls
     assert sent == 0
     assert quotes.calls == 0
     assert broker.submissions == 0
+    assert manager.last_submit_failures == 0
 
 
 
