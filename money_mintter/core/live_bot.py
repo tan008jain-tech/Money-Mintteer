@@ -990,11 +990,14 @@ class LivePortfolioManager:
                 snapshot = event.get("order")
                 if isinstance(snapshot, dict) and snapshot.get("order_id"):
                     orders[str(snapshot["order_id"])] = snapshot
-            elif event_type == "eod_close_order_submitted" and event.get("order_id"):
+            elif event_type in {"eod_close_order_submitted", "flatten_close_order_submitted"} and event.get("order_id"):
                 orders[str(event["order_id"])] = {
                     "order_id": str(event["order_id"]),
                     "symbol": event.get("symbol"),
-                    "order_role": "eod_liquidation",
+                    "order_role": str(
+                        event.get("order_role")
+                        or ("eod_liquidation" if event_type == "eod_close_order_submitted" else "emergency_cleanup")
+                    ),
                     "status": "unknown",
                     "filled_qty": "0",
                 }
@@ -1911,7 +1914,14 @@ class LivePortfolioManager:
 
         return orders_sent
 
-    def flatten_all(self, sleep_fn=time.sleep, retries: int = 3, retry_delay: int = 5, max_wait_seconds: int = 0) -> list[str]:
+    def flatten_all(
+        self,
+        sleep_fn=time.sleep,
+        retries: int = 3,
+        retry_delay: int = 5,
+        max_wait_seconds: int = 0,
+        exit_reason: str = "session_flatten",
+    ) -> list[str]:
         """Cancel outstanding orders and liquidate positions with broker-side reconciliation.
 
         Alpaca's bulk endpoint returns ClosePositionResponse objects (HTTP status plus
@@ -1926,6 +1936,12 @@ class LivePortfolioManager:
                 max_wait_seconds = 600
 
         self.last_flatten_errors = 0
+        normalized_exit_reason = str(exit_reason).strip().lower()
+        journal_exit_role = (
+            "eod_liquidation"
+            if normalized_exit_reason == "eod_flatten"
+            else "emergency_cleanup"
+        )
         start_time = time.monotonic()
         total_slept = 0.0
         effective_delay = min(retry_delay, 15)
@@ -2003,11 +2019,11 @@ class LivePortfolioManager:
                         if self.order_journal is not None:
                             try:
                                 self.order_journal.append(
-                                    "eod_close_order_submitted",
+                                    "flatten_close_order_submitted",
                                     order_id=order_id_text,
                                     symbol=symbol,
-                                    order_role="eod_liquidation",
-                                    exit_reason="eod_flatten",
+                                    order_role=journal_exit_role,
+                                    exit_reason=normalized_exit_reason,
                                     phase=phase,
                                     http_status=status_code,
                                 )
@@ -2042,11 +2058,11 @@ class LivePortfolioManager:
                     if self.order_journal is not None:
                         try:
                             self.order_journal.append(
-                                "eod_close_order_submitted",
+                                "flatten_close_order_submitted",
                                 order_id=order_id_text,
                                 symbol=symbol,
-                                order_role="eod_liquidation",
-                                exit_reason="eod_flatten",
+                                order_role=journal_exit_role,
+                                exit_reason=normalized_exit_reason,
                                 phase=phase,
                                 broker_status=order_status or "unknown",
                             )
@@ -2932,7 +2948,7 @@ class LiveMarketBot:
         trading_started = False
         self.latest_state["final_account_snapshot_verified"] = False
 
-        def _safe_flatten() -> list[str]:
+        def _safe_flatten(exit_reason: str = "eod_flatten") -> list[str]:
             pre_flatten_positions = list(self.latest_state.get("open_positions", []))
 
             def _record_flatten_error() -> None:
@@ -2947,6 +2963,7 @@ class LiveMarketBot:
                 res_pos = self.portfolio_manager.flatten_all(
                     sleep_fn,
                     max_wait_seconds=self.settings.flatten_max_wait_seconds,
+                    exit_reason=exit_reason,
                 )
             except Exception as exc:
                 _record_flatten_error()
@@ -3115,7 +3132,7 @@ class LiveMarketBot:
 
                 if self.kill_switch.tripped:
                     self.logger.critical(f"Kill switch tripped mid-session: {self.kill_switch.reason}")
-                    remaining = _safe_flatten()
+                    remaining = _safe_flatten("emergency_cleanup")
                     status = "halted" if remaining != ["UNKNOWN"] else "flatten_incomplete"
                     self._log_session_summary(status, cycles, orders_sent_total, errors)
                     return {"status": status, "cycles": cycles, "orders_sent": orders_sent_total, "errors": errors, "remaining": remaining}
@@ -3130,7 +3147,7 @@ class LiveMarketBot:
                     orders_sent_total += res.get("orders_sent", 0)
                     if self.kill_switch.tripped or res.get("halted", False):
                         self.logger.critical(f"Kill switch tripped: {self.kill_switch.reason if hasattr(self.kill_switch, 'reason') else 'halted'}")
-                        remaining = _safe_flatten()
+                        remaining = _safe_flatten("emergency_cleanup")
                         status = "halted" if remaining != ["UNKNOWN"] else "flatten_incomplete"
                         self._log_session_summary(status, cycles, orders_sent_total, errors)
                         return {"status": status, "cycles": cycles, "orders_sent": orders_sent_total, "errors": errors, "remaining": remaining}
@@ -3144,7 +3161,7 @@ class LiveMarketBot:
                 if target > now:
                     _sleep_until(target, now_fn, sleep_fn)
 
-            remaining = _safe_flatten()
+            remaining = _safe_flatten("eod_flatten")
             status = "completed" if not remaining and remaining != ["UNKNOWN"] else "flatten_incomplete"
             if remaining == ["UNKNOWN"]:
                 status = "flatten_incomplete"
@@ -3155,7 +3172,7 @@ class LiveMarketBot:
             self.logger.warning("Session interrupted by user (KeyboardInterrupt).")
             remaining = []
             if trading_started:
-                remaining = _safe_flatten()
+                remaining = _safe_flatten("emergency_cleanup")
             status = "interrupted" if remaining != ["UNKNOWN"] else "flatten_incomplete"
             self._log_session_summary(status, cycles, orders_sent_total, errors)
             return {"status": status, "cycles": cycles, "orders_sent": orders_sent_total, "errors": errors, "remaining": remaining}
@@ -3165,7 +3182,7 @@ class LiveMarketBot:
             errors += 1
             remaining = []
             if trading_started:
-                remaining = _safe_flatten()
+                remaining = _safe_flatten("emergency_cleanup")
             status = "error" if remaining != ["UNKNOWN"] else "flatten_incomplete"
             self._log_session_summary(status, cycles, orders_sent_total, errors)
             return {"status": status, "cycles": cycles, "orders_sent": orders_sent_total, "errors": errors, "remaining": remaining}

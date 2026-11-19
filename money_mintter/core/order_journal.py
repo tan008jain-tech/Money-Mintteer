@@ -172,6 +172,7 @@ class OrderLifecycleJournal:
         return value.astimezone(timezone.utc)
 
     def classify_exit(self, symbol: str) -> str:
+        """Classify the most recent exit only when it follows the latest known entry."""
         normalized = str(symbol).strip().upper()
         order_roles: dict[str, str] = {}
         events = self.read_events()
@@ -185,23 +186,37 @@ class OrderLifecycleJournal:
                 snapshot = event.get("order")
                 if isinstance(snapshot, dict) and snapshot.get("order_id"):
                     order_roles[str(snapshot["order_id"])] = str(snapshot.get("order_role", "unknown"))
-            elif event_type == "eod_close_order_submitted" and event.get("order_id"):
-                order_roles[str(event["order_id"])] = "eod_liquidation"
+            elif event_type in {"eod_close_order_submitted", "flatten_close_order_submitted"}:
+                if event.get("order_id"):
+                    order_roles[str(event["order_id"])] = str(
+                        event.get("order_role")
+                        or ("eod_liquidation" if event_type == "eod_close_order_submitted" else "emergency_cleanup")
+                    )
 
-        exits = []
+        latest_entry_time: datetime | None = None
+        exits: list[tuple[datetime, str]] = []
         for event in events:
             if event.get("event_type") != "fill":
                 continue
             if str(event.get("symbol", "")).strip().upper() != normalized:
                 continue
+            event_time = self._event_time(event)
+            if event_time is None:
+                continue
             role = order_roles.get(str(event.get("order_id", "")), "unknown")
-            if role in EXIT_ROLES:
-                event_time = self._event_time(event)
-                exits.append((event_time or datetime.min.replace(tzinfo=timezone.utc), role))
+            if role == "entry":
+                if latest_entry_time is None or event_time > latest_entry_time:
+                    latest_entry_time = event_time
+            elif role in EXIT_ROLES:
+                exits.append((event_time, role))
+
         if not exits:
             return "external_or_unattributed"
         exits.sort(key=lambda item: item[0])
-        return exits[-1][1]
+        latest_exit_time, latest_exit_role = exits[-1]
+        if latest_entry_time is not None and latest_exit_time <= latest_entry_time:
+            return "external_or_unattributed"
+        return latest_exit_role
 
     def summarize_session(
         self,
@@ -230,8 +245,11 @@ class OrderLifecycleJournal:
                 snapshot = event.get("order")
                 if isinstance(snapshot, dict) and snapshot.get("order_id"):
                     order_roles[str(snapshot["order_id"])] = str(snapshot.get("order_role", "unknown"))
-            elif event_type == "eod_close_order_submitted" and event.get("order_id"):
-                order_roles[str(event["order_id"])] = "eod_liquidation"
+            elif event_type in {"eod_close_order_submitted", "flatten_close_order_submitted"} and event.get("order_id"):
+                order_roles[str(event["order_id"])] = str(
+                    event.get("order_role")
+                    or ("eod_liquidation" if event_type == "eod_close_order_submitted" else "emergency_cleanup")
+                )
 
         unique_fills: dict[str, dict[str, Any]] = {}
         for event in events:

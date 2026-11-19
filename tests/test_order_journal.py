@@ -525,3 +525,45 @@ def test_fee_activity_reconciliation_deduplicates_broker_records(tmp_path):
     assert len(fee_events) == 1
     assert len(calls) == 2
     assert all(call[0] == "/account/activities/FEE" for call in calls)
+
+
+def test_exit_classification_does_not_reuse_old_trade_exit_for_new_entry(tmp_path):
+    journal = OrderLifecycleJournal(tmp_path / "order_lifecycle.jsonl")
+    first_entry = datetime(2026, 11, 19, 14, 0, tzinfo=timezone.utc)
+    first_exit = first_entry + timedelta(minutes=5)
+    second_entry = first_exit + timedelta(minutes=5)
+    journal.append(
+        "entry_order_submitted",
+        parent_order={"order_id": "entry-1", "order_role": "entry"},
+        child_orders=[{"order_id": "tp-1", "order_role": "take_profit"}],
+    )
+    journal.append(
+        "fill", **_fill("entry-1-fill", "entry-1", "AAPL", "buy", 1, 100, first_entry)
+    )
+    journal.append(
+        "fill", **_fill("tp-1-fill", "tp-1", "AAPL", "sell", 1, 105, first_exit)
+    )
+    assert journal.classify_exit("AAPL") == "take_profit"
+
+    journal.append(
+        "entry_order_submitted",
+        parent_order={"order_id": "entry-2", "order_role": "entry"},
+        child_orders=[{"order_id": "sl-2", "order_role": "stop_loss"}],
+    )
+    journal.append(
+        "fill", **_fill("entry-2-fill", "entry-2", "AAPL", "buy", 1, 110, second_entry)
+    )
+    assert journal.classify_exit("AAPL") == "external_or_unattributed"
+
+    emergency_time = second_entry + timedelta(minutes=1)
+    journal.append(
+        "flatten_close_order_submitted",
+        order_id="emergency-close",
+        symbol="AAPL",
+        order_role="emergency_cleanup",
+        exit_reason="emergency_cleanup",
+    )
+    journal.append(
+        "fill", **_fill("emergency-fill", "emergency-close", "AAPL", "sell", 1, 108, emergency_time)
+    )
+    assert journal.classify_exit("AAPL") == "emergency_cleanup"
