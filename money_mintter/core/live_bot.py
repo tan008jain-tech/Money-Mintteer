@@ -1102,17 +1102,34 @@ class LivePortfolioManager:
         self,
         start_utc: datetime,
         end_utc: datetime,
-    ) -> None:
-        """Append broker-reported FEE activities; no estimated fee model is applied."""
+    ) -> int:
+        """Append observed broker FEE activities; failures never block position management."""
         journal = getattr(self, "order_journal", None)
         if journal is None:
-            return
-        existing = {
-            str(event.get("activity_id"))
-            for event in journal.read_events()
-            if event.get("event_type") == "fee_activity" and event.get("activity_id")
-        }
+            return 0
+        if (
+            start_utc.tzinfo is None or start_utc.utcoffset() is None
+            or end_utc.tzinfo is None or end_utc.utcoffset() is None
+        ):
+            self.logger.warning("[Order Journal] Fee reconciliation skipped: reporting window must be timezone-aware.")
+            return 0
+        try:
+            existing = {
+                str(event.get("activity_id"))
+                for event in journal.read_events()
+                if event.get("event_type") == "fee_activity" and event.get("activity_id")
+            }
+        except Exception as exc:
+            self.logger.warning(f"[Order Journal] Fee activity lookup skipped; journal read failed: {exc}")
+            return 0
+
+        get_activity = getattr(self.trading_client, "get", None)
+        if not callable(get_activity):
+            self.logger.warning("[Order Journal] Broker client does not expose activity retrieval; fee lookup skipped.")
+            return 0
+
         page_token = None
+        appended = 0
         while True:
             params = {
                 "after": start_utc.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
@@ -1122,38 +1139,50 @@ class LivePortfolioManager:
             }
             if page_token:
                 params["page_token"] = page_token
-            activities = self.trading_client.get("/account/activities/FEE", params)
+            try:
+                activities = get_activity("/account/activities/FEE", params)
+            except Exception as exc:
+                self.logger.warning(f"[Order Journal] Broker fee activity lookup failed: {exc}")
+                break
             if not isinstance(activities, list) or not activities:
                 break
             for activity in activities:
                 activity_id = _value_for_journal(activity, "id")
                 if activity_id is None or str(activity_id) in existing:
                     continue
-                journal.append(
-                    "fee_activity",
-                    activity_id=str(activity_id),
-                    activity_type=_plain_for_journal(
-                        _value_for_journal(activity, "activity_type")
-                    ),
-                    activity_sub_type=_plain_for_journal(
-                        _value_for_journal(activity, "activity_sub_type")
-                    ),
-                    net_amount=str(_value_for_journal(activity, "net_amount") or "0"),
-                    symbol=_value_for_journal(activity, "symbol"),
-                    date=_plain_for_journal(_value_for_journal(activity, "date")),
-                    created_at=_plain_for_journal(
-                        _value_for_journal(activity, "created_at")
-                    ),
-                    description=_value_for_journal(
-                        _value_for_journal(activity, "description")
-                    ),
-                )
+                try:
+                    journal.append(
+                        "fee_activity",
+                        activity_id=str(activity_id),
+                        activity_type=_plain_for_journal(
+                            _value_for_journal(activity, "activity_type")
+                        ),
+                        activity_sub_type=_plain_for_journal(
+                            _value_for_journal(activity, "activity_sub_type")
+                        ),
+                        net_amount=str(_value_for_journal(activity, "net_amount") or "0"),
+                        symbol=_value_for_journal(activity, "symbol"),
+                        date=_plain_for_journal(_value_for_journal(activity, "date")),
+                        created_at=_plain_for_journal(
+                            _value_for_journal(activity, "created_at")
+                        ),
+                        description=_value_for_journal(
+                            _value_for_journal(activity, "description")
+                        ),
+                    )
+                except Exception as exc:
+                    self.logger.warning(
+                        f"[Order Journal] Could not persist broker fee activity {activity_id}: {exc}"
+                    )
+                    return appended
                 existing.add(str(activity_id))
+                appended += 1
             if len(activities) < 100:
                 break
             page_token = _value_for_journal(activities[-1], "id")
             if not page_token:
                 break
+        return appended
 
     def fetch_account_and_positions(self) -> tuple[float, float, float, list[dict[str, Any]], list[dict[str, Any]], set[str]]:
         account = self.trading_client.get_account()
@@ -2895,6 +2924,13 @@ class LiveMarketBot:
         self.logger.info(" PAPER TRADING SESSION ORCHESTRATION ACTIVE       ")
         self.logger.info("==================================================")
 
+        session_start = now_fn()
+        if not isinstance(session_start, datetime):
+            raise ValueError("session clock must return a datetime")
+        if session_start.tzinfo is None or session_start.utcoffset() is None:
+            session_start = session_start.replace(tzinfo=timezone.utc)
+        self._session_start_utc = session_start.astimezone(timezone.utc)
+
         cycles = 0
         orders_sent_total = 0
         errors = 0
@@ -2978,6 +3014,27 @@ class LiveMarketBot:
                         f"Final broker snapshot is not flat; positions/open orders remain: {remaining}"
                     )
                     return remaining
+
+                journal = getattr(self.portfolio_manager, "order_journal", None)
+                if journal is not None:
+                    try:
+                        self.portfolio_manager.reconcile_order_journal()
+                        previous_positions = self.latest_state.get("open_positions", [])
+                        for position in previous_positions:
+                            symbol = str(position.get("symbol", "")).strip()
+                            if not symbol:
+                                continue
+                            classification = journal.classify_exit(symbol)
+                            journal.append(
+                                "position_closure_observed",
+                                symbol=symbol,
+                                exit_classification=classification,
+                                closure_context="session_flatten",
+                            )
+                    except Exception as journal_exc:
+                        self.logger.warning(
+                            f"[Order Journal] Could not classify final session closures: {journal_exc}"
+                        )
             except Exception as exc:
                 _record_flatten_error()
                 self.logger.critical(
@@ -3115,6 +3172,51 @@ class LiveMarketBot:
             self.latest_state.get("final_account_snapshot_verified", False)
         )
         snapshot_label = "verified" if snapshot_verified else "unverified"
+
+        # Reconcile fills and account FEE activities once more after EOD flatten.
+        # This section is deliberately separate from broker account equity, which
+        # remains the authoritative account-level result.
+        journal = getattr(self.portfolio_manager, "order_journal", None)
+        session_start = getattr(self, "_session_start_utc", None)
+        if journal is not None and isinstance(session_start, datetime):
+            report_end = datetime.now(timezone.utc)
+            if session_start.tzinfo is None or session_start.utcoffset() is None:
+                session_start = session_start.replace(tzinfo=timezone.utc)
+            session_start = session_start.astimezone(timezone.utc)
+            if report_end >= session_start:
+                try:
+                    reconciliation_ok = self.portfolio_manager.reconcile_order_journal()
+                except Exception as exc:
+                    reconciliation_ok = False
+                    self.logger.warning(f"[Order Journal] Final fill reconciliation failed: {exc}")
+                try:
+                    self.portfolio_manager.reconcile_fee_activities(session_start, report_end)
+                except Exception as exc:
+                    self.logger.warning(f"[Order Journal] Final fee activity reconciliation failed: {exc}")
+                try:
+                    metrics = journal.summarize_session(session_start, report_end)
+                    fee_amount = metrics["fee_activity_net_amount_usd"]
+                    fee_label = (
+                        f"${fee_amount:+.2f}" if fee_amount is not None else "not yet reported"
+                    )
+                    self.logger.info(
+                        f"[Trade P&L] window={session_start.isoformat()}..{report_end.isoformat()} "
+                        f"realized_gross=${metrics['realized_gross_pnl_usd']:+.2f} "
+                        f"matched_exit_qty={metrics['matched_exit_quantity']:.4f} "
+                        f"unmatched_exit_qty={metrics['unmatched_exit_quantity']:.4f} "
+                        f"open_entry_qty_after_window={metrics['open_entry_quantity_after_session']:.4f} "
+                        f"unattributed_fills={metrics['unattributed_fill_count']} "
+                        f"closing_fills={metrics['closing_fill_count']} "
+                        f"session_fills={metrics['fill_count_in_session']} "
+                        f"coverage={metrics['pnl_coverage_status']} "
+                        f"account_fee_activity_net={fee_label} "
+                        f"fee_activity_count={metrics['fee_activity_count']} "
+                        f"fee_activity_as_of={report_end.isoformat()} "
+                        f"journal_reconciliation={'healthy' if reconciliation_ok else 'incomplete'} "
+                        "net_pnl=NOT_CALCULATED"
+                    )
+                except Exception as exc:
+                    self.logger.warning(f"[Trade P&L] Session fill summary unavailable: {exc}")
 
         if cycles == 0 and not snapshot_verified:
             self.logger.info(

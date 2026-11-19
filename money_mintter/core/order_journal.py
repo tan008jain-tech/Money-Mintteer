@@ -242,13 +242,16 @@ class OrderLifecycleJournal:
                 unique_fills[fill_id] = event
 
         fills = []
+        unattributed_fill_count = 0
         for event in unique_fills.values():
             order_id = str(event.get("order_id", ""))
             role = order_roles.get(order_id, "unknown")
-            if role not in {"entry", *EXIT_ROLES}:
-                continue
             fill_time = self._event_time(event)
             if fill_time is None:
+                continue
+            if role not in {"entry", *EXIT_ROLES}:
+                if start <= fill_time <= end:
+                    unattributed_fill_count += 1
                 continue
             fills.append((fill_time, event, role))
         fills.sort(key=lambda item: item[0])
@@ -281,7 +284,8 @@ class OrderLifecycleJournal:
             if role not in EXIT_ROLES:
                 continue
 
-            closing_fill_count += 1
+            if start <= fill_time <= end:
+                closing_fill_count += 1
             remaining = quantity
             while remaining > 0:
                 matching_index = next(
@@ -323,12 +327,31 @@ class OrderLifecycleJournal:
             fee_events.append(event)
             fee_net_amount += _decimal(event.get("net_amount"))
 
+        open_entry_quantity = sum(
+            abs(lot["signed_quantity"])
+            for symbol_lots in inventory.values()
+            for lot in symbol_lots
+        )
+        pnl_coverage_status = (
+            "complete_for_recorded_closed_trades"
+            if (
+                unattributed_fill_count == 0
+                and unmatched_exit_quantity == 0
+                and open_entry_quantity == 0
+                and fills
+            )
+            else "open_or_unmatched_records"
+        )
+
         return {
             "realized_gross_pnl_usd": round(float(realized), 2),
             "matched_exit_quantity": float(matched_exit_quantity),
             "unmatched_exit_quantity": float(unmatched_exit_quantity),
+            "open_entry_quantity_after_session": float(open_entry_quantity),
+            "unattributed_fill_count": unattributed_fill_count,
             "closing_fill_count": closing_fill_count,
             "fill_count_in_session": session_fill_count,
+            "pnl_coverage_status": pnl_coverage_status,
             "fee_activity_net_amount_usd": (
                 round(float(fee_net_amount), 2) if fee_events else None
             ),

@@ -103,6 +103,9 @@ def test_session_summary_matches_partial_long_fills_and_separates_fees(tmp_path)
     summary = journal.summarize_session(start, end)
 
     assert summary["realized_gross_pnl_usd"] == 56.0
+    assert summary["pnl_coverage_status"] == "complete_for_recorded_closed_trades"
+    assert summary["open_entry_quantity_after_session"] == 0.0
+    assert summary["unattributed_fill_count"] == 0
     assert summary["matched_exit_quantity"] == 10.0
     assert summary["unmatched_exit_quantity"] == 0.0
     assert summary["fee_activity_net_amount_usd"] == -0.8
@@ -449,3 +452,76 @@ def test_broken_journal_blocks_new_ict_entries_but_does_not_require_broker_calls
     assert sent == 0
     assert quotes.calls == 0
     assert broker.submissions == 0
+
+
+
+def test_summary_flags_open_inventory_and_unattributed_fills(tmp_path):
+    journal = OrderLifecycleJournal(tmp_path / "order_lifecycle.jsonl")
+    start = datetime(2026, 11, 19, 14, 0, tzinfo=timezone.utc)
+    end = start + timedelta(hours=1)
+    journal.append(
+        "entry_order_submitted",
+        parent_order={"order_id": "entry", "order_role": "entry"},
+        child_orders=[{"order_id": "tp", "order_role": "take_profit"}],
+    )
+    journal.append(
+        "fill", **_fill("entry-fill", "entry", "AAPL", "buy", 5, 100, start)
+    )
+    journal.append(
+        "fill", **_fill("tp-fill", "tp", "AAPL", "sell", 2, 102, start + timedelta(minutes=5))
+    )
+    journal.append(
+        "fill", **_fill("other-fill", "manual-order", "MSFT", "buy", 1, 50, start + timedelta(minutes=6))
+    )
+
+    summary = journal.summarize_session(start, end)
+
+    assert summary["realized_gross_pnl_usd"] == 4.0
+    assert summary["open_entry_quantity_after_session"] == 3.0
+    assert summary["unattributed_fill_count"] == 1
+    assert summary["pnl_coverage_status"] == "open_or_unmatched_records"
+    assert summary["net_pnl_usd"] is None
+
+
+def test_fee_activity_reconciliation_deduplicates_broker_records(tmp_path):
+    import logging
+    from datetime import datetime, timezone
+
+    from money_mintter.core.live_bot import LivePortfolioManager
+
+    journal = OrderLifecycleJournal(tmp_path / "order_lifecycle.jsonl")
+    calls = []
+
+    class Broker:
+        def get(self, path, params):
+            calls.append((path, params))
+            return [{
+                "id": "fee-activity-1",
+                "activity_type": "FEE",
+                "activity_sub_type": "REG",
+                "net_amount": "-0.02",
+                "date": "2026-11-19",
+                "created_at": "2026-11-19T20:00:00Z",
+                "description": "regulatory fee",
+            }]
+
+    manager = LivePortfolioManager(
+        Broker(),
+        logging.getLogger("fee_activity_reconciliation"),
+        order_journal=journal,
+    )
+    start = datetime(2026, 11, 19, 14, 0, tzinfo=timezone.utc)
+    end = datetime(2026, 11, 20, 0, 0, tzinfo=timezone.utc)
+
+    first = manager.reconcile_fee_activities(start, end)
+    second = manager.reconcile_fee_activities(start, end)
+
+    fee_events = [
+        event for event in journal.read_events()
+        if event.get("event_type") == "fee_activity"
+    ]
+    assert first == 1
+    assert second == 0
+    assert len(fee_events) == 1
+    assert len(calls) == 2
+    assert all(call[0] == "/account/activities/FEE" for call in calls)
