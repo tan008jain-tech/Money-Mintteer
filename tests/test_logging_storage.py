@@ -203,9 +203,10 @@ def test_factory_keeps_both_existing_log_destinations(tmp_path):
     daily.close()
     master.close()
 
-    date_file = tmp_path / "live_market_20261118.log"
+    daily_files = list(tmp_path.glob("live_market_????????.log"))
     master_file = tmp_path / "live_market.log"
-    assert "same-record" in date_file.read_text(encoding="utf-8")
+    assert len(daily_files) == 1
+    assert "same-record" in daily_files[0].read_text(encoding="utf-8")
     assert "same-record" in master_file.read_text(encoding="utf-8")
 
     assert DAILY_LOG_MAX_BYTES == 128 * 1024 * 1024
