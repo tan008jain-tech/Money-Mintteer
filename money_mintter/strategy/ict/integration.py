@@ -206,6 +206,15 @@ def generate_production_ict_signals(
     - Forces production baseline RR = 1.1 and calculates target price.
     - Enforces persistent timestamp and zone lifecycle deduplication via dedup_tracker (distinguishing discovery/generation from execution).
     """
+    acquisition_feed = str(
+        getattr(acquisition_result.feed, "value", acquisition_result.feed)
+    ).strip().lower()
+    if acquisition_feed != "iex":
+        raise ValueError(
+            "Production ICT requires IEX acquisition data; "
+            f"received feed={acquisition_feed!r}."
+        )
+
     adapter_result = adapt_market_data(
         acquisition_result=acquisition_result,
         as_of=as_of,

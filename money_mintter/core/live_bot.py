@@ -1964,6 +1964,15 @@ class LiveMarketBot:
         load_dotenv()
         self.logger = self.setup_logging()
         self.settings = Settings()
+        realtime_feed = self.settings.alpaca_realtime_feed.strip().lower()
+        if realtime_feed != "iex":
+            message = (
+                "Production realtime feed policy requires IEX; "
+                f"ALPACA_REALTIME_FEED is configured as {realtime_feed!r}. "
+                "Layer 4, ICT acquisition, and execution reference quotes must use IEX."
+            )
+            self.logger.critical(f"[Data Feed Policy] {message}")
+            raise ValueError(message)
         self.logger.info(
             f"[Config] gates: min_reward_risk={self.settings.min_reward_risk}, "
             f"min_target_pct={self.settings.min_target_pct}, "
