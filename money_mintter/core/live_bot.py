@@ -750,6 +750,7 @@ class LivePortfolioManager:
         self.logger = logger
         self.stock_client = stock_client
         self.order_journal = order_journal
+        self.order_journal_healthy = True
         self.last_equity: float | None = None
         self.last_submit_failures = 0
         self.last_flatten_errors = 0
@@ -873,16 +874,19 @@ class LivePortfolioManager:
             )
             return None
 
-    def reconcile_order_journal(self) -> None:
-        """Reconcile tracked Alpaca orders and newly reported fills; never alter order control flow."""
+    def reconcile_order_journal(self) -> bool:
+        """Reconcile tracked Alpaca orders and fills; return False when journal state is unsafe."""
         journal = getattr(self, "order_journal", None)
         if journal is None:
-            return
+            return True
         try:
             events = journal.read_events()
         except Exception as exc:
+            self.order_journal_healthy = False
             self.logger.critical(f"[Order Journal] Cannot read lifecycle journal; new entries will fail closed: {exc}")
-            return
+            return False
+
+        self.order_journal_healthy = True
 
         resolved_client_ids = set()
         for event in events:
@@ -968,8 +972,9 @@ class LivePortfolioManager:
         try:
             events = journal.read_events()
         except Exception as exc:
+            self.order_journal_healthy = False
             self.logger.critical(f"[Order Journal] Journal read failed during reconciliation: {exc}")
-            return
+            return False
 
         orders: dict[str, dict[str, Any]] = {}
         known_fill_ids = set()
@@ -1007,7 +1012,7 @@ class LivePortfolioManager:
         get_order_by_id = getattr(self.trading_client, "get_order_by_id", None)
         if not callable(get_order_by_id):
             self.logger.warning("[Order Journal] Broker client does not expose get_order_by_id; lifecycle polling skipped.")
-            return
+            return True
 
         for order_id, previous in orders.items():
             previous_status = str(previous.get("status", "")).lower()
@@ -1085,9 +1090,13 @@ class LivePortfolioManager:
                     if not page_token:
                         break
             except Exception as exc:
+                self.order_journal_healthy = False
                 self.logger.warning(
-                    f"[Order Journal] Reconciliation failed for order_id={order_id}: {exc}"
+                    f"[Order Journal] Reconciliation failed for order_id={order_id}: {exc}; "
+                    "new entries are disabled until journal reconciliation succeeds."
                 )
+
+        return self.order_journal_healthy
 
     def reconcile_fee_activities(
         self,
@@ -1454,6 +1463,16 @@ class LivePortfolioManager:
             )
             return 0
         execution_now = execution_now.astimezone(timezone.utc)
+        if (
+            getattr(self, "order_journal", None) is not None
+            and not getattr(self, "order_journal_healthy", True)
+        ):
+            self.last_submit_failures = 1
+            self.logger.critical(
+                "[Execution] New ICT entries disabled because the order journal is not healthy; "
+                "existing position management remains available."
+            )
+            return 0
         if account_equity <= 0:
             self.logger.warning("[Execution] New entries disabled: account equity is not positive.")
             return 0

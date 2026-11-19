@@ -9,7 +9,6 @@ from money_mintter.core.order_journal import OrderLifecycleJournal, snapshot_ord
 
 def _fill(fill_id, order_id, symbol, side, qty, price, time):
     return {
-        "event_type": "fill",
         "fill_id": fill_id,
         "order_id": order_id,
         "symbol": symbol,
@@ -364,4 +363,89 @@ def test_ict_submission_fails_closed_when_intent_cannot_be_persisted(monkeypatch
         execution_time_utc=now,
     )
     assert sent == 0
+    assert broker.submissions == 0
+
+
+
+def test_broken_journal_blocks_new_ict_entries_but_does_not_require_broker_calls():
+    import logging
+
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+
+    from money_mintter.config import Settings
+    from money_mintter.core.live_bot import LivePortfolioManager
+    from money_mintter.domain import Side
+    from money_mintter.strategy.ict.integration import ICTExecutionInstruction
+
+    class BrokenJournal:
+        def read_events(self):
+            raise ValueError("corrupt journal")
+
+        def append(self, event_type, **payload):
+            raise OSError("journal unavailable")
+
+    class Broker:
+        def __init__(self):
+            self.submissions = 0
+
+        def submit_order(self, request):
+            self.submissions += 1
+            return SimpleNamespace(order_class="bracket", legs=[1, 2])
+
+    class Quotes:
+        def __init__(self):
+            self.calls = 0
+
+        def get_stock_latest_quote(self, request):
+            self.calls += 1
+            now = datetime.now(timezone.utc)
+            return {
+                symbol: SimpleNamespace(
+                    timestamp=now,
+                    bid_price=99.99,
+                    ask_price=100.01,
+                )
+                for symbol in request.symbol_or_symbols
+            }
+
+    broker, quotes = Broker(), Quotes()
+    manager = LivePortfolioManager(
+        broker,
+        logging.getLogger("order_journal_corrupt_store"),
+        stock_client=quotes,
+        order_journal=BrokenJournal(),
+    )
+    assert manager.reconcile_order_journal() is False
+    assert manager.order_journal_healthy is False
+
+    now = datetime.now(timezone.utc)
+    instruction = __import__(
+        "money_mintter.strategy.ict.integration",
+        fromlist=["ICTExecutionInstruction"],
+    ).ICTExecutionInstruction(
+        symbol="AAPL",
+        side=Side.BUY,
+        entry_price=100.0,
+        stop_price=98.0,
+        target_price=105.0,
+        risk_pts=2.0,
+        timestamp=now,
+        timestamp_ns=1,
+        zone_type="disp_fvg",
+        score=1,
+        zone_top=101.0,
+        zone_bot=99.0,
+        reason="broken_journal_test",
+    )
+
+    sent = manager.submit_ict_instructions(
+        [instruction],
+        set(),
+        100_000.0,
+        Settings(),
+        execution_time_utc=now,
+    )
+    assert sent == 0
+    assert quotes.calls == 0
     assert broker.submissions == 0
