@@ -10,6 +10,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 import socket
 import requests
+from uuid import uuid4
 
 from dotenv import load_dotenv
 
@@ -24,6 +25,7 @@ from alpaca.common.exceptions import APIError
 
 from money_mintter.config import Settings
 from money_mintter.core.logging_storage import create_logging_file_handlers
+from money_mintter.core.order_journal import OrderLifecycleJournal, snapshot_order
 from money_mintter.core.eligibility import StructuralEligibilityEngine
 from money_mintter.core.suitability import DailySuitabilityEngine
 from money_mintter.core.killswitch import KillSwitch
@@ -35,6 +37,22 @@ from money_mintter.strategy import Candle, LiquiditySweepReversalStrategy, Multi
 from money_mintter.strategy.ict.acquisition import fetch_ict_market_data
 from money_mintter.strategy.ict.integration import generate_production_ict_signals, ICTDeduplicationTracker, ICTExecutionInstruction
 from money_mintter.strategy.timeframes import _resample
+
+
+def _value_for_journal(item: Any, name: str, default: Any = None) -> Any:
+    if isinstance(item, dict):
+        return item.get(name, default)
+    return getattr(item, name, default)
+
+
+def _plain_for_journal(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if hasattr(value, "value"):
+        return value.value
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value)
 
 
 class ConnectivityError(RuntimeError):
@@ -726,10 +744,12 @@ class LivePortfolioManager:
         trading_client: TradingClient,
         logger: logging.Logger,
         stock_client: StockHistoricalDataClient | None = None,
+        order_journal: OrderLifecycleJournal | None = None,
     ) -> None:
         self.trading_client = trading_client
         self.logger = logger
         self.stock_client = stock_client
+        self.order_journal = order_journal
         self.last_equity: float | None = None
         self.last_submit_failures = 0
         self.last_flatten_errors = 0
@@ -852,6 +872,253 @@ class LivePortfolioManager:
                 "[REJECTED_QUOTE_RETRIEVAL_ERROR]"
             )
             return None
+
+    def reconcile_order_journal(self) -> None:
+        """Reconcile tracked Alpaca orders and newly reported fills; never alter order control flow."""
+        journal = getattr(self, "order_journal", None)
+        if journal is None:
+            return
+        try:
+            events = journal.read_events()
+        except Exception as exc:
+            self.logger.critical(f"[Order Journal] Cannot read lifecycle journal; new entries will fail closed: {exc}")
+            return
+
+        resolved_client_ids = set()
+        for event in events:
+            if event.get("event_type") in {
+                "entry_order_submitted", "entry_order_recovered", "entry_submission_rejected"
+            }:
+                client_id = event.get("client_order_id")
+                if client_id:
+                    resolved_client_ids.add(str(client_id))
+
+        # Recover requests whose submit response was ambiguous, using the stable
+        # client_order_id written before the broker request was sent.
+        lookup_by_client_id = getattr(self.trading_client, "get_order_by_client_id", None)
+        if callable(lookup_by_client_id):
+            for event in events:
+                if event.get("event_type") != "entry_intent":
+                    continue
+                client_id = str(event.get("client_order_id", ""))
+                if not client_id or client_id in resolved_client_ids:
+                    continue
+                try:
+                    recovered = lookup_by_client_id(client_id)
+                    parent = snapshot_order(
+                        recovered,
+                        role_hint="entry",
+                        client_order_id=client_id,
+                    )
+                    parent_id = parent.get("order_id")
+                    children = [
+                        snapshot_order(leg, parent_order_id=parent_id)
+                        for leg in (_value_for_journal(recovered, "legs") or [])
+                    ]
+                    journal.append(
+                        "entry_order_recovered",
+                        client_order_id=client_id,
+                        symbol=event.get("symbol"),
+                        parent_order=parent,
+                        child_orders=children,
+                        recovered=True,
+                    )
+                    self.logger.warning(
+                        f"[Order Journal] Recovered ambiguous broker submission "
+                        f"client_order_id={client_id} order_id={parent_id}"
+                    )
+                    resolved_client_ids.add(client_id)
+                except Exception as exc:
+                    status_code = getattr(exc, "status_code", None)
+                    if status_code == 404:
+                        self.logger.debug(
+                            f"[Order Journal] Ambiguous client_order_id={client_id} not visible yet."
+                        )
+                    else:
+                        self.logger.warning(
+                            f"[Order Journal] Could not reconcile client_order_id={client_id}: {exc}"
+                        )
+
+        try:
+            events = journal.read_events()
+        except Exception as exc:
+            self.logger.critical(f"[Order Journal] Journal read failed during reconciliation: {exc}")
+            return
+
+        orders: dict[str, dict[str, Any]] = {}
+        known_fill_ids = set()
+        known_fill_quantity: dict[str, float] = {}
+        for event in events:
+            event_type = event.get("event_type")
+            if event_type in {"entry_order_submitted", "entry_order_recovered"}:
+                snapshots = [event.get("parent_order"), *(event.get("child_orders") or [])]
+                for snapshot in snapshots:
+                    if isinstance(snapshot, dict) and snapshot.get("order_id"):
+                        orders[str(snapshot["order_id"])] = snapshot
+            elif event_type == "order_state":
+                snapshot = event.get("order")
+                if isinstance(snapshot, dict) and snapshot.get("order_id"):
+                    orders[str(snapshot["order_id"])] = snapshot
+            elif event_type == "eod_close_order_submitted" and event.get("order_id"):
+                orders[str(event["order_id"])] = {
+                    "order_id": str(event["order_id"]),
+                    "symbol": event.get("symbol"),
+                    "order_role": "eod_liquidation",
+                    "status": "unknown",
+                    "filled_qty": "0",
+                }
+            elif event_type == "fill":
+                fill_id = str(event.get("fill_id", ""))
+                order_id = str(event.get("order_id", ""))
+                if fill_id:
+                    known_fill_ids.add(fill_id)
+                if order_id:
+                    known_fill_quantity[order_id] = (
+                        known_fill_quantity.get(order_id, 0.0)
+                        + float(event.get("qty") or 0.0)
+                    )
+
+        get_order_by_id = getattr(self.trading_client, "get_order_by_id", None)
+        if not callable(get_order_by_id):
+            self.logger.warning("[Order Journal] Broker client does not expose get_order_by_id; lifecycle polling skipped.")
+            return
+
+        for order_id, previous in orders.items():
+            previous_status = str(previous.get("status", "")).lower()
+            previous_filled = float(previous.get("filled_qty") or 0.0)
+            observed_filled = known_fill_quantity.get(order_id, 0.0)
+            if previous_status in {"filled", "canceled", "expired", "rejected", "replaced"} and (
+                observed_filled + 1e-9 >= previous_filled
+            ):
+                continue
+
+            try:
+                broker_order = get_order_by_id(order_id)
+                current = snapshot_order(
+                    broker_order,
+                    role_hint=str(previous.get("order_role", "unknown")),
+                    client_order_id=previous.get("client_order_id"),
+                    parent_order_id=previous.get("parent_order_id"),
+                )
+                # Keep context that the broker API may omit on an individual child-order lookup.
+                for key in ("order_role", "parent_order_id", "client_order_id"):
+                    if not current.get(key) or current.get(key) == "unknown":
+                        if previous.get(key):
+                            current[key] = previous[key]
+                if current != previous:
+                    journal.append("order_state", order=current)
+                filled_qty = float(_value_for_journal(broker_order, "filled_qty") or 0.0)
+                if filled_qty <= observed_filled + 1e-9:
+                    continue
+
+                page_token = None
+                while True:
+                    params = {
+                        "order_id": order_id,
+                        "direction": "asc",
+                        "page_size": 100,
+                    }
+                    if page_token:
+                        params["page_token"] = page_token
+                    activities = self.trading_client.get("/account/activities/FILL", params)
+                    if not isinstance(activities, list) or not activities:
+                        break
+                    for activity in activities:
+                        fill_id = _value_for_journal(activity, "id")
+                        if fill_id is None:
+                            continue
+                        fill_id = str(fill_id)
+                        if fill_id in known_fill_ids:
+                            continue
+                        journal.append(
+                            "fill",
+                            fill_id=fill_id,
+                            order_id=str(_value_for_journal(activity, "order_id") or order_id),
+                            symbol=_value_for_journal(activity, "symbol") or current.get("symbol"),
+                            side=_plain_for_journal(_value_for_journal(activity, "side")),
+                            qty=str(_value_for_journal(activity, "qty") or "0"),
+                            price=str(_value_for_journal(activity, "price") or "0"),
+                            transaction_time=_plain_for_journal(
+                                _value_for_journal(activity, "transaction_time")
+                            ),
+                            fill_type=_plain_for_journal(_value_for_journal(activity, "type")),
+                            order_status=_plain_for_journal(
+                                _value_for_journal(activity, "order_status")
+                            ),
+                            cum_qty=str(_value_for_journal(activity, "cum_qty") or ""),
+                            leaves_qty=str(_value_for_journal(activity, "leaves_qty") or ""),
+                        )
+                        known_fill_ids.add(fill_id)
+                        known_fill_quantity[order_id] = (
+                            known_fill_quantity.get(order_id, 0.0)
+                            + float(_value_for_journal(activity, "qty") or 0.0)
+                        )
+                    if len(activities) < 100:
+                        break
+                    page_token = _value_for_journal(activities[-1], "id")
+                    if not page_token:
+                        break
+            except Exception as exc:
+                self.logger.warning(
+                    f"[Order Journal] Reconciliation failed for order_id={order_id}: {exc}"
+                )
+
+    def reconcile_fee_activities(
+        self,
+        start_utc: datetime,
+        end_utc: datetime,
+    ) -> None:
+        """Append broker-reported FEE activities; no estimated fee model is applied."""
+        journal = getattr(self, "order_journal", None)
+        if journal is None:
+            return
+        existing = {
+            str(event.get("activity_id"))
+            for event in journal.read_events()
+            if event.get("event_type") == "fee_activity" and event.get("activity_id")
+        }
+        page_token = None
+        while True:
+            params = {
+                "after": start_utc.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "until": end_utc.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "direction": "asc",
+                "page_size": 100,
+            }
+            if page_token:
+                params["page_token"] = page_token
+            activities = self.trading_client.get("/account/activities/FEE", params)
+            if not isinstance(activities, list) or not activities:
+                break
+            for activity in activities:
+                activity_id = _value_for_journal(activity, "id")
+                if activity_id is None or str(activity_id) in existing:
+                    continue
+                journal.append(
+                    "fee_activity",
+                    activity_id=str(activity_id),
+                    activity_type=_plain_for_journal(
+                        _value_for_journal(activity, "activity_type")
+                    ),
+                    activity_sub_type=_plain_for_journal(
+                        _value_for_journal(activity, "activity_sub_type")
+                    ),
+                    net_amount=str(_value_for_journal(activity, "net_amount") or "0"),
+                    symbol=_value_for_journal(activity, "symbol"),
+                    date=_plain_for_journal(_value_for_journal(activity, "date")),
+                    created_at=_plain_for_journal(
+                        _value_for_journal(activity, "created_at")
+                    ),
+                    description=_value_for_journal(
+                        _value_for_journal(activity, "description")
+                    ),
+                )
+                existing.add(str(activity_id))
+            if len(activities) < 100:
+                break
+            page_token = _value_for_journal(activities[-1], "id")
+            if not page_token:
+                break
 
     def fetch_account_and_positions(self) -> tuple[float, float, float, list[dict[str, Any]], list[dict[str, Any]], set[str]]:
         account = self.trading_client.get_account()
@@ -1075,11 +1342,40 @@ class LivePortfolioManager:
                 self.logger.info(f"Candidate {sym}: score={sc:.2f}, side={side_val}, entry=${curr_price:.2f}, stop=${sl_price:.2f}, target=${tp_price:.2f}, stop_pct={stop_pct:.2f}%, target_pct={target_pct:.2f}%, rr={rr:.2f}, notional_cap=${notional_cap:.2f}, qty={qty}, gross=${gross:.2f}, cost=${cost:.2f}, decision={decision}")
 
                 alpaca_side = OrderSide.BUY if side_val is Side.BUY else OrderSide.SELL
+                client_order_id = f"mm-ict-{uuid4().hex}"
+                if self.order_journal is not None:
+                    try:
+                        self.order_journal.append(
+                            "entry_intent",
+                            client_order_id=client_order_id,
+                            symbol=sym,
+                            strategy="ict_v106",
+                            side=str(side_val.value if hasattr(side_val, "value") else side_val),
+                            quantity=qty,
+                            signal_timestamp=inst.timestamp.isoformat(),
+                            signal_timestamp_ns=inst.timestamp_ns,
+                            signal_entry_price=signal_entry_price,
+                            executable_reference_price=curr_price,
+                            stop_price=sl_price,
+                            target_price=tp_price,
+                            zone_type=inst.zone_type,
+                            zone_top=inst.zone_top,
+                            zone_bot=inst.zone_bot,
+                        )
+                    except Exception as journal_exc:
+                        self.last_submit_failures += 1
+                        self.logger.critical(
+                            f"[Order Journal] Refusing new {sym} entry because intent could not be persisted: "
+                            f"{journal_exc}"
+                        )
+                        continue
+
                 order_req = MarketOrderRequest(
                     symbol=sym,
                     qty=qty,
                     side=alpaca_side,
                     time_in_force=TimeInForce.DAY,
+                    client_order_id=client_order_id,
                     order_class=OrderClass.BRACKET,
                     take_profit=TakeProfitRequest(limit_price=round(tp_price, 2)),
                     stop_loss=StopLossRequest(stop_price=round(sl_price, 2))
@@ -1403,6 +1699,24 @@ class LivePortfolioManager:
 
                 submission_attempted = True
                 submitted_order = self.trading_client.submit_order(order_req)
+                if self.order_journal is not None:
+                    parent_order = snapshot_order(
+                        submitted_order,
+                        role_hint="entry",
+                        client_order_id=client_order_id,
+                    )
+                    parent_order_id = parent_order.get("order_id")
+                    child_orders = [
+                        snapshot_order(leg, parent_order_id=parent_order_id)
+                        for leg in (getattr(submitted_order, "legs", None) or [])
+                    ]
+                    self.order_journal.append(
+                        "entry_order_submitted",
+                        client_order_id=client_order_id,
+                        symbol=sym,
+                        parent_order=parent_order,
+                        child_orders=child_orders,
+                    )
                 oc = getattr(submitted_order, "order_class", None)
                 oc_val = oc.value if hasattr(oc, "value") else str(oc) if oc is not None else None
                 oc_lower = oc_val.lower() if oc_val is not None else None
@@ -1473,10 +1787,34 @@ class LivePortfolioManager:
                 self.last_submit_failures += 1
                 self.logger.error(f"Failed to submit bracket order for {sym}: {ord_err}")
                 if is_broker_rejection(ord_err):
+                    if self.order_journal is not None:
+                        try:
+                            self.order_journal.append(
+                                "entry_submission_rejected",
+                                client_order_id=client_order_id,
+                                symbol=sym,
+                                error=str(ord_err),
+                            )
+                        except Exception as journal_exc:
+                            self.logger.critical(
+                                f"[Order Journal] Could not persist rejection for {client_order_id}: {journal_exc}"
+                            )
                     if dedup_tracker is not None:
                         dedup_tracker.clear_pending(sym, side_str, inst.zone_type, inst.zone_top, inst.zone_bot)
                     self.logger.info(f"Broker definitively rejected {sym}; no slot/risk reservation retained.")
                 elif submission_attempted:
+                    if self.order_journal is not None:
+                        try:
+                            self.order_journal.append(
+                                "entry_submission_uncertain",
+                                client_order_id=client_order_id,
+                                symbol=sym,
+                                error=str(ord_err),
+                            )
+                        except Exception as journal_exc:
+                            self.logger.critical(
+                                f"[Order Journal] Could not persist uncertain outcome for {client_order_id}: {journal_exc}"
+                            )
                     # A timeout or generic failure after the API call may have reached the broker.
                     self.logger.info(
                         f"Retaining pending status and reserving slot for {sym} after uncertain "
@@ -1587,6 +1925,21 @@ class LivePortfolioManager:
                     if status_code == 200 and order_id and symbol:
                         order_id_text = str(order_id)
                         close_order_symbols[order_id_text] = symbol
+                        if self.order_journal is not None:
+                            try:
+                                self.order_journal.append(
+                                    "eod_close_order_submitted",
+                                    order_id=order_id_text,
+                                    symbol=symbol,
+                                    order_role="eod_liquidation",
+                                    exit_reason="eod_flatten",
+                                    phase=phase,
+                                    http_status=status_code,
+                                )
+                            except Exception as journal_exc:
+                                self.logger.critical(
+                                    f"[Order Journal] Could not persist EOD close {order_id_text}: {journal_exc}"
+                                )
                         self.logger.info(
                             f"[Flatten] {phase} bulk-close accepted: symbol={symbol} "
                             f"order_id={order_id_text}"
@@ -1611,6 +1964,21 @@ class LivePortfolioManager:
                 if order_id and symbol:
                     order_id_text = str(order_id)
                     close_order_symbols[order_id_text] = symbol
+                    if self.order_journal is not None:
+                        try:
+                            self.order_journal.append(
+                                "eod_close_order_submitted",
+                                order_id=order_id_text,
+                                symbol=symbol,
+                                order_role="eod_liquidation",
+                                exit_reason="eod_flatten",
+                                phase=phase,
+                                broker_status=order_status or "unknown",
+                            )
+                        except Exception as journal_exc:
+                            self.logger.critical(
+                                f"[Order Journal] Could not persist EOD close {order_id_text}: {journal_exc}"
+                            )
                     self.logger.info(
                         f"[Flatten] {phase} individual close order tracked: "
                         f"symbol={symbol} order_id={order_id_text} "
@@ -2036,10 +2404,14 @@ class LiveMarketBot:
             self.logger.error(f"Critical initialization error: {exc}")
             sys.exit(1)
 
+        self.order_journal = OrderLifecycleJournal(
+            os.path.join(os.getenv("MM_LOG_DIR", "logs"), "order_lifecycle.jsonl")
+        )
         self.portfolio_manager = LivePortfolioManager(
             self.trading_client,
             self.logger,
             stock_client=self.stock_client,
+            order_journal=self.order_journal,
         )
         self.portfolio_manager.on_unprotected = lambda reason: self.kill_switch.trip(reason)
 
@@ -2293,6 +2665,26 @@ class LiveMarketBot:
 
         open_order_symbols = self.portfolio_manager.fetch_open_order_symbols()
         locked_normalized = {normalize_symbol(s) for s in locked_symbols_raw} | open_order_symbols
+
+        self.portfolio_manager.reconcile_order_journal()
+        journal = getattr(self.portfolio_manager, "order_journal", None)
+        if journal is not None:
+            for closed_symbol in closed_externally:
+                try:
+                    classification = journal.classify_exit(closed_symbol)
+                    journal.append(
+                        "position_closure_observed",
+                        symbol=closed_symbol,
+                        exit_classification=classification,
+                    )
+                    self.logger.info(
+                        f"[Order Journal] Position closure observed for {closed_symbol}: "
+                        f"exit_classification={classification}"
+                    )
+                except Exception as journal_exc:
+                    self.logger.warning(
+                        f"[Order Journal] Could not attribute closure for {closed_symbol}: {journal_exc}"
+                    )
 
         dedup = getattr(self, 'ict_dedup_tracker', None)
         if dedup is not None:
