@@ -1557,15 +1557,11 @@ class LivePortfolioManager:
             signal_age_seconds = (
                 execution_now - signal_time.astimezone(timezone.utc)
             ).total_seconds()
-            if (
-                signal_age_seconds < 0
-                or signal_age_seconds >= settings.ict_signal_max_age_seconds
-            ):
+            if signal_age_seconds < 0:
                 self.logger.info(
-                    f"Skipping {getattr(inst, 'symbol', 'UNKNOWN')}: ICT signal age "
-                    f"{signal_age_seconds:.2f}s outside allowed range "
-                    f"[0, {settings.ict_signal_max_age_seconds:.2f}) "
-                    "[REJECTED_STALE_ICT_SIGNAL]"
+                    f"Skipping {getattr(inst, 'symbol', 'UNKNOWN')}: ICT signal timestamp is "
+                    f"{abs(signal_age_seconds):.2f}s in the future "
+                    "[REJECTED_FUTURE_ICT_SIGNAL_TIMESTAMP]"
                 )
                 continue
 
