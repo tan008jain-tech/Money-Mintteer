@@ -108,7 +108,7 @@ The production execution path validates the broker/account state and the executa
 
 These are execution and operational gates. They should not be loosened merely to increase the number of trades. The absence of a trade can be a valid result when the market, data or risk conditions do not qualify.
 
-**Session cleanup is ownership-aware.** Money Mintter identifies parent entry orders using the `mm-ict-` client-order-ID prefix, follows the recorded bracket-leg IDs, reconciles actual fills, cancels only its own pending orders, and liquidates only its verified net filled quantity. Manual DAY/GTC orders and unrelated holdings are not intentionally cancelled or liquidated. If the aggregate broker position conflicts with the journal-derived Money Mintter quantity, cleanup fails closed for that symbol rather than guessing. Avoid manual trading in a symbol while Money Mintter has active exposure in that symbol; Alpaca reports one net position per symbol, so concurrent manual changes can make share ownership ambiguous.
+**Session cleanup is ownership-aware.** Money Mintter identifies its parent entry orders using the `mm-ict-` client-order-ID prefix, follows the recorded bracket-leg IDs, and manages only `DAY` orders. GTC and other non-DAY orders are excluded from cleanup, even if an order record is encountered. It reconciles actual fills, cancels only its own eligible pending orders, and liquidates only its verified net filled quantity. Manual DAY/GTC orders and unrelated holdings are not intentionally cancelled or liquidated. If the aggregate broker position conflicts with the journal-derived Money Mintter quantity, cleanup fails closed for that symbol rather than guessing. Avoid manual trading in a symbol while Money Mintter has active exposure in that symbol; Alpaca reports one net position per symbol, so concurrent manual changes can make share ownership ambiguous.
 
 ---
 
@@ -243,9 +243,9 @@ Before launching:
 2. Confirm the account identity, buying power and positions in the Alpaca account selected by those credentials.
 3. Avoid manual trades in a symbol while Money Mintter has active exposure in that same symbol; Alpaca aggregates the account's position by symbol, so concurrent manual trades make share ownership ambiguous.
 4. Confirm `ALPACA_REALTIME_FEED=iex` and review whether the account can access the configured historical SIP feed.
-4. Confirm the machine has a reliable internet connection and will remain awake for the session.
-5. Run the test suite and review any failures before starting the bot.
-6. Check that no other Money Mintter session is already running.
+5. Confirm the machine has a reliable internet connection and will remain awake for the session.
+6. Run the test suite and review any failures before starting the bot.
+7. Check that no other Money Mintter session is already running.
 
 ### 5.2 Start the production session
 

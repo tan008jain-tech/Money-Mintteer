@@ -54,6 +54,7 @@ def snapshot_order(
         "order_type": _value(order, "type") or _value(order, "order_type"),
         "order_class": _value(order, "order_class"),
         "status": _value(order, "status"),
+        "time_in_force": _value(order, "time_in_force"),
         "qty": _value(order, "qty"),
         "filled_qty": _value(order, "filled_qty"),
         "filled_avg_price": _value(order, "filled_avg_price"),
@@ -177,13 +178,15 @@ class OrderLifecycleJournal:
         self,
         client_order_prefix: str = MONEY_MINTTER_CLIENT_ORDER_PREFIX,
     ) -> dict[str, dict[str, Any]]:
-        """Return broker order IDs proven to originate from Money Mintter.
+        """Return DAY-only broker order IDs proven to originate from Money Mintter.
 
         Entry ownership is anchored to the persisted MM client-order-ID prefix.
-        Bracket legs inherit ownership through the parent's recorded leg IDs.
-        New quantity-specific liquidation orders require an explicit owner tag.
+        Bracket legs inherit ownership and time-in-force from their parent. Older
+        MM ICT journal records without a TIF field are DAY: the submitter has
+        always created these prefixed orders with TimeInForce.DAY.
         """
         records: dict[str, dict[str, Any]] = {}
+        excluded_client_ids: set[str] = set()
 
         for event in self.read_events():
             event_type = event.get("event_type")
@@ -199,17 +202,27 @@ class OrderLifecycleJournal:
                 ):
                     continue
 
+                # Old prefixed ICT entries came exclusively from a DAY submitter.
+                parent_tif = str(parent.get("time_in_force") or "day").strip().lower()
+                if parent_tif != "day":
+                    excluded_client_ids.add(client_order_id)
+                    continue
+
                 children = event.get("child_orders") or []
                 for index, snapshot in enumerate([parent, *children]):
                     if not isinstance(snapshot, dict) or not snapshot.get("order_id"):
                         continue
                     order_id = str(snapshot["order_id"])
+                    snapshot_tif = str(snapshot.get("time_in_force") or parent_tif).strip().lower()
+                    if snapshot_tif != "day":
+                        excluded_client_ids.add(client_order_id)
                     role = "entry" if index == 0 else str(snapshot.get("order_role") or "unknown")
                     records[order_id] = {
                         **records.get(order_id, {}),
                         **snapshot,
                         "order_id": order_id,
                         "order_role": role,
+                        "time_in_force": snapshot_tif,
                         "client_order_id": client_order_id,
                     }
 
@@ -220,10 +233,19 @@ class OrderLifecycleJournal:
                 order_id = str(snapshot["order_id"])
                 if order_id not in records:
                     continue
-                previous_role = records[order_id].get("order_role", "unknown")
+                previous = records[order_id]
+                previous_role = previous.get("order_role", "unknown")
                 reported_role = snapshot.get("order_role")
+                time_in_force = str(
+                    snapshot.get("time_in_force")
+                    or previous.get("time_in_force")
+                    or "day"
+                ).strip().lower()
+                client_order_id = previous.get("client_order_id") or snapshot.get("client_order_id")
+                if time_in_force != "day" and client_order_id:
+                    excluded_client_ids.add(str(client_order_id))
                 records[order_id] = {
-                    **records[order_id],
+                    **previous,
                     **snapshot,
                     "order_id": order_id,
                     "order_role": (
@@ -231,12 +253,17 @@ class OrderLifecycleJournal:
                         if reported_role not in (None, "", "unknown")
                         else previous_role
                     ),
+                    "time_in_force": time_in_force,
+                    "client_order_id": client_order_id,
                 }
 
             elif event_type in {"eod_close_order_submitted", "flatten_close_order_submitted"}:
                 # Older releases journaled account-wide close orders without an
                 # ownership marker. Never adopt those orders as MM inventory.
                 if event.get("owner") != "money_mintter":
+                    continue
+                time_in_force = str(event.get("time_in_force") or "day").strip().lower()
+                if time_in_force != "day":
                     continue
                 raw_order_id = event.get("order_id")
                 if not raw_order_id:
@@ -255,10 +282,16 @@ class OrderLifecycleJournal:
                         )
                     ),
                     "status": event.get("broker_status") or records.get(order_id, {}).get("status", "unknown"),
+                    "time_in_force": time_in_force,
                     "filled_qty": records.get(order_id, {}).get("filled_qty", "0"),
                 }
 
-        return records
+        return {
+            order_id: record
+            for order_id, record in records.items()
+            if record.get("client_order_id") not in excluded_client_ids
+            and str(record.get("time_in_force") or "day").strip().lower() == "day"
+        }
 
     def unowned_legacy_close_order_ids(self) -> list[str]:
         """Find unresolved close orders from pre-ownership-aware cleanup versions."""

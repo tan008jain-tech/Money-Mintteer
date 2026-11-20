@@ -2186,6 +2186,7 @@ class LivePortfolioManager:
                         order_id=str(close_order_id),
                         symbol=symbol,
                         order_role=liquidation_role,
+                        time_in_force="day",
                         qty=quantity_text,
                         signed_owned_quantity=str(owned_quantity),
                         exit_reason=exit_reason_value,

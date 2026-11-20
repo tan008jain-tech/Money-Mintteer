@@ -662,3 +662,65 @@ def test_legacy_unowned_close_orders_are_not_adopted(tmp_path):
         },
     )
     assert journal.unowned_legacy_close_order_ids() == []
+
+
+def test_owned_order_records_excludes_gtc_orders_and_their_filled_shares(tmp_path):
+    journal = OrderLifecycleJournal(tmp_path / "gtc-order.jsonl")
+    journal.append(
+        "entry_order_submitted",
+        client_order_id="mm-ict-long-term-order",
+        parent_order={
+            "order_id": "mm-gtc-parent",
+            "client_order_id": "mm-ict-long-term-order",
+            "symbol": "AAPL",
+            "order_role": "entry",
+            "status": "filled",
+            "time_in_force": "gtc",
+            "filled_qty": "10",
+        },
+        child_orders=[],
+    )
+    journal.append(
+        "fill",
+        **_fill(
+            "mm-gtc-fill",
+            "mm-gtc-parent",
+            "AAPL",
+            "buy",
+            10,
+            100,
+            datetime.now(timezone.utc),
+        ),
+    )
+
+    assert journal.owned_order_records() == {}
+    assert journal.owned_position_quantities() == {}
+
+
+def test_owned_order_records_inherits_day_tif_for_legacy_ict_journal_entries(tmp_path):
+    journal = OrderLifecycleJournal(tmp_path / "legacy-day-order.jsonl")
+    journal.append(
+        "entry_order_submitted",
+        client_order_id="mm-ict-legacy-day",
+        parent_order={
+            "order_id": "mm-day-parent",
+            "client_order_id": "mm-ict-legacy-day",
+            "symbol": "AAPL",
+            "order_role": "entry",
+            "status": "filled",
+            "filled_qty": "0",
+        },
+        child_orders=[
+            {
+                "order_id": "mm-day-tp",
+                "symbol": "AAPL",
+                "order_role": "take_profit",
+                "status": "new",
+                "filled_qty": "0",
+            }
+        ],
+    )
+
+    records = journal.owned_order_records()
+    assert records["mm-day-parent"]["time_in_force"] == "day"
+    assert records["mm-day-tp"]["time_in_force"] == "day"
