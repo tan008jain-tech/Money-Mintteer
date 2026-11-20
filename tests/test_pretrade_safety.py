@@ -28,250 +28,223 @@ class FakeQuoteClient:
         return {request.symbol_or_symbols[0]: quote}
 
 
-class FakeFlattenBroker:
-    def __init__(self, original_order: SimpleNamespace | None = None) -> None:
-        self.position_open = True
-        self.original_order = original_order
+def _owned_journal(tmp_path, *, symbol="AAPL", side="buy", quantity="5"):
+    from money_mintter.core.order_journal import OrderLifecycleJournal
+
+    journal = OrderLifecycleJournal(tmp_path / "order_lifecycle.jsonl")
+    journal.append(
+        "entry_order_submitted",
+        client_order_id="mm-ict-unit-entry",
+        symbol=symbol,
+        parent_order={
+            "order_id": "mm-entry-order",
+            "client_order_id": "mm-ict-unit-entry",
+            "symbol": symbol,
+            "side": side,
+            "order_role": "entry",
+            "status": "filled",
+            "qty": quantity,
+            "filled_qty": quantity,
+        },
+        child_orders=[
+            {
+                "order_id": "mm-take-profit",
+                "symbol": symbol,
+                "side": "sell" if side == "buy" else "buy",
+                "order_role": "take_profit",
+                "status": "new",
+                "qty": quantity,
+                "filled_qty": "0",
+            },
+            {
+                "order_id": "mm-stop-loss",
+                "symbol": symbol,
+                "side": "sell" if side == "buy" else "buy",
+                "order_role": "stop_loss",
+                "status": "new",
+                "qty": quantity,
+                "filled_qty": "0",
+            },
+        ],
+    )
+    journal.append(
+        "fill",
+        fill_id="mm-entry-fill",
+        order_id="mm-entry-order",
+        symbol=symbol,
+        side=side,
+        qty=quantity,
+        price="100",
+        transaction_time=datetime.now(timezone.utc).isoformat(),
+    )
+    return journal
+
+
+class FakeOwnedBroker:
+    def __init__(self, *, actual_quantity="25"):
+        self.actual_quantity = actual_quantity
+        self.cancel_calls = []
+        self.close_calls = []
+        self.manual_gtc_order = SimpleNamespace(
+            id="manual-gtc-order",
+            symbol="MSFT",
+            side="buy",
+            status="new",
+            time_in_force="gtc",
+            client_order_id="manual-long-term-order",
+        )
+        self.orders = {
+            "mm-entry-order": SimpleNamespace(
+                id="mm-entry-order", symbol="AAPL", status="filled",
+                filled_qty="5", client_order_id="mm-ict-unit-entry",
+            ),
+            "mm-take-profit": SimpleNamespace(
+                id="mm-take-profit", symbol="AAPL", status="new", filled_qty="0",
+            ),
+            "mm-stop-loss": SimpleNamespace(
+                id="mm-stop-loss", symbol="AAPL", status="new", filled_qty="0",
+            ),
+        }
         self.close_order = None
-        self.bulk_close_responses = [
-            SimpleNamespace(
-                status=403,
-                order_id=None,
-                symbol="AAPL",
-                body=SimpleNamespace(
-                    code=40310000,
-                    message="insufficient qty available for order",
-                    available="0",
-                    existing_qty="10",
-                    held_for_orders="10",
-                ),
-            )
-        ]
-        self.get_orders_calls = 0
-        self.get_order_by_id_calls: list[str] = []
-        self.cancel_calls: list[str] = []
-        self.close_calls: list[str] = []
+        self.close_fill = None
 
     def get_account(self):
         return SimpleNamespace(
-            cash="1000.00",
-            equity="1000.00",
-            buying_power="1000.00",
-            last_equity="1000.00",
+            cash="1000.00", equity="3000.00", buying_power="2000.00", last_equity="3000.00"
         )
 
     def get_all_positions(self):
-        if not self.position_open:
+        if float(self.actual_quantity) == 0:
             return []
-        return [
-            SimpleNamespace(
-                symbol="AAPL",
-                qty="10",
-                avg_entry_price="100.00",
-                current_price="100.00",
-                unrealized_pl="0.00",
-            )
-        ]
-
-    def close_all_positions(self, cancel_orders=True):
-        assert cancel_orders is True
-        return list(self.bulk_close_responses)
-
-    def close_position(self, symbol):
-        self.close_calls.append(symbol)
-        self.close_order = SimpleNamespace(
-            id="liquidation-order-1",
-            symbol=symbol,
-            status="accepted",
-        )
-        return self.close_order
-
-    def cancel_order_by_id(self, order_id):
-        self.cancel_calls.append(str(order_id))
-        if self.original_order is not None and str(self.original_order.id) == str(order_id):
-            self.original_order.status = "pending_cancel"
-
-    def get_orders(self, request):
-        self.get_orders_calls += 1
-
-        if self.original_order is not None:
-            if self.get_orders_calls == 1:
-                return [self.original_order]
-            if self.get_orders_calls == 2:
-                self.original_order.status = "canceled"
-                return []
-
-        if self.close_order is not None:
-            if self.close_order.status == "accepted":
-                # The first post-submit snapshot sees the close order active.
-                self._close_order_open_seen = getattr(self, "_close_order_open_seen", 0) + 1
-                if self._close_order_open_seen == 1:
-                    return [self.close_order]
-                # The order fills after the position snapshot for this cycle.
-                self.close_order.status = "filled"
-                self.position_open = False
-                return []
-
-        return []
+        return [SimpleNamespace(
+            symbol="AAPL",
+            qty=str(self.actual_quantity),
+            avg_entry_price="100.00",
+            current_price="100.00",
+            unrealized_pl="0.00",
+        )]
 
     def get_order_by_id(self, order_id):
-        self.get_order_by_id_calls.append(str(order_id))
-        if self.close_order is not None and str(order_id) == str(self.close_order.id):
+        order_id = str(order_id)
+        if order_id == "mm-close-order":
+            self.close_order.status = "filled"
+            self.close_order.filled_qty = self.close_calls[-1][1]
             return self.close_order
-        if self.original_order is not None and str(order_id) == str(self.original_order.id):
-            return self.original_order
-        raise KeyError(order_id)
+        return self.orders[order_id]
 
+    def cancel_order_by_id(self, order_id):
+        order_id = str(order_id)
+        self.cancel_calls.append(order_id)
+        self.orders[order_id].status = "canceled"
 
-def test_close_position_order_response_is_tracked_and_never_cancelled(caplog):
-    client = FakeFlattenBroker()
-    manager = LivePortfolioManager(client, logging.getLogger("flatten_order_response"))
-
-    with caplog.at_level(logging.INFO):
-        remaining = manager.flatten_all(
-            sleep_fn=lambda _: None, max_wait_seconds=10, retry_delay=1
+    def close_position(self, symbol, close_options=None):
+        quantity = str(close_options.qty)
+        self.close_calls.append((symbol, quantity))
+        self.actual_quantity = str(float(self.actual_quantity) - float(quantity))
+        self.close_order = SimpleNamespace(
+            id="mm-close-order",
+            symbol=symbol,
+            status="accepted",
+            filled_qty="0",
         )
+        self.orders["mm-close-order"] = self.close_order
+        self.close_fill = {
+            "id": "mm-close-fill",
+            "order_id": "mm-close-order",
+            "symbol": symbol,
+            "side": "sell",
+            "qty": quantity,
+            "price": "101",
+            "transaction_time": datetime.now(timezone.utc).isoformat(),
+        }
+        return self.close_order
 
-    assert remaining == []
-    assert client.close_calls == ["AAPL"]
-    assert client.cancel_calls == []
-    assert "individual close order tracked" in caplog.text
-    assert "order_id=liquidation-order-1" in caplog.text
-    assert "held_for_orders=10" in caplog.text
-    assert "liquidation-order-1" in client.get_order_by_id_calls
-    assert manager.last_flatten_errors == 1  # Initial per-position 403 preserved.
+    def get(self, path, params):
+        assert path == "/account/activities/FILL"
+        if params.get("order_id") == "mm-close-order":
+            return [self.close_fill]
+        return []
 
-
-@pytest.mark.parametrize(
-    ("initial_status", "expected_cancel_calls"),
-    [
-        ("pending_cancel", 0),
-        ("new", 1),
-    ],
-)
-def test_existing_order_cancel_is_requested_at_most_once_and_reconciled(
-    initial_status: str,
-    expected_cancel_calls: int,
-):
-    original_order = SimpleNamespace(
-        id="protective-order-1",
-        symbol="AAPL",
-        status=initial_status,
-    )
-    client = FakeFlattenBroker(original_order=original_order)
-    manager = LivePortfolioManager(client, logging.getLogger("flatten_cancel_race"))
-
-    remaining = manager.flatten_all(
-        sleep_fn=lambda _: None, max_wait_seconds=10, retry_delay=1
-    )
-
-    assert remaining == []
-    assert client.cancel_calls == (
-        ["protective-order-1"] if expected_cancel_calls else []
-    )
-    assert client.close_calls == ["AAPL"]
-    assert "protective-order-1" in client.get_order_by_id_calls
-    assert client.cancel_calls.count("protective-order-1") <= 1
+    def get_orders(self, request):
+        return [self.manual_gtc_order]
 
 
-def test_missing_symbol_open_order_is_reconciled_by_id_before_flattening():
-    class MissingSymbolBroker(FakeFlattenBroker):
-        def __init__(self):
-            super().__init__()
-            self.unknown_order = SimpleNamespace(
-                id="unknown-symbol-order",
-                symbol=None,
-                status="new",
-            )
-            self._unknown_cancelled = False
+def test_owned_flatten_cancels_mm_bracket_and_closes_only_mm_filled_quantity(tmp_path):
+    from money_mintter.core.live_bot import LivePortfolioManager
 
-        def get_orders(self, request):
-            if not self._unknown_cancelled:
-                return [self.unknown_order]
-            return super().get_orders(request)
-
-        def cancel_order_by_id(self, order_id):
-            if str(order_id) == self.unknown_order.id:
-                self.cancel_calls.append(str(order_id))
-                self.unknown_order.status = "canceled"
-                self._unknown_cancelled = True
-                return
-            super().cancel_order_by_id(order_id)
-
-        def get_order_by_id(self, order_id):
-            if str(order_id) == self.unknown_order.id:
-                self.get_order_by_id_calls.append(str(order_id))
-                return self.unknown_order
-            return super().get_order_by_id(order_id)
-
-    client = MissingSymbolBroker()
-    manager = LivePortfolioManager(client, logging.getLogger("flatten_unknown_order_symbol"))
-
-    remaining = manager.flatten_all(
-        sleep_fn=lambda _: None, max_wait_seconds=10, retry_delay=1
-    )
-
-    assert remaining == []
-    assert client.cancel_calls.count("unknown-symbol-order") == 1
-    assert client.get_order_by_id_calls.count("unknown-symbol-order") == 1
-    assert client.close_calls == ["AAPL"]
-
-
-def test_successful_bulk_close_without_symbol_or_order_id_fails_closed():
-    class UnidentifiedBulkCloseBroker(FakeFlattenBroker):
-        def __init__(self):
-            super().__init__()
-            self.bulk_close_responses = [
-                SimpleNamespace(
-                    status=200,
-                    order_id=None,
-                    symbol=None,
-                    body=None,
-                )
-            ]
-            self.position_open = False
-
-        def get_orders(self, request):
-            return []
-
-    client = UnidentifiedBulkCloseBroker()
+    journal = _owned_journal(tmp_path, quantity="5")
+    broker = FakeOwnedBroker(actual_quantity="25")
     manager = LivePortfolioManager(
-        client, logging.getLogger("flatten_unidentified_bulk_response")
+        broker, logging.getLogger("owned_flatten"), order_journal=journal
     )
 
     remaining = manager.flatten_all(
-        sleep_fn=lambda _: None, max_wait_seconds=3, retry_delay=1
+        sleep_fn=lambda _: None, max_wait_seconds=10, retry_delay=1
+    )
+
+    assert remaining == []
+    assert broker.cancel_calls == ["mm-take-profit", "mm-stop-loss"]
+    assert broker.close_calls == [("AAPL", "5")]
+    assert broker.actual_quantity == "20"
+    assert broker.manual_gtc_order.status == "new"
+    assert "manual-gtc-order" not in broker.cancel_calls
+    assert journal.owned_position_quantities() == {}
+
+
+def test_owned_flatten_leaves_untracked_manual_holdings_and_gtc_orders_untouched(tmp_path):
+    from money_mintter.core.live_bot import LivePortfolioManager
+    from money_mintter.core.order_journal import OrderLifecycleJournal
+
+    journal = OrderLifecycleJournal(tmp_path / "empty-order-lifecycle.jsonl")
+    broker = FakeOwnedBroker(actual_quantity="25")
+    manager = LivePortfolioManager(
+        broker, logging.getLogger("manual_holdings"), order_journal=journal
+    )
+
+    remaining = manager.flatten_all(
+        sleep_fn=lambda _: None, max_wait_seconds=2, retry_delay=1
+    )
+
+    assert remaining == []
+    assert broker.close_calls == []
+    assert broker.cancel_calls == []
+    assert broker.actual_quantity == "25"
+    assert broker.manual_gtc_order.status == "new"
+
+
+def test_owned_flatten_fails_closed_when_account_quantity_conflicts_with_mm_ledger(tmp_path):
+    from money_mintter.core.live_bot import LivePortfolioManager
+
+    journal = _owned_journal(tmp_path, quantity="5")
+    broker = FakeOwnedBroker(actual_quantity="3")
+    manager = LivePortfolioManager(
+        broker, logging.getLogger("owned_quantity_mismatch"), order_journal=journal
+    )
+
+    remaining = manager.flatten_all(
+        sleep_fn=lambda _: None, max_wait_seconds=2, retry_delay=1
+    )
+
+    assert remaining == ["AAPL"]
+    assert broker.close_calls == []
+    assert broker.actual_quantity == "3"
+
+
+def test_unjournaled_positions_and_manual_gtc_are_not_touched(tmp_path):
+    from money_mintter.core.live_bot import LivePortfolioManager
+
+    broker = FakeOwnedBroker(actual_quantity="25")
+    manager = LivePortfolioManager(broker, logging.getLogger("missing_journal"))
+
+    remaining = manager.flatten_all(
+        sleep_fn=lambda _: None, max_wait_seconds=2, retry_delay=1
     )
 
     assert remaining == ["UNKNOWN"]
-    assert client.close_calls == []
-
-
-def test_filled_unidentified_order_fails_closed():
-    class FilledUnidentifiedBroker(FakeFlattenBroker):
-        def __init__(self):
-            super().__init__()
-            self.unknown_order = SimpleNamespace(
-                id="unknown-filled-order",
-                symbol=None,
-                status="filled",
-            )
-
-        def get_orders(self, request):
-            return [self.unknown_order]
-
-        def get_order_by_id(self, order_id):
-            self.get_order_by_id_calls.append(str(order_id))
-            return self.unknown_order
-
-    client = FilledUnidentifiedBroker()
-    manager = LivePortfolioManager(client, logging.getLogger("flatten_filled_unknown_order"))
-
-    remaining = manager.flatten_all(sleep_fn=lambda _: None, max_wait_seconds=2)
-
-    assert remaining == ["UNKNOWN"]
-    assert "unknown-filled-order" in client.get_order_by_id_calls
-    assert client.close_calls == []
+    assert broker.close_calls == []
+    assert broker.cancel_calls == []
+    assert broker.actual_quantity == "25"
+    assert broker.manual_gtc_order.status == "new"
 
 
 def _session_bot_for_snapshot_test(

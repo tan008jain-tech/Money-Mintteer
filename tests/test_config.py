@@ -1578,3 +1578,49 @@ def test_tripped_bot_halts_and_skips_scan(monkeypatch: pytest.MonkeyPatch) -> No
     assert metrics["halted"] is True
     assert metrics["orders_sent"] == 0
     assert not scan_called
+
+
+def test_trading_mode_selects_matching_alpaca_endpoint(monkeypatch):
+    monkeypatch.delenv("APCA_API_BASE_URL", raising=False)
+    monkeypatch.setenv("MM_TRADING_MODE", "paper")
+    paper = Settings()
+    assert paper.trading_mode == "paper"
+    assert paper.alpaca_base_url == "https://paper-api.alpaca.markets"
+
+    monkeypatch.setenv("MM_TRADING_MODE", "live")
+    live = Settings()
+    assert live.trading_mode == "live"
+    assert live.alpaca_base_url == "https://api.alpaca.markets"
+
+
+def test_trading_mode_rejects_invalid_or_mismatched_environment(monkeypatch):
+    monkeypatch.setenv("MM_TRADING_MODE", "production")
+    with pytest.raises(ValueError, match="MM_TRADING_MODE"):
+        Settings()
+
+    monkeypatch.setenv("MM_TRADING_MODE", "live")
+    monkeypatch.setenv("APCA_API_BASE_URL", "https://paper-api.alpaca.markets")
+    with pytest.raises(ValueError, match="must match MM_TRADING_MODE"):
+        Settings()
+
+
+def test_trading_client_uses_selected_paper_or_live_mode(monkeypatch):
+    from money_mintter.core.live_bot import _create_trading_client
+
+    calls = []
+
+    class FakeTradingClient:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+
+    monkeypatch.setattr("money_mintter.core.live_bot.TradingClient", FakeTradingClient)
+    monkeypatch.delenv("APCA_API_BASE_URL", raising=False)
+    monkeypatch.setenv("MM_TRADING_MODE", "paper")
+    _create_trading_client(Settings(), "paper-key", "paper-secret")
+    monkeypatch.setenv("MM_TRADING_MODE", "live")
+    _create_trading_client(Settings(), "live-key", "live-secret")
+
+    assert calls[0]["paper"] is True
+    assert calls[0]["url_override"] == "https://paper-api.alpaca.markets"
+    assert calls[1]["paper"] is False
+    assert calls[1]["url_override"] == "https://api.alpaca.markets"

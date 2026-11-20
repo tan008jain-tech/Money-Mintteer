@@ -50,20 +50,26 @@ def _env_bool(name: str, default: bool) -> bool:
         return False
     raise ValueError(f"{name} must be boolean")
 
-
-
+def _default_alpaca_base_url() -> str:
+    mode = os.getenv("MM_TRADING_MODE", "paper").strip().lower()
+    return (
+        "https://api.alpaca.markets"
+        if mode == "live"
+        else "https://paper-api.alpaca.markets"
+    )
 
 
 @dataclass(frozen=True, slots=True)
 class Settings:
     initial_capital: float = field(default_factory=lambda: _env_float("INITIAL_CAPITAL", 10_000.0))
+    trading_mode: str = field(default_factory=lambda: _env_text("MM_TRADING_MODE", "paper").strip().lower())
     alpaca_api_key: str = field(
         default_factory=lambda: os.getenv("APCA_API_KEY_ID") or os.getenv("APCA_API_KEY", "")
     )
     alpaca_secret_key: str = field(
         default_factory=lambda: os.getenv("APCA_API_SECRET_KEY") or os.getenv("APCA_API_SECRET", "")
     )
-    alpaca_base_url: str = field(default_factory=lambda: _env_text("APCA_API_BASE_URL", "https://paper-api.alpaca.markets"))
+    alpaca_base_url: str = field(default_factory=lambda: _env_text("APCA_API_BASE_URL", _default_alpaca_base_url()))
     base_currency: str = field(default_factory=lambda: _env_text("BASE_CURRENCY", "USD"))
     max_deep_candidates: int = field(
         default_factory=lambda: _env_int("MAX_DEEP_CANDIDATES", 5)
@@ -195,6 +201,19 @@ class Settings:
     )
 
     def __post_init__(self) -> None:
+        if self.trading_mode not in {"paper", "live"}:
+            raise ValueError("MM_TRADING_MODE must be either 'paper' or 'live'")
+        expected_base_url = (
+            "https://paper-api.alpaca.markets"
+            if self.trading_mode == "paper"
+            else "https://api.alpaca.markets"
+        )
+        if self.alpaca_base_url.rstrip("/") != expected_base_url:
+            raise ValueError(
+                "APCA_API_BASE_URL must match MM_TRADING_MODE: "
+                f"{self.trading_mode!r} requires {expected_base_url}"
+            )
+
         for setting_field in fields(self):
             value = getattr(self, setting_field.name)
             if isinstance(value, float) and not isfinite(value):

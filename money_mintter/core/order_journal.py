@@ -12,6 +12,7 @@ from uuid import uuid4
 
 TERMINAL_ORDER_STATUSES = {"filled", "canceled", "expired", "rejected", "replaced"}
 EXIT_ROLES = {"take_profit", "stop_loss", "eod_liquidation", "emergency_cleanup"}
+MONEY_MINTTER_CLIENT_ORDER_PREFIX = "mm-ict-"
 
 
 def _value(item: Any, name: str, default: Any = None) -> Any:
@@ -170,6 +171,207 @@ class OrderLifecycleJournal:
         if value.tzinfo is None or value.utcoffset() is None:
             return value.replace(tzinfo=timezone.utc)
         return value.astimezone(timezone.utc)
+
+
+    def owned_order_records(
+        self,
+        client_order_prefix: str = MONEY_MINTTER_CLIENT_ORDER_PREFIX,
+    ) -> dict[str, dict[str, Any]]:
+        """Return broker order IDs proven to originate from Money Mintter.
+
+        Entry ownership is anchored to the persisted MM client-order-ID prefix.
+        Bracket legs inherit ownership through the parent's recorded leg IDs.
+        New quantity-specific liquidation orders require an explicit owner tag.
+        """
+        records: dict[str, dict[str, Any]] = {}
+
+        for event in self.read_events():
+            event_type = event.get("event_type")
+            if event_type in {"entry_order_submitted", "entry_order_recovered"}:
+                parent = event.get("parent_order") or {}
+                client_order_id = (
+                    event.get("client_order_id")
+                    or (parent.get("client_order_id") if isinstance(parent, dict) else None)
+                )
+                if (
+                    not isinstance(client_order_id, str)
+                    or not client_order_id.startswith(client_order_prefix)
+                ):
+                    continue
+
+                children = event.get("child_orders") or []
+                for index, snapshot in enumerate([parent, *children]):
+                    if not isinstance(snapshot, dict) or not snapshot.get("order_id"):
+                        continue
+                    order_id = str(snapshot["order_id"])
+                    role = "entry" if index == 0 else str(snapshot.get("order_role") or "unknown")
+                    records[order_id] = {
+                        **records.get(order_id, {}),
+                        **snapshot,
+                        "order_id": order_id,
+                        "order_role": role,
+                        "client_order_id": client_order_id,
+                    }
+
+            elif event_type == "order_state":
+                snapshot = event.get("order")
+                if not isinstance(snapshot, dict) or not snapshot.get("order_id"):
+                    continue
+                order_id = str(snapshot["order_id"])
+                if order_id not in records:
+                    continue
+                previous_role = records[order_id].get("order_role", "unknown")
+                reported_role = snapshot.get("order_role")
+                records[order_id] = {
+                    **records[order_id],
+                    **snapshot,
+                    "order_id": order_id,
+                    "order_role": (
+                        reported_role
+                        if reported_role not in (None, "", "unknown")
+                        else previous_role
+                    ),
+                }
+
+            elif event_type in {"eod_close_order_submitted", "flatten_close_order_submitted"}:
+                # Older releases journaled account-wide close orders without an
+                # ownership marker. Never adopt those orders as MM inventory.
+                if event.get("owner") != "money_mintter":
+                    continue
+                raw_order_id = event.get("order_id")
+                if not raw_order_id:
+                    continue
+                order_id = str(raw_order_id)
+                records[order_id] = {
+                    **records.get(order_id, {}),
+                    "order_id": order_id,
+                    "symbol": event.get("symbol") or records.get(order_id, {}).get("symbol"),
+                    "order_role": str(
+                        event.get("order_role")
+                        or (
+                            "eod_liquidation"
+                            if event_type == "eod_close_order_submitted"
+                            else "emergency_cleanup"
+                        )
+                    ),
+                    "status": event.get("broker_status") or records.get(order_id, {}).get("status", "unknown"),
+                    "filled_qty": records.get(order_id, {}).get("filled_qty", "0"),
+                }
+
+        return records
+
+    def unowned_legacy_close_order_ids(self) -> list[str]:
+        """Find unresolved close orders from pre-ownership-aware cleanup versions."""
+        terminal = {"filled", "canceled", "expired", "rejected", "replaced", "done_for_day"}
+        status_by_id: dict[str, str] = {}
+        legacy_ids: set[str] = set()
+        for event in self.read_events():
+            event_type = event.get("event_type")
+            if event_type in {"eod_close_order_submitted", "flatten_close_order_submitted"}:
+                order_id = str(event.get("order_id") or "")
+                if order_id and event.get("owner") != "money_mintter":
+                    legacy_ids.add(order_id)
+                    status_by_id[order_id] = str(event.get("broker_status") or "unknown").strip().lower()
+            elif event_type == "order_state":
+                snapshot = event.get("order")
+                if isinstance(snapshot, dict) and snapshot.get("order_id"):
+                    order_id = str(snapshot["order_id"])
+                    if order_id in legacy_ids:
+                        status_by_id[order_id] = str(snapshot.get("status") or "unknown").strip().lower()
+        return sorted(order_id for order_id in legacy_ids if status_by_id.get(order_id) not in terminal)
+
+    def has_unresolved_entry_intents(
+        self,
+        client_order_prefix: str = MONEY_MINTTER_CLIENT_ORDER_PREFIX,
+    ) -> bool:
+        """Return True if an MM entry intent has no persisted submission outcome."""
+        intents: set[str] = set()
+        resolved: set[str] = set()
+        for event in self.read_events():
+            client_order_id = event.get("client_order_id")
+            if (
+                not isinstance(client_order_id, str)
+                or not client_order_id.startswith(client_order_prefix)
+            ):
+                continue
+            event_type = event.get("event_type")
+            if event_type == "entry_intent":
+                intents.add(client_order_id)
+            elif event_type in {
+                "entry_submission_rejected",
+                "entry_order_submitted",
+                "entry_order_recovered",
+            }:
+                resolved.add(client_order_id)
+        return bool(intents - resolved)
+
+    def owned_position_quantities(
+        self,
+        client_order_prefix: str = MONEY_MINTTER_CLIENT_ORDER_PREFIX,
+    ) -> dict[str, Decimal]:
+        """Return signed net filled quantities for MM-owned orders only.
+
+        Refuse to guess when a fill is malformed or broker-filled quantity exceeds
+        the fill activity persisted in this journal.
+        """
+        records = self.owned_order_records(client_order_prefix)
+        roles = {
+            order_id: str(record.get("order_role", "unknown"))
+            for order_id, record in records.items()
+        }
+        recognized_roles = {"entry", *EXIT_ROLES}
+        inventory: dict[str, Decimal] = {}
+        observed_by_order: dict[str, Decimal] = {}
+        seen_fill_ids: set[str] = set()
+
+        for event in self.read_events():
+            if event.get("event_type") != "fill":
+                continue
+            order_id = str(event.get("order_id", ""))
+            if order_id not in records:
+                continue
+            if roles.get(order_id, "unknown") not in recognized_roles:
+                raise ValueError(f"Money Mintter fill has an unknown order role: {order_id}")
+
+            fill_id = str(event.get("fill_id", "")).strip()
+            if not fill_id:
+                raise ValueError(f"Money Mintter fill has no fill_id: {order_id}")
+            if fill_id in seen_fill_ids:
+                continue
+            seen_fill_ids.add(fill_id)
+
+            symbol = str(event.get("symbol") or records[order_id].get("symbol") or "").strip().upper()
+            side = str(event.get("side", "")).strip().lower()
+            quantity = _decimal(event.get("qty"))
+            if (
+                not symbol
+                or side not in {"buy", "sell"}
+                or not quantity.is_finite()
+                or quantity <= 0
+            ):
+                raise ValueError(f"Money Mintter fill is incomplete or invalid: {order_id}")
+
+            signed_quantity = quantity if side == "buy" else -quantity
+            inventory[symbol] = inventory.get(symbol, Decimal("0")) + signed_quantity
+            observed_by_order[order_id] = observed_by_order.get(order_id, Decimal("0")) + quantity
+
+        tolerance = Decimal("0.00000001")
+        for order_id, record in records.items():
+            expected_filled = _decimal(record.get("filled_qty") or "0")
+            if not expected_filled.is_finite() or expected_filled < 0:
+                raise ValueError(f"Invalid broker filled quantity for Money Mintter order {order_id}")
+            observed_filled = observed_by_order.get(order_id, Decimal("0"))
+            if expected_filled > observed_filled + tolerance:
+                raise ValueError(
+                    f"Money Mintter fills are not fully reconciled for order {order_id}: "
+                    f"broker={expected_filled}, journal={observed_filled}"
+                )
+
+        return {
+            symbol: quantity
+            for symbol, quantity in inventory.items()
+            if abs(quantity) > tolerance
+        }
 
     def classify_exit(self, symbol: str) -> str:
         """Classify the most recent exit only when it follows the latest known entry."""

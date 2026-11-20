@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from decimal import Decimal
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -569,3 +570,95 @@ def test_exit_classification_does_not_reuse_old_trade_exit_for_new_entry(tmp_pat
         "fill", **_fill("emergency-fill", "emergency-close", "AAPL", "sell", 1, 108, emergency_time)
     )
     assert journal.classify_exit("AAPL") == "emergency_cleanup"
+
+
+def test_owned_position_quantities_uses_only_mm_prefixed_parent_and_linked_legs(tmp_path):
+    journal = OrderLifecycleJournal(tmp_path / "owned-positions.jsonl")
+    start = datetime(2026, 11, 20, 14, 30, tzinfo=timezone.utc)
+    journal.append(
+        "entry_order_submitted",
+        client_order_id="mm-ict-owned-entry",
+        parent_order={
+            "order_id": "mm-entry",
+            "client_order_id": "mm-ict-owned-entry",
+            "symbol": "AAPL",
+            "order_role": "entry",
+            "status": "filled",
+            "filled_qty": "5",
+        },
+        child_orders=[
+            {"order_id": "mm-tp", "symbol": "AAPL", "order_role": "take_profit", "status": "filled", "filled_qty": "2"},
+            {"order_id": "mm-sl", "symbol": "AAPL", "order_role": "stop_loss", "status": "canceled", "filled_qty": "0"},
+        ],
+    )
+    journal.append("fill", **_fill("mm-entry-fill", "mm-entry", "AAPL", "buy", 5, 100, start))
+    journal.append("fill", **_fill("mm-tp-fill", "mm-tp", "AAPL", "sell", 2, 102, start + timedelta(minutes=5)))
+
+    journal.append(
+        "entry_order_submitted",
+        client_order_id="manual-investment-order",
+        parent_order={
+            "order_id": "manual-entry",
+            "client_order_id": "manual-investment-order",
+            "symbol": "AAPL",
+            "order_role": "entry",
+            "status": "filled",
+            "filled_qty": "20",
+        },
+        child_orders=[],
+    )
+    journal.append("fill", **_fill("manual-fill", "manual-entry", "AAPL", "buy", 20, 90, start))
+
+    assert journal.owned_position_quantities() == {"AAPL": Decimal("3")}
+
+
+def test_owned_position_quantities_rejects_incomplete_fill_reconciliation(tmp_path):
+    import pytest
+
+    journal = OrderLifecycleJournal(tmp_path / "incomplete-owned-fills.jsonl")
+    journal.append(
+        "entry_order_submitted",
+        client_order_id="mm-ict-incomplete",
+        parent_order={
+            "order_id": "mm-entry",
+            "client_order_id": "mm-ict-incomplete",
+            "symbol": "AAPL",
+            "order_role": "entry",
+            "status": "filled",
+            "filled_qty": "5",
+        },
+        child_orders=[],
+    )
+    journal.append(
+        "fill",
+        **_fill("partial-fill", "mm-entry", "AAPL", "buy", 3, 100, datetime.now(timezone.utc)),
+    )
+
+    with pytest.raises(ValueError, match="not fully reconciled"):
+        journal.owned_position_quantities()
+
+
+def test_legacy_unowned_close_orders_are_not_adopted(tmp_path):
+    journal = OrderLifecycleJournal(tmp_path / "legacy-close.jsonl")
+    journal.append(
+        "flatten_close_order_submitted",
+        order_id="legacy-close-order",
+        symbol="AAPL",
+        order_role="emergency_cleanup",
+        broker_status="accepted",
+    )
+
+    assert journal.owned_order_records() == {}
+    assert journal.unowned_legacy_close_order_ids() == ["legacy-close-order"]
+
+    journal.append(
+        "order_state",
+        order={
+            "order_id": "legacy-close-order",
+            "symbol": "AAPL",
+            "order_role": "emergency_cleanup",
+            "status": "filled",
+            "filled_qty": "10",
+        },
+    )
+    assert journal.unowned_legacy_close_order_ids() == []

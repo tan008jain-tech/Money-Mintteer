@@ -184,8 +184,8 @@ def test_session_trading_cycles_completed(monkeypatch):
 
     res = bot.run_session(now_fn=lambda: current_time, sleep_fn=fake_sleep)
     assert res["status"] == "completed"
-    assert client.cancel_orders_calls == 1
-    assert client.close_all_positions_calls == 1
+    assert client.cancel_orders_calls == 0
+    assert client.close_all_positions_calls == 0
 
 
 def test_early_close_flatten(monkeypatch):
@@ -202,8 +202,8 @@ def test_early_close_flatten(monkeypatch):
     current_time = flatten_at
     res = bot.run_session(now_fn=lambda: current_time, sleep_fn=lambda s: None)
     assert res["status"] == "completed"
-    assert client.cancel_orders_calls == 1
-    assert client.close_all_positions_calls == 1
+    assert client.cancel_orders_calls == 0
+    assert client.close_all_positions_calls == 0
 
 
 def test_flatten_incomplete_and_exit_mapping(monkeypatch):
@@ -241,8 +241,8 @@ def test_kill_switch_tripped_mid_session(monkeypatch):
 
     res = bot.run_session(now_fn=lambda: t_open, sleep_fn=lambda s: None)
     assert res["status"] == "halted"
-    assert client.cancel_orders_calls == 1
-    assert client.close_all_positions_calls == 1
+    assert client.cancel_orders_calls == 0
+    assert client.close_all_positions_calls == 0
 
 
 def test_run_once_error_recovery(monkeypatch):
@@ -273,18 +273,19 @@ def test_run_once_error_recovery(monkeypatch):
     assert res["errors"] == 1
 
 
-def test_flatten_all_order_and_robustness(monkeypatch):
+def test_flatten_never_uses_account_wide_cancel_or_close(monkeypatch):
     clock = FakeClock(is_open=True, next_open=datetime.now(), next_close=datetime.now())
     client = FakeTradingClient(clock, positions=[])
     client.cancel_orders_raises = True
+    client.close_all_positions_raises = True
     manager = LivePortfolioManager(client, logging.getLogger("test"))
 
     remaining = manager.flatten_all(sleep_fn=lambda s: None)
+
     assert remaining == []
-    assert "cancel_orders" in client.call_order
-    assert "close_all_positions" in client.call_order
-    assert client.call_order.index("cancel_orders") < client.call_order.index("close_all_positions")
-    assert client.close_all_positions_calls == 1
+    assert client.cancel_orders_calls == 0
+    assert client.close_all_positions_calls == 0
+    assert client.call_order == []
 
 
 def test_halt_is_immediate(monkeypatch):
@@ -322,9 +323,10 @@ def test_halt_is_immediate(monkeypatch):
     res = bot.run_session(now_fn=lambda: current_time, sleep_fn=fake_sleep)
     assert res["status"] == "halted"
     idx = events.index("run_once")
-    assert events[idx + 1] == "cancel_orders"
+    assert idx == len(events) - 1
     assert not any(e.startswith("sleep:") for e in events[idx:])
-    assert client.cancel_orders_calls == 1
+    assert client.cancel_orders_calls == 0
+    assert client.close_all_positions_calls == 0
 
 
 def test_cutoff_and_flatten_timing(monkeypatch):
@@ -367,9 +369,9 @@ def test_cutoff_and_flatten_timing(monkeypatch):
     for rt in recorded_times:
         assert rt < cutoff
         assert not (datetime(2026, 10, 21, 15, 30, tzinfo=timezone.utc) <= rt < datetime(2026, 10, 21, 16, 0, tzinfo=timezone.utc))
-    assert client.cancel_orders_calls == 1
-    assert cancel_time is not None
-    assert datetime(2026, 10, 21, 15, 55, tzinfo=timezone.utc) <= cancel_time < datetime(2026, 10, 21, 16, 0, tzinfo=timezone.utc)
+    assert client.cancel_orders_calls == 0
+    assert client.close_all_positions_calls == 0
+    assert cancel_time is None
 
 
 def test_keyboard_interrupt_inside_first_run_once(monkeypatch):
@@ -387,8 +389,8 @@ def test_keyboard_interrupt_inside_first_run_once(monkeypatch):
     monkeypatch.setattr(bot, "run_once", fake_run_once)
     res = bot.run_session(now_fn=lambda: t_open, sleep_fn=lambda s: None)
     assert res["status"] == "interrupted"
-    assert client.cancel_orders_calls == 1
-    assert client.close_all_positions_calls == 1
+    assert client.cancel_orders_calls == 0
+    assert client.close_all_positions_calls == 0
 
 
 def test_keyboard_interrupt_during_wait_for_open(monkeypatch):
@@ -430,8 +432,8 @@ def test_session_error_handling_and_flatten(monkeypatch):
 
     res = bot.run_session(now_fn=fake_now, sleep_fn=lambda s: None)
     assert res["status"] == "error"
-    assert client.cancel_orders_calls == 1
-    assert client.close_all_positions_calls == 1
+    assert client.cancel_orders_calls == 0
+    assert client.close_all_positions_calls == 0
 
 
 def test_flatten_all_raises_returns_flatten_incomplete(monkeypatch):
@@ -499,8 +501,8 @@ def test_ctrl_c_interrupted(monkeypatch):
     monkeypatch.setattr(bot, "run_once", fake_run_once)
     res = bot.run_session(now_fn=lambda: t_open, sleep_fn=lambda s: None)
     assert res["status"] == "interrupted"
-    assert client.cancel_orders_calls == 1
-    assert client.close_all_positions_calls == 1
+    assert client.cancel_orders_calls == 0
+    assert client.close_all_positions_calls == 0
 
     monkeypatch.setattr(LiveMarketBot, "run_session", lambda self, *a, **kw: res)
     monkeypatch.setattr(SessionLock, "acquire", lambda self: True)

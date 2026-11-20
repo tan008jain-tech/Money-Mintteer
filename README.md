@@ -1,6 +1,6 @@
 # Money Mintter
 
-Money Mintter is an event-driven US-equities market-scanning and **Alpaca paper-trading** system. The current production path uses the ICT V106 strategy integration, a layered universe-selection pipeline, guarded bracket-order execution, and session-level reconciliation.
+Money Mintter is an event-driven US-equities market-scanning and Alpaca trading system with explicit **paper** and **live** account modes. The current production path uses the ICT V106 strategy integration, a layered universe-selection pipeline, guarded bracket-order execution, and session-level reconciliation.
 
 The default Git branch is **`ict-rebuild`**. A normal clone therefore checks out the current working line:
 
@@ -12,7 +12,7 @@ git branch --show-current
 
 The last command should print `ict-rebuild`.
 
-> **Trading and account-safety notice:** the production entry point currently constructs Alpaca's trading client with `paper=True`. Use Alpaca **paper-trading** credentials only. This software is experimental; passing tests or producing a profitable paper session does not establish that a strategy is profitable or suitable for live capital.
+> **Trading and account-safety notice:** paper mode is the default. Live trading requires explicitly setting `MM_TRADING_MODE=live` and supplying matching live Alpaca credentials and endpoint. Live mode sends orders using real brokerage capital. This software is experimental; tests and paper results do not establish that a strategy is profitable or suitable for live capital.
 
 ---
 
@@ -55,6 +55,8 @@ Order journal, broker reconciliation and session summary
 - **Layer 3 market-cap filtering is not currently part of the active production path.**
 - **Layer 4** ranks the Layer 2 pool using intraday movement and activity information. It selects at most eight candidates and does not pad the result. The selector runs during regular US-equity trading hours.
 - Existing positions and broker-open orders are accounted for separately from new-entry candidates.
+
+Account positions remain visible to portfolio and scanner safety checks. A symbol already held in the selected account is excluded from new entries, and existing holdings can consume the configured position capacity. This avoids mixing an existing manual holding with a new bot-managed position in the same ticker.
 
 The eight-symbol Layer 4 selection cap is **not** the portfolio position limit. `MAX_OPEN_POSITIONS` defaults to five. Existing positions, open broker orders and uncertain pending submissions consume execution capacity.
 
@@ -106,7 +108,7 @@ The production execution path validates the broker/account state and the executa
 
 These are execution and operational gates. They should not be loosened merely to increase the number of trades. The absence of a trade can be a valid result when the market, data or risk conditions do not qualify.
 
-**Use a dedicated Alpaca paper account for Money Mintter.** The session cleanup queries the broker account, attempts to cancel/close outstanding broker activity, flattens positions and verifies the final broker snapshot. Do not leave unrelated positions or orders in the same paper account.
+**Session cleanup is ownership-aware.** Money Mintter identifies parent entry orders using the `mm-ict-` client-order-ID prefix, follows the recorded bracket-leg IDs, reconciles actual fills, cancels only its own pending orders, and liquidates only its verified net filled quantity. Manual DAY/GTC orders and unrelated holdings are not intentionally cancelled or liquidated. If the aggregate broker position conflicts with the journal-derived Money Mintter quantity, cleanup fails closed for that symbol rather than guessing. Avoid manual trading in a symbol while Money Mintter has active exposure in that symbol; Alpaca reports one net position per symbol, so concurrent manual changes can make share ownership ambiguous.
 
 ---
 
@@ -115,7 +117,7 @@ These are execution and operational gates. They should not be loosened merely to
 - Windows 10/11, macOS or Linux.
 - **Python 3.12** (required by `pyproject.toml`).
 - Git.
-- An Alpaca account with paper-trading API credentials.
+- An Alpaca paper or live account, with credentials for the selected `MM_TRADING_MODE`.
 - Market-data access for the configured feeds. Historical SIP access is subject to Alpaca account entitlements.
 
 The commands below use Windows PowerShell. On macOS/Linux, use the equivalent `python3.12 -m venv .venv`, activate `.venv/bin/activate`, and run the same Python module commands through the active environment.
@@ -171,7 +173,7 @@ python -m pip install -e ".[dev]"
 
 The editable install reads dependencies from `pyproject.toml`. The `dev` extra installs pytest. Python 3.12 is required; installing packages into a different global Python interpreter can lead to commands such as `pytest` not being found in the environment used to run the project.
 
-### 4.3 Configure Alpaca paper credentials
+### 4.3 Configure Alpaca credentials and account mode
 
 Create your local environment file:
 
@@ -180,9 +182,10 @@ Copy-Item .env.example .env
 notepad .env
 ~~~
 
-In `.env`, enter the **paper-trading** API key and secret issued by Alpaca. The preferred variable names are:
+In `.env`, select an account environment and enter the matching API key and secret. Keep `MM_TRADING_MODE=paper` for initial validation. The preferred variable names are:
 
 ~~~dotenv
+MM_TRADING_MODE=paper
 APCA_API_KEY_ID=your_paper_api_key
 APCA_API_SECRET_KEY=your_paper_secret_key
 APCA_API_BASE_URL=https://paper-api.alpaca.markets
@@ -199,7 +202,18 @@ ALPACA_REALTIME_FEED=iex
 ALPACA_ALLOW_HISTORICAL_FEED_FALLBACK=false
 ~~~
 
-Do not commit `.env`, paste credentials into issues or chat, or place secrets in source files. The production `TradingClient` is constructed with `paper=True`. This is a paper-trading runtime, not a live-trading switch; changing `APCA_API_BASE_URL` alone does not enable live trading.
+For live mode, change all three environment values together and use the matching live account credentials:
+
+~~~dotenv
+MM_TRADING_MODE=live
+APCA_API_KEY_ID=your_live_api_key
+APCA_API_SECRET_KEY=your_live_secret_key
+APCA_API_BASE_URL=https://api.alpaca.markets
+~~~
+
+`MM_TRADING_MODE` controls the SDK paper flag and must agree with `APCA_API_BASE_URL`; mismatches fail configuration validation. Paper and live credentials are separate. Do not mix a key from one environment with a secret from the other. The trading client receives both the selected paper/live flag and the validated URL override.
+
+Do not commit `.env`, paste credentials into issues or chat, or place secrets in source files. Live mode emits a high-visibility warning at startup.
 
 ### 4.4 Run the tests
 
@@ -219,15 +233,16 @@ Use `python -m pytest`, not only `pytest`, so the test runner is resolved from t
 
 ---
 
-## 5. Running the first paper-trading session
+## 5. Running the first trading session
 
 ### 5.1 Pre-session checklist
 
 Before launching:
 
-1. Confirm `.env` contains valid Alpaca **paper** credentials.
-2. Confirm the paper account is dedicated to Money Mintter and has no unrelated positions or open orders.
-3. Confirm `ALPACA_REALTIME_FEED=iex` and review whether the account can access the configured historical SIP feed.
+1. Confirm `MM_TRADING_MODE`, the API credentials and `APCA_API_BASE_URL` all refer to the same environment. Keep `paper` for initial validation; set `live` only when deliberately ready for real-money execution.
+2. Confirm the account identity, buying power and positions in the Alpaca account selected by those credentials.
+3. Avoid manual trades in a symbol while Money Mintter has active exposure in that same symbol; Alpaca aggregates the account's position by symbol, so concurrent manual trades make share ownership ambiguous.
+4. Confirm `ALPACA_REALTIME_FEED=iex` and review whether the account can access the configured historical SIP feed.
 4. Confirm the machine has a reliable internet connection and will remain awake for the session.
 5. Run the test suite and review any failures before starting the bot.
 6. Check that no other Money Mintter session is already running.
@@ -240,7 +255,7 @@ From the repository root, with the virtual environment active:
 python run_live_market.py
 ~~~
 
-This is the production paper-session entry point. It initializes the Alpaca paper trading client, discovers and validates the universe, scans candidates, evaluates ICT signals and submits eligible bracket orders to the paper account.
+This is the production session entry point. It initializes the Alpaca client for the environment selected by `MM_TRADING_MODE`, discovers and validates the universe, scans candidates, evaluates ICT signals and submits eligible bracket orders to that account.
 
 **Start timing matters.** The session uses Alpaca's market clock. If the market is closed and the next open is more than `MAX_WAIT_FOR_OPEN_MINUTES` away (45 minutes by default), the run is skipped. Start during regular US-equity hours or no more than 45 minutes before the next open. The scheduler uses US market time and the broker clock; do not hard-code a UTC or India-local opening time because daylight-saving changes shift the local conversion.
 
@@ -249,7 +264,7 @@ This is the production paper-session entry point. It initializes the Alpaca pape
 - The bot runs its scan/execution cycle around completed 5-minute bar boundaries.
 - New entries stop at `NO_NEW_ENTRIES_MINUTES_BEFORE_CLOSE` (30 minutes before the scheduled close by default).
 - The session attempts to flatten positions `FLATTEN_MINUTES_BEFORE_CLOSE` (5 minutes before close by default).
-- After flattening, the bot takes a fresh broker account, positions and open-orders snapshot to verify the account is flat.
+- After cleanup, the bot takes a fresh broker account snapshot and verifies that Money Mintter-owned orders and filled exposure are reconciled. Unrelated account holdings and orders may remain.
 - The process then exits and releases its session lock.
 
 Keep the terminal open. A normal `Ctrl+C` while trading is active invokes an emergency-cleanup attempt, but do not use interruption as the normal end-of-day procedure. A forced process termination, machine shutdown or network failure can prevent cleanup from completing. Always verify positions and orders in Alpaca after an abnormal shutdown.
@@ -266,13 +281,13 @@ The current runner uses these exit codes:
 | `4` | A fresh session lock already exists; another session may be running |
 | `130` | Session interrupted by the user |
 
-A skipped session is not a completed trading session. A halted, interrupted or error result requires log review. If the terminal reports remaining positions, `UNKNOWN`, or an incomplete flatten, open the Alpaca paper dashboard immediately, reconcile open orders and positions, and close anything that remains before restarting Money Mintter.
+A skipped session is not a completed trading session. A halted, interrupted or error result requires log review. If the terminal reports remaining positions, `UNKNOWN`, or an incomplete flatten, open the selected Alpaca account dashboard immediately, reconcile open orders and positions, and close anything that remains before restarting Money Mintter.
 
 ### 5.5 Do not confuse the demo with the production session
 
 `run_paper_demo.py` is a self-contained simulated demo. It creates a local `PaperBroker`, injects a synthetic AAPL trade and serves a demo dashboard on `http://127.0.0.1:8765`. It does not run the Alpaca live-market scanner or the production ICT V106 session.
 
-Use `python run_live_market.py` for the actual Alpaca paper-trading session.
+Use `python run_live_market.py` for the actual Alpaca-backed session. Paper or live execution is selected by `MM_TRADING_MODE`.
 
 ---
 
@@ -353,7 +368,7 @@ python -m pip install -e ".[dev]"
 
 ### Alpaca authentication or permission errors
 
-Verify that the key and secret belong to the same Alpaca **paper** account, that the credentials are current, and that the account is enabled. Never substitute live credentials as a troubleshooting shortcut.
+Verify that the key and secret belong to the same Alpaca environment selected by `MM_TRADING_MODE`, that `APCA_API_BASE_URL` matches that mode, that the credentials are current, and that the account is enabled. Do not mix paper and live credentials.
 
 ### Historical data/feed errors
 
@@ -413,7 +428,7 @@ Check the Alpaca paper account directly. Reconcile and close remaining positions
 - Do not silently alter ICT V106 strategy logic while fixing surrounding data or execution infrastructure.
 - Add or update tests for behavioural changes and run the focused tests before the full suite.
 - Preserve cache, log and order-journal evidence when investigating a session.
-- Treat paper results as observations that require repeated, out-of-sample validation, realistic costs and drawdown analysis.
+- Treat paper results as observations that require repeated, out-of-sample validation, realistic costs and drawdown analysis before any live activation.
 
 ## Disclaimer
 
