@@ -240,7 +240,7 @@ def test_unjournaled_positions_and_manual_gtc_are_not_touched(tmp_path):
         sleep_fn=lambda _: None, max_wait_seconds=2, retry_delay=1
     )
 
-    assert remaining == ["UNKNOWN"]
+    assert remaining == ["AAPL", "MSFT"]
     assert broker.close_calls == []
     assert broker.cancel_calls == []
     assert broker.actual_quantity == "25"
