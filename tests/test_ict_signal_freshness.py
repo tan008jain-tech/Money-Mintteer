@@ -91,11 +91,12 @@ def test_fresh_ict_instruction_can_reach_broker(age_seconds: float, monkeypatch)
     assert broker.submissions == 1
 
 
-@pytest.mark.parametrize("age_seconds", [300.0, 301.0, 900.0])
-def test_expired_ict_instruction_is_rejected_before_quote_or_submit(
+@pytest.mark.parametrize("age_seconds", [300.0, 301.0, 900.0, 3600.0, 14_400.0])
+def test_older_ict_instruction_can_reach_broker_when_live_checks_pass(
     age_seconds: float,
     monkeypatch,
 ) -> None:
+    monkeypatch.setenv("MAX_PORTFOLIO_RISK_PCT", "3")
     now = datetime.now(timezone.utc)
     manager, quotes, broker = _manager()
 
@@ -107,9 +108,9 @@ def test_expired_ict_instruction_is_rejected_before_quote_or_submit(
         execution_time_utc=now,
     )
 
-    assert sent == 0
-    assert quotes.calls == 0
-    assert broker.submissions == 0
+    assert sent == 1
+    assert quotes.calls == 1
+    assert broker.submissions == 1
 
 
 def test_future_ict_instruction_is_rejected_before_quote_or_submit() -> None:
@@ -162,7 +163,7 @@ def test_naive_execution_time_fails_closed() -> None:
     assert broker.submissions == 0
 
 
-def test_quote_rejection_does_not_mark_fresh_signal_executed_or_pending() -> None:
+def test_old_signal_still_fails_when_live_quote_exceeds_price_deviation() -> None:
     now = datetime.now(timezone.utc)
     manager, quotes, broker = _manager()
     tracker = ICTDeduplicationTracker()
@@ -177,7 +178,7 @@ def test_quote_rejection_does_not_mark_fresh_signal_executed_or_pending() -> Non
     }
 
     sent = manager.submit_ict_instructions(
-        [_instruction(now)],
+        [_instruction(now - timedelta(hours=2))],
         set(),
         100_000.0,
         Settings(),
@@ -189,3 +190,26 @@ def test_quote_rejection_does_not_mark_fresh_signal_executed_or_pending() -> Non
     assert broker.submissions == 0
     assert not tracker.is_executed("AAPL", "bull", "disp_fvg", 101.0, 99.0)
     assert not tracker.is_pending("AAPL", "bull", "disp_fvg", 101.0, 99.0)
+
+
+def test_old_instruction_still_requires_a_fresh_execution_quote() -> None:
+    now = datetime.now(timezone.utc)
+    manager, _quotes, broker = _manager()
+    manager.stock_client.get_stock_latest_quote = lambda request: {
+        "AAPL": SimpleNamespace(
+            timestamp=now - timedelta(seconds=11),
+            bid_price=99.99,
+            ask_price=100.01,
+        )
+    }
+
+    sent = manager.submit_ict_instructions(
+        [_instruction(now - timedelta(hours=2))],
+        set(),
+        100_000.0,
+        Settings(),
+        execution_time_utc=now,
+    )
+
+    assert sent == 0
+    assert broker.submissions == 0
