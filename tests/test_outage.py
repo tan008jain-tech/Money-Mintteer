@@ -136,256 +136,96 @@ def test_scanner_connectivity_vs_runtime_error():
         bot.run_cycle(open_time)
 
 
-def test_flatten_all_max_wait_seconds_success():
-    # Breaks if flatten_all max_wait_seconds retry loop or success check is removed
+def test_flatten_without_journal_reports_positions_and_preserves_manual_gtc_orders():
     client = MagicMock()
-    client.close_all_positions = MagicMock(side_effect=[
-        requests.exceptions.ConnectionError("fail 1"),
-        requests.exceptions.ConnectionError("fail 2"),
-        None
-    ])
-    acc = MagicMock()
-    acc.cash = "100000.0"
-    acc.equity = "100000.0"
-    client.get_account = MagicMock(return_value=acc)
-    client.get_all_positions = MagicMock(side_effect=[
-        [MagicMock(symbol="AAPL", qty="10", avg_entry_price="150")],
-        [MagicMock(symbol="AAPL", qty="10", avg_entry_price="150")],
-        []
-    ])
+    client.get_account.return_value = SimpleNamespace(
+        cash="100000.0", equity="100000.0", buying_power="100000.0", last_equity="100000.0"
+    )
+    client.get_all_positions.return_value = [
+        SimpleNamespace(symbol="AAPL", qty="20", avg_entry_price="150.0", current_price="150.0", unrealized_pl="0.0"),
+        SimpleNamespace(symbol="MSFT", qty="10", avg_entry_price="300.0", current_price="300.0", unrealized_pl="0.0"),
+    ]
+    manual_gtc = SimpleNamespace(id="manual-msft-gtc", symbol="MSFT", time_in_force="gtc")
+    client.get_orders.return_value = [manual_gtc]
 
-    pm = LivePortfolioManager(client, logging.getLogger("test"))
-    sleeps = []
-    res = pm.flatten_all(sleep_fn=lambda s: sleeps.append(s), max_wait_seconds=60, retry_delay=15)
-    assert res == []
-    assert sum(sleeps) <= 60
+    pm = LivePortfolioManager(client, logging.getLogger("no_journal_manual_holdings"))
+    result = pm.flatten_all(sleep_fn=lambda _: None, max_wait_seconds=60, retry_delay=15)
+
+    assert result == ["AAPL", "MSFT"]
+    client.close_all_positions.assert_not_called()
+    client.cancel_orders.assert_not_called()
+    client.cancel_order_by_id.assert_not_called()
+    client.close_position.assert_not_called()
+    assert client.get_orders.call_count == 1
 
 
-def test_flatten_all_max_wait_succeeds_with_symbols():
-    # Breaks if flatten_all remembering successful positions or returning them at max_wait is removed
+def test_flatten_without_journal_reports_manual_open_orders_without_cancelling():
     client = MagicMock()
-    client.close_all_positions = MagicMock(return_value=None)
-    acc = MagicMock()
-    acc.cash = "100000.0"
-    acc.equity = "100000.0"
-    client.get_account = MagicMock(return_value=acc)
-    client.get_all_positions = MagicMock(return_value=[MagicMock(symbol="AAPL", qty="10", avg_entry_price="150")])
-
-    pm = LivePortfolioManager(client, logging.getLogger("test"))
-    sleeps = []
-    res = pm.flatten_all(sleep_fn=lambda s: sleeps.append(s), max_wait_seconds=60, retry_delay=15)
-    assert res == ["AAPL"]
-    assert len(sleeps) == math.ceil(60 / 15)
-
-
-def test_flatten_all_never_succeeds_unknown():
-    # Breaks if flatten_all returning ["UNKNOWN"] when verification never succeeds is removed
-    client = MagicMock()
-    client.close_all_positions = MagicMock(return_value=None)
-    client.get_account = MagicMock(side_effect=RuntimeError("account down"))
-
-    pm = LivePortfolioManager(client, logging.getLogger("test"))
-    sleeps = []
-    res = pm.flatten_all(sleep_fn=lambda s: sleeps.append(s), max_wait_seconds=60, retry_delay=15)
-    assert res == ["UNKNOWN"]
-    assert len(sleeps) == math.ceil(60 / 15)
-
-
-def test_flatten_all_does_not_report_success_with_open_orders():
-    # A flat position book is not clean if a working order can still open exposure.
-    client = MagicMock()
-    acc = MagicMock()
-    acc.cash = "100000.0"
-    acc.equity = "100000.0"
-    acc.buying_power = "100000.0"
-    client.get_account.return_value = acc
+    client.get_account.return_value = SimpleNamespace(
+        cash="100000.0", equity="100000.0", buying_power="100000.0", last_equity="100000.0"
+    )
     client.get_all_positions.return_value = []
-    client.get_orders.return_value = [MagicMock(id="working-aapl", symbol="AAPL")]
+    client.get_orders.return_value = [
+        SimpleNamespace(id="manual-aapl-gtc", symbol="AAPL", time_in_force="gtc")
+    ]
 
-    pm = LivePortfolioManager(client, logging.getLogger("test_flatten_open_orders"))
+    pm = LivePortfolioManager(client, logging.getLogger("no_journal_open_order"))
     result = pm.flatten_all(sleep_fn=lambda _: None, max_wait_seconds=2, retry_delay=1)
 
     assert result == ["AAPL"]
-    client.close_all_positions.assert_called_with(cancel_orders=True)
+    client.close_all_positions.assert_not_called()
     client.cancel_orders.assert_not_called()
-    assert client.get_orders.call_count >= 1
-
-
-@pytest.mark.parametrize("order_listed_as_open", [True, False])
-def test_flatten_all_does_not_cancel_or_duplicate_tracked_close_orders(order_listed_as_open):
-    client = MagicMock()
-    client.get_account.return_value = SimpleNamespace(
-        cash="100000.0", equity="100000.0", buying_power="100000.0", last_equity="100000.0"
-    )
-    client.get_all_positions.return_value = [
-        SimpleNamespace(
-            symbol="AAPL", qty="10", avg_entry_price="150.0",
-            current_price="150.0", unrealized_pl="0.0",
-        )
-    ]
-    close_response = SimpleNamespace(
-        status=200,
-        symbol="AAPL",
-        order_id="close-aapl-1",
-        body=SimpleNamespace(id="close-aapl-1", symbol="AAPL"),
-    )
-    client.close_all_positions.return_value = [close_response]
-    close_order = SimpleNamespace(id="close-aapl-1", symbol="AAPL", status="new")
-    client.get_orders.return_value = [close_order] if order_listed_as_open else []
-    client.get_order_by_id.return_value = close_order
-
-    pm = LivePortfolioManager(client, logging.getLogger("tracked_close_order"))
-    result = pm.flatten_all(
-        sleep_fn=lambda _: None, max_wait_seconds=2, retry_delay=1
-    )
-
-    assert result == ["AAPL"]
-    client.close_all_positions.assert_called_once_with(cancel_orders=True)
     client.cancel_order_by_id.assert_not_called()
-    if not order_listed_as_open:
-        client.get_order_by_id.assert_called_with("close-aapl-1")
+    client.close_position.assert_not_called()
 
 
-def test_flatten_all_waits_for_positions_to_catch_up_after_filled_close_order():
+def test_flatten_without_journal_returns_empty_only_when_account_is_empty():
     client = MagicMock()
     client.get_account.return_value = SimpleNamespace(
         cash="100000.0", equity="100000.0", buying_power="100000.0", last_equity="100000.0"
     )
-    # Simulate a temporarily stale position snapshot after the broker reports
-    # the liquidation order filled. A second liquidation must not be submitted
-    # until two subsequent snapshots still show the position.
-    client.get_all_positions.return_value = [
-        SimpleNamespace(
-            symbol="AAPL", qty="10", avg_entry_price="150.0",
-            current_price="150.0", unrealized_pl="0.0",
-        )
-    ]
-    first_close = SimpleNamespace(
-        status=200, symbol="AAPL", order_id="filled-close-1",
-        body=SimpleNamespace(id="filled-close-1", symbol="AAPL"),
-    )
-    second_close = SimpleNamespace(
-        status=200, symbol="AAPL", order_id="filled-close-2",
-        body=SimpleNamespace(id="filled-close-2", symbol="AAPL"),
-    )
-    client.close_all_positions.return_value = [first_close]
-    client.close_position.return_value = second_close
+    client.get_all_positions.return_value = []
     client.get_orders.return_value = []
-    client.get_order_by_id.return_value = SimpleNamespace(status="filled")
 
-    pm = LivePortfolioManager(client, logging.getLogger("filled_close_position_lag"))
-    result = pm.flatten_all(
-        sleep_fn=lambda _: None, max_wait_seconds=4, retry_delay=1
-    )
-
-    assert result == ["AAPL"]
-    client.close_all_positions.assert_called_once_with(cancel_orders=True)
-    client.close_position.assert_called_once_with("AAPL")
-    reconciled_order_ids = [
-        call.args[0] for call in client.get_order_by_id.call_args_list
-    ]
-    assert reconciled_order_ids == ["filled-close-1", "filled-close-2"]
+    pm = LivePortfolioManager(client, logging.getLogger("no_journal_empty_account"))
+    assert pm.flatten_all(sleep_fn=lambda _: None, max_wait_seconds=2, retry_delay=1) == []
+    client.close_all_positions.assert_not_called()
+    client.cancel_orders.assert_not_called()
 
 
-def test_flatten_all_retries_position_after_close_order_rejection():
+def test_flatten_without_journal_fails_closed_when_account_state_is_unavailable():
+    client = MagicMock()
+    client.get_account.side_effect = RuntimeError("account down")
+
+    pm = LivePortfolioManager(client, logging.getLogger("no_journal_account_down"))
+    result = pm.flatten_all(sleep_fn=lambda _: None, max_wait_seconds=2, retry_delay=1)
+
+    assert result == ["UNKNOWN"]
+    client.close_all_positions.assert_not_called()
+    client.cancel_orders.assert_not_called()
+
+
+def test_flatten_without_journal_fails_closed_when_open_order_has_no_symbol():
     client = MagicMock()
     client.get_account.return_value = SimpleNamespace(
         cash="100000.0", equity="100000.0", buying_power="100000.0", last_equity="100000.0"
     )
-    client.get_all_positions.return_value = [
-        SimpleNamespace(
-            symbol="AAPL", qty="10", avg_entry_price="150.0",
-            current_price="150.0", unrealized_pl="0.0",
-        )
-    ]
-    first_close = SimpleNamespace(
-        status=200, symbol="AAPL", order_id="close-aapl-1",
-        body=SimpleNamespace(id="close-aapl-1", symbol="AAPL"),
-    )
-    second_close = SimpleNamespace(
-        status=200, symbol="AAPL", order_id="close-aapl-2",
-        body=SimpleNamespace(id="close-aapl-2", symbol="AAPL"),
-    )
-    active_second_order = SimpleNamespace(
-        id="close-aapl-2", symbol="AAPL", status="new"
-    )
-    client.close_all_positions.return_value = [first_close]
-    client.close_position.return_value = second_close
-    client.get_orders.side_effect = [[], [active_second_order]]
-    client.get_order_by_id.return_value = SimpleNamespace(status="rejected")
+    client.get_all_positions.return_value = []
+    client.get_orders.return_value = [SimpleNamespace(id="unidentified-order")]
 
-    pm = LivePortfolioManager(client, logging.getLogger("rejected_close_retry"))
-    result = pm.flatten_all(
-        sleep_fn=lambda _: None, max_wait_seconds=2, retry_delay=1
-    )
+    pm = LivePortfolioManager(client, logging.getLogger("unidentified_manual_order"))
+    result = pm.flatten_all(sleep_fn=lambda _: None, max_wait_seconds=2, retry_delay=1)
 
-    assert result == ["AAPL"]
-    client.close_all_positions.assert_called_once_with(cancel_orders=True)
-    client.close_position.assert_called_once_with("AAPL")
-    client.get_order_by_id.assert_called_once_with("close-aapl-1")
+    assert result == ["UNKNOWN"]
+    client.close_all_positions.assert_not_called()
+    client.cancel_orders.assert_not_called()
 
 
-def test_flatten_retry_does_not_cancel_other_symbols_working_close_order():
+def test_flatten_without_journal_requires_successful_open_order_verification():
     client = MagicMock()
     client.get_account.return_value = SimpleNamespace(
         cash="100000.0", equity="100000.0", buying_power="100000.0", last_equity="100000.0"
     )
-    client.get_all_positions.return_value = [
-        SimpleNamespace(
-            symbol=symbol, qty="10", avg_entry_price="150.0",
-            current_price="150.0", unrealized_pl="0.0",
-        )
-        for symbol in ("AAPL", "MSFT")
-    ]
-
-    active_aapl_close = SimpleNamespace(
-        status=200, symbol="AAPL", order_id="close-aapl-1",
-        body=SimpleNamespace(id="close-aapl-1", symbol="AAPL"),
-    )
-    rejected_msft_close = SimpleNamespace(
-        status=422, symbol="MSFT", order_id=None,
-        body=SimpleNamespace(symbol="MSFT"),
-    )
-    retry_msft_close = SimpleNamespace(
-        status=200, symbol="MSFT", order_id="close-msft-2",
-        body=SimpleNamespace(id="close-msft-2", symbol="MSFT"),
-    )
-    client.close_all_positions.return_value = [
-        active_aapl_close, rejected_msft_close
-    ]
-    client.close_position.return_value = retry_msft_close
-
-    aapl_order = SimpleNamespace(
-        id="close-aapl-1", symbol="AAPL", status="new"
-    )
-    msft_order = SimpleNamespace(
-        id="close-msft-2", symbol="MSFT", status="new"
-    )
-    client.get_orders.side_effect = [
-        [aapl_order],
-        [aapl_order, msft_order],
-        [aapl_order, msft_order],
-    ]
-
-    pm = LivePortfolioManager(client, logging.getLogger("symbol_scoped_close_retry"))
-    result = pm.flatten_all(
-        sleep_fn=lambda _: None, max_wait_seconds=3, retry_delay=1
-    )
-
-    assert result == ["AAPL", "MSFT"]
-    client.close_all_positions.assert_called_once_with(cancel_orders=True)
-    client.close_position.assert_called_once_with("MSFT")
-    client.cancel_order_by_id.assert_not_called()
-
-
-def test_flatten_all_requires_successful_open_order_verification():
-    # If order state cannot be fetched, the bot must not claim a verified clean flatten.
-    client = MagicMock()
-    acc = MagicMock()
-    acc.cash = "100000.0"
-    acc.equity = "100000.0"
-    acc.buying_power = "100000.0"
-    client.get_account.return_value = acc
     client.get_all_positions.return_value = []
     client.get_orders.side_effect = RuntimeError("orders endpoint unavailable")
 
@@ -393,50 +233,8 @@ def test_flatten_all_requires_successful_open_order_verification():
     result = pm.flatten_all(sleep_fn=lambda _: None, max_wait_seconds=2, retry_delay=1)
 
     assert result == ["UNKNOWN"]
-    assert client.get_orders.call_count >= 1
-
-
-def test_flatten_all_monotonic_deadline_accounts_for_broker_time():
-    # Breaks if flatten_all max_wait_seconds does not account for time spent in broker requests using monotonic deadline
-    client = MagicMock()
-    def slow_close_all(*args, **kwargs):
-        time.sleep(0.05)
-        return None
-    client.close_all_positions = MagicMock(side_effect=slow_close_all)
-    client.cancel_orders = MagicMock(return_value=None)
-    acc = MagicMock()
-    acc.cash = "100000.0"
-    acc.equity = "100000.0"
-    client.get_account = MagicMock(return_value=acc)
-    client.get_all_positions = MagicMock(return_value=[MagicMock(symbol="AAPL", qty="10", avg_entry_price="150")])
-
-    pm = LivePortfolioManager(client, logging.getLogger("test"))
-    sleeps = []
-    start_mono = time.monotonic()
-    res = pm.flatten_all(sleep_fn=lambda s: sleeps.append(s), max_wait_seconds=0.1, retry_delay=0.1)
-    duration = time.monotonic() - start_mono
-    assert res == ["AAPL"]
-    assert duration < 1.0
-
-
-def test_flatten_all_enforces_flatten_max_wait_seconds_regression():
-    # Regression test: FLATTEN_MAX_WAIT_SECONDS / max_wait_seconds deadline enforcement including broker calls and sleeps
-    client = MagicMock()
-    def slow_get_positions(*args, **kwargs):
-        time.sleep(0.05)
-        return [MagicMock(symbol="AAPL", qty="10", avg_entry_price="150")]
-    client.get_all_positions = MagicMock(side_effect=slow_get_positions)
-    client.cancel_orders = MagicMock(return_value=None)
-    client.close_all_positions = MagicMock(return_value=None)
-    acc = MagicMock()
-    acc.cash = "100000.0"
-    acc.equity = "100000.0"
-    client.get_account = MagicMock(return_value=acc)
-
-    pm = LivePortfolioManager(client, logging.getLogger("test"))
-    sleeps = []
-    res = pm.flatten_all(sleep_fn=lambda s: sleeps.append(s), max_wait_seconds=0.04, retry_delay=0.01)
-    assert res == ["AAPL"]
+    client.close_all_positions.assert_not_called()
+    client.cancel_orders.assert_not_called()
 
 
 def test_run_session_safe_flatten_logging(caplog):

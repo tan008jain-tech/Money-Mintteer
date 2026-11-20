@@ -124,7 +124,7 @@ def test_order_confirmed_bracket(caplog):
 
 
 def test_unprotected_order_handling(caplog):
-    # c. Fake order with order_class "simple": cancel_order_by_id and close_position called once, orders_sent 0, last_submit_failures 1, CRITICAL logged, on_unprotected called once.
+    # A malformed bracket is cancelled, but symbol-wide liquidation is suppressed because the position may include manual holdings.
     fake_ord = FakeOrder(order_class="simple", legs=[])
     client = FakeTradingClient(order_to_return=fake_ord)
     logger = logging.getLogger("test_resilience")
@@ -141,8 +141,9 @@ def test_unprotected_order_handling(caplog):
     assert sent == 0
     assert pm.last_submit_failures == 1
     assert len(client.cancelled_ids) == 1
-    assert len(client.closed_symbols) == 1
+    assert len(client.closed_symbols) == 0
     assert "UNPROTECTED ORDER" in caplog.text
+    assert "symbol-wide close" in caplog.text
     assert len(cb_calls) == 1
 
 

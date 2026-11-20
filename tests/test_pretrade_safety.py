@@ -185,7 +185,7 @@ def test_owned_flatten_cancels_mm_bracket_and_closes_only_mm_filled_quantity(tmp
     assert remaining == []
     assert broker.cancel_calls == ["mm-take-profit", "mm-stop-loss"]
     assert broker.close_calls == [("AAPL", "5")]
-    assert broker.actual_quantity == "20"
+    assert float(broker.actual_quantity) == 20.0
     assert broker.manual_gtc_order.status == "new"
     assert "manual-gtc-order" not in broker.cancel_calls
     assert journal.owned_position_quantities() == {}

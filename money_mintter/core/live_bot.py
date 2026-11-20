@@ -1943,16 +1943,34 @@ class LivePortfolioManager:
                 open_orders = self.trading_client.get_orders(
                     GetOrdersRequest(status=QueryOrderStatus.OPEN)
                 )
+                unresolved_symbols: set[str] = set()
+                for position in positions:
+                    symbol = str(position.get("symbol", "")).strip().upper()
+                    if not symbol:
+                        raise ValueError("broker position has no symbol")
+                    unresolved_symbols.add(symbol)
+                for order in open_orders or []:
+                    symbol_value = (
+                        order.get("symbol")
+                        if isinstance(order, dict)
+                        else getattr(order, "symbol", None)
+                    )
+                    symbol = str(symbol_value or "").strip().upper()
+                    if not symbol:
+                        raise ValueError("broker open order has no symbol")
+                    unresolved_symbols.add(symbol)
             except Exception as exc:
                 self.last_flatten_errors += 1
                 self.logger.critical(f"[Owned Flatten] Cannot verify account state without a journal: {exc}")
                 return ["UNKNOWN"]
-            if positions or open_orders:
+
+            if unresolved_symbols:
+                remaining = sorted(unresolved_symbols)
                 self.logger.critical(
                     "[Owned Flatten] Account activity exists but the ownership journal is unavailable; "
-                    "refusing to cancel or liquidate anything."
+                    f"leaving all activity untouched: {remaining}"
                 )
-                return ["UNKNOWN"]
+                return remaining
             return []
 
         exit_reason_value = str(exit_reason).strip().lower()
