@@ -140,7 +140,13 @@ class FakeOwnedBroker:
     def close_position(self, symbol, close_options=None):
         quantity = str(close_options.qty)
         self.close_calls.append((symbol, quantity))
-        self.actual_quantity = str(float(self.actual_quantity) - float(quantity))
+        current_quantity = float(self.actual_quantity)
+        if current_quantity > 0:
+            self.actual_quantity = str(current_quantity - float(quantity))
+            close_side = "sell"
+        else:
+            self.actual_quantity = str(current_quantity + float(quantity))
+            close_side = "buy"
         self.close_order = SimpleNamespace(
             id="mm-close-order",
             symbol=symbol,
@@ -152,7 +158,7 @@ class FakeOwnedBroker:
             "id": "mm-close-fill",
             "order_id": "mm-close-order",
             "symbol": symbol,
-            "side": "sell",
+            "side": close_side,
             "qty": quantity,
             "price": "101",
             "transaction_time": datetime.now(timezone.utc).isoformat(),
@@ -378,3 +384,22 @@ def test_quote_spread_limit_is_configurable_and_validated(monkeypatch):
 
     with pytest.raises(ValueError, match="MAX_QUOTE_SPREAD_PCT"):
         Settings(max_quote_spread_pct=1.01)
+
+def test_owned_flatten_closes_only_mm_owned_short_quantity(tmp_path):
+    journal = _owned_journal(tmp_path, side="sell_short", quantity="5")
+    broker = FakeOwnedBroker(actual_quantity="-25")
+    manager = LivePortfolioManager(
+        broker, logging.getLogger("owned_short_flatten"), order_journal=journal
+    )
+
+    remaining = manager.flatten_all(
+        sleep_fn=lambda _: None, max_wait_seconds=10, retry_delay=1
+    )
+
+    assert remaining == []
+    assert broker.cancel_calls == ["mm-take-profit", "mm-stop-loss"]
+    assert broker.close_calls == [("AAPL", "5")]
+    assert float(broker.actual_quantity) == -20.0
+    assert broker.manual_gtc_order.status == "new"
+    assert "manual-gtc-order" not in broker.cancel_calls
+    assert journal.owned_position_quantities() == {}

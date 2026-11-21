@@ -12,6 +12,20 @@ from uuid import uuid4
 
 TERMINAL_ORDER_STATUSES = {"filled", "canceled", "expired", "rejected", "replaced"}
 EXIT_ROLES = {"take_profit", "stop_loss", "eod_liquidation", "emergency_cleanup"}
+
+# Alpaca TradeActivitySide is distinct from OrderSide. These values are returned
+# by /account/activities/FILL and must be normalized to their signed share effect.
+# Ambiguous activity sides (for example "undisclosed" and "cross") deliberately
+# remain unsupported so inventory reconciliation fails closed rather than guessing.
+TRADE_ACTIVITY_SIDE_SIGNS = {
+    "buy": Decimal("1"),
+    "buy_minus": Decimal("1"),
+    "sell": Decimal("-1"),
+    "sell_plus": Decimal("-1"),
+    "sell_short": Decimal("-1"),
+    "sell_short_exempt": Decimal("-1"),
+    "cross_short": Decimal("-1"),
+}
 MONEY_MINTTER_CLIENT_ORDER_PREFIX = "mm-ict-"
 
 
@@ -376,15 +390,19 @@ class OrderLifecycleJournal:
             symbol = str(event.get("symbol") or records[order_id].get("symbol") or "").strip().upper()
             side = str(event.get("side", "")).strip().lower()
             quantity = _decimal(event.get("qty"))
+            side_sign = TRADE_ACTIVITY_SIDE_SIGNS.get(side)
             if (
                 not symbol
-                or side not in {"buy", "sell"}
+                or side_sign is None
                 or not quantity.is_finite()
                 or quantity <= 0
             ):
-                raise ValueError(f"Money Mintter fill is incomplete or invalid: {order_id}")
+                raise ValueError(
+                    f"Money Mintter fill is incomplete, invalid, or has an unsupported "
+                    f"Alpaca activity side {side!r}: {order_id}"
+                )
 
-            signed_quantity = quantity if side == "buy" else -quantity
+            signed_quantity = quantity * side_sign
             inventory[symbol] = inventory.get(symbol, Decimal("0")) + signed_quantity
             observed_by_order[order_id] = observed_by_order.get(order_id, Decimal("0")) + quantity
 

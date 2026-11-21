@@ -724,3 +724,46 @@ def test_owned_order_records_inherits_day_tif_for_legacy_ict_journal_entries(tmp
     records = journal.owned_order_records()
     assert records["mm-day-parent"]["time_in_force"] == "day"
     assert records["mm-day-tp"]["time_in_force"] == "day"
+
+def test_owned_position_quantities_accounts_for_short_sale_activity_and_cover(tmp_path):
+    journal = OrderLifecycleJournal(tmp_path / "short-owned-positions.jsonl")
+    start = datetime(2026, 11, 20, 14, 30, tzinfo=timezone.utc)
+    journal.append(
+        "entry_order_submitted",
+        client_order_id="mm-ict-short-entry",
+        parent_order={
+            "order_id": "mm-short-entry",
+            "client_order_id": "mm-ict-short-entry",
+            "symbol": "CTVA",
+            "order_role": "entry",
+            "status": "filled",
+            "filled_qty": "10",
+        },
+        child_orders=[
+            {"order_id": "mm-short-tp", "symbol": "CTVA", "order_role": "take_profit", "status": "new", "filled_qty": "0"},
+            {"order_id": "mm-short-sl", "symbol": "CTVA", "order_role": "stop_loss", "status": "new", "filled_qty": "0"},
+        ],
+    )
+    journal.append(
+        "fill",
+        **_fill("short-entry-fill", "mm-short-entry", "CTVA", "sell_short", 10, 8.05, start),
+    )
+
+    # Alpaca reports short-sale activity as sell_short; it creates negative inventory.
+    assert journal.owned_position_quantities() == {"CTVA": Decimal("-10")}
+
+    journal.append(
+        "flatten_close_order_submitted",
+        owner="money_mintter",
+        order_id="mm-short-cover",
+        symbol="CTVA",
+        order_role="emergency_cleanup",
+        time_in_force="day",
+        broker_status="filled",
+    )
+    journal.append(
+        "fill",
+        **_fill("short-cover-fill", "mm-short-cover", "CTVA", "buy", 10, 8.00, start + timedelta(minutes=10)),
+    )
+
+    assert journal.owned_position_quantities() == {}
