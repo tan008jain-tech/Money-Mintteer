@@ -392,6 +392,7 @@ class MarketScanner:
         self.last_scan_errors = 0
         self.last_scan_connectivity_errors = 0
         self.ict_attempts = 0
+        self.ict_deferred = 0
         self.ict_acquisition_successes = 0
         self.ict_evaluation_successes = 0
         self.ict_errors = 0
