@@ -801,3 +801,122 @@ def test_execution_preflight_rejects_excessive_quote_deviation() -> None:
 
     assert sent == 0
     assert submitted == []
+
+
+def test_scanner_defers_ict_until_first_regular_session_five_minute_bar_closes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from money_mintter.core.live_bot import MarketScanner
+
+    now_utc = datetime(2026, 11, 23, 14, 34, 20, tzinfo=timezone.utc)
+    fresh_l1_bar = SimpleNamespace(
+        timestamp=datetime(2026, 11, 23, 14, 33, 0, tzinfo=timezone.utc),
+        open=100.0,
+        high=101.0,
+        low=99.0,
+        close=100.5,
+        volume=10_000.0,
+    )
+
+    class StockClient:
+        def __init__(self):
+            self.calls = 0
+
+        def get_stock_bars(self, request):
+            self.calls += 1
+            return SimpleNamespace(data={"AAPL": [fresh_l1_bar]}, next_page_token=None)
+
+    stock_client = StockClient()
+    scanner = MarketScanner(
+        ["AAPL"], stock_client, logging.getLogger("ict_opening_warmup")
+    )
+    candidate = SimpleNamespace(symbol="AAPL")
+    monkeypatch.setattr(
+        "money_mintter.core.live_bot.select_layer4_candidates",
+        lambda pool, bars, max_candidates=8: [candidate],
+    )
+    monkeypatch.setattr(
+        "money_mintter.core.live_bot.fetch_ict_market_data",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("ICT acquisition must be deferred before 09:35 ET")
+        ),
+    )
+
+    instructions, dashboard = scanner.scan_universe(now_utc, set(), strategy=None)
+
+    assert instructions == ()
+    assert dashboard == []
+    assert stock_client.calls == 1  # Layer 4 only; no dedicated ICT acquisition
+    assert scanner.last_l4_selected == 1
+    assert scanner.ict_attempts == 0
+    assert scanner.ict_deferred == 1
+    assert scanner.ict_acquisition_successes == 0
+    assert scanner.ict_evaluation_successes == 0
+    assert scanner.ict_errors == 0
+
+
+def test_scanner_resumes_ict_acquisition_at_or_after_first_five_minute_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from money_mintter.core.live_bot import MarketScanner
+
+    now_utc = datetime(2026, 11, 23, 14, 35, 20, tzinfo=timezone.utc)
+    fresh_l1_bar = SimpleNamespace(
+        timestamp=datetime(2026, 11, 23, 14, 34, 0, tzinfo=timezone.utc),
+        open=100.0,
+        high=101.0,
+        low=99.0,
+        close=100.5,
+        volume=10_000.0,
+    )
+
+    class StockClient:
+        def get_stock_bars(self, request):
+            return SimpleNamespace(data={"AAPL": [fresh_l1_bar]}, next_page_token=None)
+
+    scanner = MarketScanner(
+        ["AAPL"], StockClient(), logging.getLogger("ict_after_opening_warmup")
+    )
+    candidate = SimpleNamespace(symbol="AAPL")
+    monkeypatch.setattr(
+        "money_mintter.core.live_bot.select_layer4_candidates",
+        lambda pool, bars, max_candidates=8: [candidate],
+    )
+
+    acquisition_calls = []
+
+    def fetch_ict(*args, **kwargs):
+        acquisition_calls.append((args, kwargs))
+        return SimpleNamespace(
+            b1_success=True,
+            b5_success=True,
+            error_message=None,
+        )
+
+    monkeypatch.setattr(
+        "money_mintter.core.live_bot.fetch_ict_market_data", fetch_ict
+    )
+
+    b1_ns = int(datetime(2026, 11, 23, 14, 34, tzinfo=timezone.utc).timestamp() * 1_000_000_000)
+    b5_ns = int(datetime(2026, 11, 23, 14, 30, tzinfo=timezone.utc).timestamp() * 1_000_000_000)
+    adapter_result = SimpleNamespace(
+        b1=({"time_ns": b1_ns},),
+        b5=({"time_ns": b5_ns},),
+        b15=(),
+        b15_coverage=(),
+    )
+    instruction = _execution_instruction("AAPL")
+    monkeypatch.setattr(
+        "money_mintter.core.live_bot.generate_production_ict_signals",
+        lambda *args, **kwargs: (adapter_result, (instruction,)),
+    )
+
+    instructions, _ = scanner.scan_universe(now_utc, set(), strategy=None)
+
+    assert instructions == (instruction,)
+    assert len(acquisition_calls) == 1
+    assert scanner.ict_attempts == 1
+    assert scanner.ict_deferred == 0
+    assert scanner.ict_acquisition_successes == 1
+    assert scanner.ict_evaluation_successes == 1
+    assert scanner.ict_errors == 0
