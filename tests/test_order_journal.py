@@ -767,3 +767,203 @@ def test_owned_position_quantities_accounts_for_short_sale_activity_and_cover(tm
     )
 
     assert journal.owned_position_quantities() == {}
+
+
+def test_flatten_retries_transient_order_lookup_timeout(tmp_path):
+    import logging
+
+    from money_mintter.core.live_bot import LivePortfolioManager
+
+    journal = OrderLifecycleJournal(tmp_path / "order_lifecycle.jsonl")
+    journal.append(
+        "entry_order_submitted",
+        parent_order={
+            "order_id": "historical-order",
+            "symbol": "AAPL",
+            "order_role": "entry",
+            "status": "accepted",
+            "filled_qty": "0",
+        },
+        child_orders=[],
+    )
+
+    class Broker:
+        def __init__(self):
+            self.lookup_calls = 0
+
+        def get_order_by_id(self, order_id):
+            self.lookup_calls += 1
+            if self.lookup_calls == 1:
+                raise TimeoutError("broker request timed out")
+            return SimpleNamespace(
+                id=order_id,
+                symbol="AAPL",
+                side="buy",
+                type="market",
+                order_class=None,
+                status="accepted",
+                time_in_force="day",
+                qty="1",
+                filled_qty="0",
+                filled_avg_price=None,
+                submitted_at=None,
+                filled_at=None,
+                group_id=None,
+                group_role=None,
+                limit_price=None,
+                stop_price=None,
+            )
+
+    broker = Broker()
+    manager = LivePortfolioManager(broker, logging.getLogger("flatten_retry"), order_journal=journal)
+    delays = []
+
+    remaining = manager.flatten_all(
+        sleep_fn=delays.append,
+        retry_delay=2,
+        max_wait_seconds=10,
+    )
+
+    assert remaining == []
+    assert broker.lookup_calls == 2
+    assert delays == [2]
+    assert manager.order_journal_healthy is True
+
+
+def test_flatten_does_not_retry_ambiguous_close_submission_timeout(tmp_path):
+    import logging
+
+    from money_mintter.core.live_bot import LivePortfolioManager
+
+    journal = OrderLifecycleJournal(tmp_path / "order_lifecycle.jsonl")
+    client_order_id = "mm-ict-owned-entry"
+    journal.append(
+        "entry_order_submitted",
+        client_order_id=client_order_id,
+        parent_order={
+            "order_id": "entry-order",
+            "client_order_id": client_order_id,
+            "symbol": "AAPL",
+            "order_role": "entry",
+            "status": "filled",
+            "filled_qty": "2",
+            "time_in_force": "day",
+        },
+        child_orders=[
+            {
+                "order_id": "take-profit",
+                "symbol": "AAPL",
+                "order_role": "take_profit",
+                "status": "canceled",
+                "filled_qty": "0",
+                "time_in_force": "day",
+            },
+            {
+                "order_id": "stop-loss",
+                "symbol": "AAPL",
+                "order_role": "stop_loss",
+                "status": "canceled",
+                "filled_qty": "0",
+                "time_in_force": "day",
+            },
+        ],
+    )
+    journal.append(
+        "fill",
+        **_fill(
+            "owned-entry-fill",
+            "entry-order",
+            "AAPL",
+            "buy",
+            2,
+            100,
+            datetime(2026, 11, 24, 15, 0, tzinfo=timezone.utc),
+        ),
+    )
+
+    class Broker:
+        def __init__(self):
+            self.close_calls = 0
+
+        def close_position(self, symbol, request):
+            self.close_calls += 1
+            raise TimeoutError("close request response timed out")
+
+    broker = Broker()
+    manager = LivePortfolioManager(broker, logging.getLogger("flatten_ambiguous_close"), order_journal=journal)
+    manager.fetch_account_and_positions = lambda: (
+        1000.0,
+        1000.0,
+        1000.0,
+        [{"symbol": "AAPL", "side": "BUY", "quantity": "2"}],
+        [],
+        [],
+    )
+
+    remaining = manager.flatten_all(
+        sleep_fn=lambda _: None,
+        retry_delay=1,
+        max_wait_seconds=5,
+    )
+
+    assert remaining == ["UNKNOWN"]
+    assert broker.close_calls == 1
+
+
+def test_flatten_persistent_journal_timeout_fails_closed_within_budget(tmp_path):
+    import logging
+
+    from money_mintter.core.live_bot import LivePortfolioManager
+
+    journal = OrderLifecycleJournal(tmp_path / "order_lifecycle.jsonl")
+    manager = LivePortfolioManager(object(), logging.getLogger("flatten_retry"), order_journal=journal)
+    attempts = []
+    delays = []
+
+    def reconcile():
+        attempts.append(len(attempts) + 1)
+        manager.order_journal_healthy = False
+        manager.last_order_journal_reconciliation_error = TimeoutError("broker request timed out")
+        return False
+
+    manager.reconcile_order_journal = reconcile
+
+    remaining = manager.flatten_all(
+        sleep_fn=delays.append,
+        retry_delay=2,
+        max_wait_seconds=5,
+    )
+
+    assert remaining == ["UNKNOWN"]
+    assert len(attempts) == 3
+    assert sum(delays) == 5
+    assert manager.last_flatten_errors == 1
+
+
+def test_flatten_does_not_retry_non_transient_journal_failure(tmp_path):
+    import logging
+
+    from money_mintter.core.live_bot import LivePortfolioManager
+
+    journal = OrderLifecycleJournal(tmp_path / "order_lifecycle.jsonl")
+    manager = LivePortfolioManager(object(), logging.getLogger("flatten_retry"), order_journal=journal)
+    attempts = []
+    delays = []
+
+    def reconcile():
+        attempts.append(len(attempts) + 1)
+        manager.order_journal_healthy = False
+        manager.last_order_journal_reconciliation_error = ValueError("journal data is corrupt")
+        return False
+
+    manager.reconcile_order_journal = reconcile
+
+    remaining = manager.flatten_all(
+        sleep_fn=delays.append,
+        retry_delay=2,
+        max_wait_seconds=10,
+    )
+
+    assert remaining == ["UNKNOWN"]
+    assert len(attempts) == 1
+    assert delays == []
