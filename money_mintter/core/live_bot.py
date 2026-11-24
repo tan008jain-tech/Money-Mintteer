@@ -762,6 +762,7 @@ class LivePortfolioManager:
         self.stock_client = stock_client
         self.order_journal = order_journal
         self.order_journal_healthy = True
+        self.last_order_journal_reconciliation_error: Exception | None = None
         self.last_equity: float | None = None
         self.last_submit_failures = 0
         self.last_flatten_errors = 0
@@ -890,10 +891,12 @@ class LivePortfolioManager:
         journal = getattr(self, "order_journal", None)
         if journal is None:
             return True
+        self.last_order_journal_reconciliation_error = None
         try:
             events = journal.read_events()
         except Exception as exc:
             self.order_journal_healthy = False
+            self.last_order_journal_reconciliation_error = exc
             self.logger.critical(f"[Order Journal] Cannot read lifecycle journal; new entries will fail closed: {exc}")
             return False
 
@@ -942,6 +945,9 @@ class LivePortfolioManager:
                                 parent_id, GetOrderByIdRequest(nested=True)
                             )
                         except Exception as nested_exc:
+                            if is_connectivity_error(nested_exc):
+                                self.order_journal_healthy = False
+                                self.last_order_journal_reconciliation_error = nested_exc
                             self.logger.warning(
                                 f"[Order Journal] Could not retrieve nested bracket legs for "
                                 f"client_order_id={client_id}: {nested_exc}"
@@ -976,6 +982,8 @@ class LivePortfolioManager:
                             f"[Order Journal] Ambiguous client_order_id={client_id} not visible yet."
                         )
                     else:
+                        self.order_journal_healthy = False
+                        self.last_order_journal_reconciliation_error = exc
                         self.logger.warning(
                             f"[Order Journal] Could not reconcile client_order_id={client_id}: {exc}"
                         )
@@ -984,6 +992,7 @@ class LivePortfolioManager:
             events = journal.read_events()
         except Exception as exc:
             self.order_journal_healthy = False
+            self.last_order_journal_reconciliation_error = exc
             self.logger.critical(f"[Order Journal] Journal read failed during reconciliation: {exc}")
             return False
 
@@ -1105,6 +1114,7 @@ class LivePortfolioManager:
                         break
             except Exception as exc:
                 self.order_journal_healthy = False
+                self.last_order_journal_reconciliation_error = exc
                 self.logger.warning(
                     f"[Order Journal] Reconciliation failed for order_id={order_id}: {exc}; "
                     "new entries are disabled until journal reconciliation succeeds."
@@ -2016,8 +2026,31 @@ class LivePortfolioManager:
             return True
 
         def _refresh_owned_records() -> dict[str, dict[str, Any]]:
-            if not self.reconcile_order_journal():
-                raise RuntimeError("order journal reconciliation is unhealthy")
+            # Reconciliation is read-only. Retry only classified transient broker/network
+            # failures, using the existing flatten deadline. Never infer ownership from
+            # stale journal state when the broker cannot be queried.
+            while True:
+                if max(time.monotonic() - start_time, total_slept) >= max_wait_seconds:
+                    raise RuntimeError(
+                        "order journal reconciliation exhausted the flatten time budget"
+                    ) from getattr(self, "last_order_journal_reconciliation_error", None)
+                if self.reconcile_order_journal():
+                    break
+                reconciliation_error = getattr(
+                    self, "last_order_journal_reconciliation_error", None
+                )
+                if (
+                    reconciliation_error is None
+                    or not is_connectivity_error(reconciliation_error)
+                    or not _sleep_before_retry()
+                ):
+                    raise RuntimeError(
+                        "order journal reconciliation is unhealthy"
+                    ) from reconciliation_error
+                self.logger.warning(
+                    "[Owned Flatten] Transient broker/journal reconciliation failure; "
+                    f"retrying within the flatten time budget: {reconciliation_error}"
+                )
             legacy_close_ids = journal.unowned_legacy_close_order_ids()
             if legacy_close_ids:
                 raise RuntimeError(
@@ -2044,13 +2077,6 @@ class LivePortfolioManager:
                     raise RuntimeError(f"Invalid broker position snapshot for {position!r}")
                 actual[symbol] = quantity if side == "BUY" else -quantity
             return actual
-
-        try:
-            _refresh_owned_records()
-        except Exception as exc:
-            self.last_flatten_errors += 1
-            self.logger.critical(f"[Owned Flatten] Initial ownership reconciliation failed: {exc}")
-            return ["UNKNOWN"]
 
         while True:
             elapsed = max(time.monotonic() - start_time, total_slept)
