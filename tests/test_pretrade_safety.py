@@ -197,7 +197,243 @@ def test_owned_flatten_cancels_mm_bracket_and_closes_only_mm_filled_quantity(tmp
     assert journal.owned_position_quantities() == {}
 
 
+def test_owned_flatten_retries_transient_reconciliation_then_closes_only_mm_quantity(tmp_path):
+    journal = _owned_journal(tmp_path, quantity="5")
+    broker = FakeOwnedBroker(actual_quantity="25")
+    original_get_order = broker.get_order_by_id
+    timed_out = False
+
+    def get_order_with_one_transient_timeout(order_id):
+        nonlocal timed_out
+        if order_id == "mm-take-profit" and not timed_out:
+            timed_out = True
+            raise TimeoutError("temporary broker order lookup timeout")
+        return original_get_order(order_id)
+
+    broker.get_order_by_id = get_order_with_one_transient_timeout
+    manager = LivePortfolioManager(
+        broker, logging.getLogger("owned_flatten_retry"), order_journal=journal
+    )
+
+    remaining = manager.flatten_all(
+        sleep_fn=lambda _: None, max_wait_seconds=10, retry_delay=1
+    )
+
+    assert timed_out is True
+    assert remaining == []
+    assert broker.cancel_calls == ["mm-take-profit", "mm-stop-loss"]
+    assert broker.close_calls == [("AAPL", "5")]
+    assert float(broker.actual_quantity) == 20.0
+    assert broker.manual_gtc_order.status == "new"
+    assert journal.owned_position_quantities() == {}
+
+
 def test_owned_flatten_leaves_untracked_manual_holdings_and_gtc_orders_untouched(tmp_path):
+    from money_mintter.core.live_bot import LivePortfolioManager
+    from money_mintter.core.order_journal import OrderLifecycleJournal
+
+    journal = OrderLifecycleJournal(tmp_path / "empty-order-lifecycle.jsonl")
+    broker = FakeOwnedBroker(actual_quantity="25")
+    manager = LivePortfolioManager(
+        broker, logging.getLogger("manual_holdings"), order_journal=journal
+    )
+
+    remaining = manager.flatten_all(
+        sleep_fn=lambda _: None, max_wait_seconds=2, retry_delay=1
+    )
+
+    assert remaining == []
+    assert broker.close_calls == []
+    assert broker.cancel_calls == []
+    assert broker.actual_quantity == "25"
+    assert broker.manual_gtc_order.status == "new"
+
+
+def test_owned_flatten_fails_closed_when_account_quantity_conflicts_with_mm_ledger(tmp_path):
+    from money_mintter.core.live_bot import LivePortfolioManager
+
+    journal = _owned_journal(tmp_path, quantity="5")
+    broker = FakeOwnedBroker(actual_quantity="3")
+    manager = LivePortfolioManager(
+        broker, logging.getLogger("owned_quantity_mismatch"), order_journal=journal
+    )
+
+    remaining = manager.flatten_all(
+        sleep_fn=lambda _: None, max_wait_seconds=2, retry_delay=1
+    )
+
+    assert remaining == ["AAPL"]
+    assert broker.close_calls == []
+    assert broker.actual_quantity == "3"
+
+
+def test_unjournaled_positions_and_manual_gtc_are_not_touched(tmp_path):
+    from money_mintter.core.live_bot import LivePortfolioManager
+
+    broker = FakeOwnedBroker(actual_quantity="25")
+    manager = LivePortfolioManager(broker, logging.getLogger("missing_journal"))
+
+    remaining = manager.flatten_all(
+        sleep_fn=lambda _: None, max_wait_seconds=2, retry_delay=1
+    )
+
+    assert remaining == ["AAPL", "MSFT"]
+    assert broker.close_calls == []
+    assert broker.cancel_calls == []
+    assert broker.actual_quantity == "25"
+    assert broker.manual_gtc_order.status == "new"
+
+
+def _session_bot_for_snapshot_test(
+    *,
+    account_snapshot_error: Exception | None = None,
+):
+    from money_mintter.core.live_bot import LiveMarketBot
+
+    bot = LiveMarketBot.__new__(LiveMarketBot)
+    bot.logger = logging.getLogger("final_snapshot_test")
+    bot.settings = Settings()
+    moment = datetime(2026, 11, 13, 20, 0, tzinfo=timezone.utc)
+    bot.trading_client = SimpleNamespace(
+        get_clock=lambda: SimpleNamespace(
+            is_open=True,
+            next_open=moment - __import__("datetime").timedelta(hours=6),
+            next_close=moment + __import__("datetime").timedelta(minutes=5),
+        )
+    )
+
+    class Portfolio:
+        last_equity = 2071.08
+        last_flatten_errors = 0
+
+        def flatten_all(self, *args, **kwargs):
+            return []
+
+        def fetch_account_and_positions(self):
+            if account_snapshot_error is not None:
+                raise account_snapshot_error
+            return (
+                1200.00,
+                2071.26,
+                2071.26,
+                [],
+                [],
+                set(),
+            )
+
+        def fetch_open_order_symbols(self):
+            return set()
+
+    bot.portfolio_manager = Portfolio()
+    bot.kill_switch = SimpleNamespace(tripped=False, reason="")
+    bot.latest_state = {
+        "equity": 2071.08,
+        "cash": 1000.00,
+        "open_positions": [],
+        "final_account_snapshot_verified": False,
+    }
+    return bot, moment
+
+
+def test_session_summary_uses_post_flatten_broker_equity(caplog):
+    bot, moment = _session_bot_for_snapshot_test()
+
+    with caplog.at_level(logging.INFO):
+        result = bot.run_session(
+            now_fn=lambda: moment,
+            sleep_fn=lambda _: None,
+        )
+
+    assert result["status"] == "completed"
+    assert bot.latest_state["equity"] == pytest.approx(2071.26)
+    assert bot.latest_state["cash"] == pytest.approx(1200.00)
+    assert bot.latest_state["final_account_snapshot_verified"] is True
+    assert "[Final Broker Snapshot] equity=$2071.26" in caplog.text
+    assert "final_account_snapshot=verified" in caplog.text
+
+
+def test_session_cannot_complete_when_post_flatten_snapshot_fails(caplog):
+    bot, moment = _session_bot_for_snapshot_test(
+        account_snapshot_error=RuntimeError("broker snapshot unavailable")
+    )
+
+    with caplog.at_level(logging.CRITICAL):
+        result = bot.run_session(
+            now_fn=lambda: moment,
+            sleep_fn=lambda _: None,
+        )
+
+    assert result["status"] == "flatten_incomplete"
+    assert result["remaining"] == ["UNKNOWN"]
+    assert bot.latest_state["final_account_snapshot_verified"] is False
+    assert bot.portfolio_manager.last_flatten_errors == 1
+    assert "Unable to verify final broker account/positions/orders snapshot" in caplog.text
+
+
+def test_quote_spread_gate_rejects_wide_iex_reference_quote():
+    manager = LivePortfolioManager(
+        object(),
+        logging.getLogger("wide_quote_spread"),
+        stock_client=FakeQuoteClient(bid=99.50, ask=102.00),
+    )
+
+    # Signal is aligned with the buy-side ask, so only the independent spread
+    # guard should reject this quote.
+    result = manager._get_executable_price(
+        "AAPL",
+        Side.BUY,
+        102.00,
+        Settings(),
+    )
+
+    assert result is None
+
+
+def test_quote_spread_gate_accepts_quote_at_configured_boundary():
+    manager = LivePortfolioManager(
+        object(),
+        logging.getLogger("quote_spread_boundary"),
+        stock_client=FakeQuoteClient(bid=99.50, ask=100.50),
+    )
+
+    result = manager._get_executable_price(
+        "AAPL",
+        Side.BUY,
+        100.50,
+        Settings(),
+    )
+
+    assert result == pytest.approx(100.50)
+
+
+def test_quote_spread_limit_is_configurable_and_validated(monkeypatch):
+    monkeypatch.setenv("MAX_QUOTE_SPREAD_PCT", "2")
+    assert Settings().max_quote_spread_pct == pytest.approx(0.02)
+
+    with pytest.raises(ValueError, match="MAX_QUOTE_SPREAD_PCT"):
+        Settings(max_quote_spread_pct=0.0)
+
+    with pytest.raises(ValueError, match="MAX_QUOTE_SPREAD_PCT"):
+        Settings(max_quote_spread_pct=1.01)
+
+def test_owned_flatten_closes_only_mm_owned_short_quantity(tmp_path):
+    journal = _owned_journal(tmp_path, side="sell_short", quantity="5")
+    broker = FakeOwnedBroker(actual_quantity="-25")
+    manager = LivePortfolioManager(
+        broker, logging.getLogger("owned_short_flatten"), order_journal=journal
+    )
+
+    remaining = manager.flatten_all(
+        sleep_fn=lambda _: None, max_wait_seconds=10, retry_delay=1
+    )
+
+    assert remaining == []
+    assert broker.cancel_calls == ["mm-take-profit", "mm-stop-loss"]
+    assert broker.close_calls == [("AAPL", "5")]
+    assert float(broker.actual_quantity) == -20.0
+    assert broker.manual_gtc_order.status == "new"
+    assert "manual-gtc-order" not in broker.cancel_calls
+    assert journal.owned_position_quantities() == {}
     from money_mintter.core.live_bot import LivePortfolioManager
     from money_mintter.core.order_journal import OrderLifecycleJournal
 
