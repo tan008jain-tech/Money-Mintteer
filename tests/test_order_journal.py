@@ -1016,3 +1016,40 @@ def test_session_summary_marks_unsupported_fill_side_as_incomplete(tmp_path):
     assert summary["realized_gross_pnl_usd"] == 0.0
     assert summary["unattributed_fill_count"] == 1
     assert summary["pnl_coverage_status"] == "open_or_unmatched_records"
+
+
+def test_session_summary_marks_fill_without_parseable_timestamp_as_incomplete(tmp_path):
+    journal = OrderLifecycleJournal(tmp_path / "untimed-fill.jsonl")
+    start = datetime(2026, 11, 19, 14, 0, tzinfo=timezone.utc)
+    end = start + timedelta(hours=1)
+    journal.append(
+        "entry_order_submitted",
+        parent_order={"order_id": "entry", "order_role": "entry"},
+        child_orders=[{"order_id": "exit", "order_role": "take_profit"}],
+    )
+    journal.append(
+        "fill",
+        **_fill("entry-fill", "entry", "AAPL", "buy", 2, 100, start - timedelta(seconds=1)),
+    )
+    journal.append(
+        "fill",
+        **_fill("exit-fill", "exit", "AAPL", "sell", 2, 105, start + timedelta(seconds=5)),
+    )
+    journal.append(
+        "fill",
+        fill_id="untimed-fill",
+        order_id="manual-or-unknown",
+        symbol="MSFT",
+        side="buy",
+        qty="1",
+        price="50",
+        transaction_time="not-a-timestamp",
+    )
+
+    summary = journal.summarize_session(start, end)
+
+    assert summary["realized_gross_pnl_usd"] == 10.0
+    assert summary["matched_exit_quantity"] == 2.0
+    assert summary["unmatched_exit_quantity"] == 0.0
+    assert summary["unattributed_fill_count"] == 1
+    assert summary["pnl_coverage_status"] == "open_or_unmatched_records"
