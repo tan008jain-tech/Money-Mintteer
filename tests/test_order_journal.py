@@ -125,7 +125,7 @@ def test_session_summary_handles_short_pnl_and_unmatched_exit(tmp_path):
         child_orders=[{"order_id": "cover", "order_role": "stop_loss"}],
     )
     journal.append(
-        "fill", **_fill("s1", "short-entry", "MSFT", "sell", 5, 200, start - timedelta(seconds=1))
+        "fill", **_fill("s1", "short-entry", "MSFT", "sell_short", 5, 200, start - timedelta(seconds=1))
     )
     journal.append(
         "fill", **_fill("s2", "cover", "MSFT", "buy", 5, 196, start + timedelta(seconds=5))
@@ -967,3 +967,52 @@ def test_flatten_does_not_retry_non_transient_journal_failure(tmp_path):
     assert remaining == ["UNKNOWN"]
     assert len(attempts) == 1
     assert delays == []
+
+
+def test_session_summary_handles_short_loss_from_sell_short_activity(tmp_path):
+    journal = OrderLifecycleJournal(tmp_path / "short-loss.jsonl")
+    start = datetime(2026, 11, 19, 14, 0, tzinfo=timezone.utc)
+    end = start + timedelta(hours=1)
+    journal.append(
+        "entry_order_submitted",
+        parent_order={"order_id": "short-entry", "order_role": "entry"},
+        child_orders=[{"order_id": "cover", "order_role": "stop_loss"}],
+    )
+    journal.append(
+        "fill",
+        **_fill("short-loss-entry", "short-entry", "NVDA", "sell_short", 3, 200, start - timedelta(seconds=1)),
+    )
+    journal.append(
+        "fill",
+        **_fill("short-loss-cover", "cover", "NVDA", "buy", 3, 207, start + timedelta(seconds=5)),
+    )
+
+    summary = journal.summarize_session(start, end)
+
+    assert summary["realized_gross_pnl_usd"] == -21.0
+    assert summary["matched_exit_quantity"] == 3.0
+    assert summary["unmatched_exit_quantity"] == 0.0
+    assert summary["open_entry_quantity_after_session"] == 0.0
+    assert summary["unattributed_fill_count"] == 0
+    assert summary["pnl_coverage_status"] == "complete_for_recorded_closed_trades"
+
+
+def test_session_summary_marks_unsupported_fill_side_as_incomplete(tmp_path):
+    journal = OrderLifecycleJournal(tmp_path / "unsupported-side.jsonl")
+    start = datetime(2026, 11, 19, 14, 0, tzinfo=timezone.utc)
+    end = start + timedelta(hours=1)
+    journal.append(
+        "entry_order_submitted",
+        parent_order={"order_id": "entry", "order_role": "entry"},
+        child_orders=[{"order_id": "exit", "order_role": "stop_loss"}],
+    )
+    journal.append(
+        "fill",
+        **_fill("unsupported-fill", "entry", "AAPL", "cross", 2, 100, start + timedelta(seconds=1)),
+    )
+
+    summary = journal.summarize_session(start, end)
+
+    assert summary["realized_gross_pnl_usd"] == 0.0
+    assert summary["unattributed_fill_count"] == 1
+    assert summary["pnl_coverage_status"] == "open_or_unmatched_records"
