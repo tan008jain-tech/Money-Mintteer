@@ -982,8 +982,9 @@ class LivePortfolioManager:
                             f"[Order Journal] Ambiguous client_order_id={client_id} not visible yet."
                         )
                     else:
-                        self.order_journal_healthy = False
                         self.last_order_journal_reconciliation_error = exc
+                        if is_connectivity_error(exc):
+                            self.order_journal_healthy = False
                         self.logger.warning(
                             f"[Order Journal] Could not reconcile client_order_id={client_id}: {exc}"
                         )
