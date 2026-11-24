@@ -346,6 +346,7 @@ class MarketScanner:
         self.last_scan_errors = 0
         self.last_scan_connectivity_errors = 0
         self.ict_attempts = 0
+        self.ict_deferred = 0
         self.ict_acquisition_successes = 0
         self.ict_evaluation_successes = 0
         self.ict_errors = 0
@@ -657,6 +658,20 @@ class MarketScanner:
                     self.logger.error(f"CRITICAL: Symbol analysis error for {clean_symbol}: {sym_ex}")
             return analyzed_candidates, dashboard_stocks
         else:
+            # The opening 09:30-09:35 ET five-minute candle is not complete yet.
+            # Defer production ICT rather than treating the expected absence of a
+            # current-session five-minute bar as a symbol acquisition failure.
+            ny_now = now_utc.astimezone(ZoneInfo("America/New_York"))
+            if dt_time(9, 30) <= ny_now.time() < dt_time(9, 35):
+                self.ict_deferred = len(layer4_selected)
+                if self.ict_deferred:
+                    self.logger.info(
+                        "[ICT Pipeline] Regular-session warm-up: first complete 5m bar "
+                        "is not available until 09:35 ET; deferring "
+                        f"{self.ict_deferred} selected symbols without ICT acquisition."
+                    )
+                return tuple(), dashboard_stocks
+
             dedup = dedup_tracker if dedup_tracker is not None else ICTDeduplicationTracker()
             for item in layer4_selected:
                 clean_symbol = item.symbol
@@ -2690,6 +2705,7 @@ class LiveMarketBot:
             self.logger.info(
                 f"[ICT Cycle Summary] l2_eligible={getattr(self.scanner, 'last_l2_eligible', 0)} "
                 f"l4_selected={getattr(self.scanner, 'last_l4_selected', 0)} ict_attempts={ict_attempts} "
+                f"ict_deferred={getattr(self.scanner, 'ict_deferred', 0)} "
                 f"acquisition_successes={getattr(self.scanner, 'ict_acquisition_successes', 0)} evaluation_successes={getattr(self.scanner, 'ict_evaluation_successes', 0)} "
                 f"ict_errors={ict_errors} raw_entries={getattr(self.scanner, 'ict_raw_candidates', 0)} "
                 f"entry_mode_passes={getattr(self.scanner, 'ict_entry_mode_passes', 0)} instructions={getattr(self.scanner, 'ict_instructions', 0)} "
