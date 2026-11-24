@@ -539,12 +539,24 @@ class OrderLifecycleJournal:
             side = str(event.get("side", "")).strip().lower()
             quantity = abs(_decimal(event.get("qty")))
             price = _decimal(event.get("price"))
-            if not symbol or side not in {"buy", "sell"} or quantity <= 0 or price <= 0:
+            side_sign = TRADE_ACTIVITY_SIDE_SIGNS.get(side)
+            if (
+                not symbol
+                or side_sign is None
+                or not quantity.is_finite()
+                or quantity <= 0
+                or not price.is_finite()
+                or price <= 0
+            ):
+                # Do not silently omit a broker-reported fill with an unknown side.
+                # Its direction is required to calculate matched P&L safely.
+                if start <= fill_time <= end:
+                    unattributed_fill_count += 1
                 continue
             if start <= fill_time <= end:
                 session_fill_count += 1
 
-            signed_quantity = quantity if side == "buy" else -quantity
+            signed_quantity = quantity * side_sign
             lots = inventory.setdefault(symbol, [])
             if role == "entry":
                 lots.append({
