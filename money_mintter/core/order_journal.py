@@ -519,6 +519,9 @@ class OrderLifecycleJournal:
             role = order_roles.get(order_id, "unknown")
             fill_time = self._event_time(event)
             if fill_time is None:
+                # Without a trustworthy timestamp, the fill cannot be assigned to
+                # the reporting window or safely excluded from it.
+                unattributed_fill_count += 1
                 continue
             if role not in {"entry", *EXIT_ROLES}:
                 if start <= fill_time <= end:
