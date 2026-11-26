@@ -36,13 +36,56 @@ def _value(item: Any, name: str, default: Any = None) -> Any:
 
 
 def _plain(value: Any) -> Any:
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
+    if value is None:
+        return None
     if isinstance(value, datetime):
         return value.isoformat()
+    # Alpaca's enums inherit from str, so extract Enum.value before the
+    # primitive-string check. Otherwise str(enum_member) is "OrderType.LIMIT".
     if hasattr(value, "value"):
         return value.value
+    if isinstance(value, (str, int, float, bool)):
+        return value
     return str(value)
+
+
+def _normalized_text(value: Any) -> str:
+    plain = _plain(value)
+    return str(plain).strip().lower() if plain is not None else ""
+
+
+def _infer_bracket_child_role(parent: dict[str, Any], child: dict[str, Any]) -> str:
+    """Recover a missing role only from a fully linked, structurally valid bracket leg."""
+    parent_id = str(parent.get("order_id") or "").strip()
+    child_parent_id = str(child.get("parent_order_id") or "").strip()
+    if not parent_id or child_parent_id != parent_id:
+        return "unknown"
+
+    if (
+        _normalized_text(parent.get("order_class")) != "bracket"
+        or _normalized_text(child.get("order_class")) != "bracket"
+    ):
+        return "unknown"
+
+    parent_symbol = _normalized_text(parent.get("symbol"))
+    child_symbol = _normalized_text(child.get("symbol"))
+    if not parent_symbol or child_symbol != parent_symbol:
+        return "unknown"
+
+    parent_side = _normalized_text(parent.get("side"))
+    child_side = _normalized_text(child.get("side"))
+    expected_child_side = {"buy": "sell", "sell": "buy"}.get(parent_side)
+    if expected_child_side is None or child_side != expected_child_side:
+        return "unknown"
+
+    child_type = _normalized_text(child.get("order_type"))
+    limit_price = child.get("limit_price")
+    stop_price = child.get("stop_price")
+    if child_type == "limit" and limit_price is not None and stop_price is None:
+        return "take_profit"
+    if child_type == "stop" and stop_price is not None and limit_price is None:
+        return "stop_loss"
+    return "unknown"
 
 
 def _decimal(value: Any) -> Decimal:
@@ -231,6 +274,11 @@ class OrderLifecycleJournal:
                     if snapshot_tif != "day":
                         excluded_client_ids.add(client_order_id)
                     role = "entry" if index == 0 else str(snapshot.get("order_role") or "unknown")
+                    if index > 0 and role == "unknown":
+                        # Older journals persisted raw order_type/parent linkage but
+                        # recorded take-profit legs as unknown. Recover only when both
+                        # snapshots prove a linked DAY bracket with opposing sides.
+                        role = _infer_bracket_child_role(parent, snapshot)
                     records[order_id] = {
                         **records.get(order_id, {}),
                         **snapshot,

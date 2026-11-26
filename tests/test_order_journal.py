@@ -5,6 +5,8 @@ from decimal import Decimal
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+from alpaca.trading.enums import OrderType
+
 from money_mintter.core.order_journal import OrderLifecycleJournal, snapshot_order
 
 
@@ -68,6 +70,168 @@ def test_snapshot_order_preserves_parent_child_role_and_identifiers():
     assert child_snapshot["order_id"] == "tp-id"
     assert child_snapshot["order_role"] == "take_profit"
     assert child_snapshot["parent_order_id"] == "parent-id"
+
+
+def test_snapshot_order_normalizes_alpaca_string_enum_order_types():
+    limit_order = SimpleNamespace(
+        id="enum-tp",
+        symbol="AAPL",
+        side="sell",
+        type=OrderType.LIMIT,
+        order_class="bracket",
+        status="new",
+        qty="1",
+        filled_qty="0",
+        limit_price="105.00",
+        stop_price=None,
+        group_role=None,
+    )
+    stop_order = SimpleNamespace(
+        id="enum-sl",
+        symbol="AAPL",
+        side="sell",
+        type=OrderType.STOP,
+        order_class="bracket",
+        status="new",
+        qty="1",
+        filled_qty="0",
+        limit_price=None,
+        stop_price="95.00",
+        group_role=None,
+    )
+
+    limit_snapshot = snapshot_order(limit_order, parent_order_id="parent-id")
+    stop_snapshot = snapshot_order(stop_order, parent_order_id="parent-id")
+
+    assert type(limit_snapshot["order_type"]) is str
+    assert limit_snapshot["order_type"] == "limit"
+    assert limit_snapshot["order_role"] == "take_profit"
+    assert type(stop_snapshot["order_type"]) is str
+    assert stop_snapshot["order_type"] == "stop"
+    assert stop_snapshot["order_role"] == "stop_loss"
+
+
+def test_owned_order_records_recovers_legacy_bracket_child_roles_conservatively(tmp_path):
+    import pytest
+
+    journal = OrderLifecycleJournal(tmp_path / "order_lifecycle.jsonl")
+    cdns_parent = {
+        "order_id": "cdns-entry",
+        "client_order_id": "mm-ict-cdns",
+        "symbol": "CDNS",
+        "side": "buy",
+        "order_class": "bracket",
+        "status": "filled",
+        "qty": "1",
+        "filled_qty": "1",
+        "time_in_force": "day",
+        "order_role": "entry",
+    }
+    cdns_take_profit = {
+        "order_id": "cdns-tp",
+        "symbol": "CDNS",
+        "side": "sell",
+        "order_type": "limit",
+        "order_class": "bracket",
+        "status": "filled",
+        "qty": "1",
+        "filled_qty": "1",
+        "limit_price": "291.27",
+        "parent_order_id": "cdns-entry",
+        "order_role": "unknown",
+    }
+    cdns_stop = {
+        "order_id": "cdns-sl",
+        "symbol": "CDNS",
+        "side": "sell",
+        "order_type": "stop",
+        "order_class": "bracket",
+        "status": "canceled",
+        "qty": "1",
+        "filled_qty": "0",
+        "stop_price": "277.22",
+        "parent_order_id": "cdns-entry",
+        "order_role": "unknown",
+    }
+    unverified_limit = {
+        "order_id": "unverified-limit",
+        "symbol": "CDNS",
+        "side": "sell",
+        "order_type": "limit",
+        "order_class": "simple",
+        "status": "new",
+        "qty": "1",
+        "filled_qty": "0",
+        "limit_price": "300.00",
+        "parent_order_id": "cdns-entry",
+        "order_role": "unknown",
+    }
+    journal.append(
+        "entry_order_submitted",
+        client_order_id="mm-ict-cdns",
+        parent_order=cdns_parent,
+        child_orders=[cdns_take_profit, cdns_stop, unverified_limit],
+    )
+    # A later legacy order_state snapshot also carried the incorrect role.
+    journal.append(
+        "order_state",
+        order={**cdns_take_profit, "status": "filled", "filled_qty": "1", "order_role": "unknown"},
+    )
+
+    aph_parent = {
+        "order_id": "aph-entry",
+        "client_order_id": "mm-ict-aph",
+        "symbol": "APH",
+        "side": "sell",
+        "order_class": "bracket",
+        "status": "filled",
+        "qty": "8",
+        "filled_qty": "8",
+        "time_in_force": "day",
+        "order_role": "entry",
+    }
+    aph_take_profit = {
+        "order_id": "aph-tp",
+        "symbol": "APH",
+        "side": "buy",
+        "order_type": "limit",
+        "order_class": "bracket",
+        "status": "canceled",
+        "qty": "8",
+        "filled_qty": "0",
+        "limit_price": "68.03",
+        "parent_order_id": "aph-entry",
+        "order_role": "unknown",
+    }
+    journal.append(
+        "entry_order_submitted",
+        client_order_id="mm-ict-aph",
+        parent_order=aph_parent,
+        child_orders=[aph_take_profit],
+    )
+
+    records = journal.owned_order_records()
+
+    assert records["cdns-tp"]["order_role"] == "take_profit"
+    assert records["cdns-tp"]["status"] == "filled"
+    assert records["cdns-sl"]["order_role"] == "stop_loss"
+    assert records["aph-tp"]["order_role"] == "take_profit"
+    assert records["unverified-limit"]["order_role"] == "unknown"
+
+    journal.append(
+        "fill",
+        **_fill(
+            "unverified-fill",
+            "unverified-limit",
+            "CDNS",
+            "sell",
+            1,
+            300.00,
+            datetime.now(timezone.utc),
+        ),
+    )
+    with pytest.raises(ValueError, match="unknown order role"):
+        journal.owned_position_quantities()
 
 
 def test_session_summary_matches_partial_long_fills_and_separates_fees(tmp_path):
@@ -1053,3 +1217,198 @@ def test_session_summary_marks_fill_without_parseable_timestamp_as_incomplete(tm
     assert summary["unmatched_exit_quantity"] == 0.0
     assert summary["unattributed_fill_count"] == 1
     assert summary["pnl_coverage_status"] == "open_or_unmatched_records"
+
+
+def test_flatten_recovers_filled_legacy_take_profit_and_closes_residual_bito(tmp_path):
+    import logging
+
+    from money_mintter.core.live_bot import LivePortfolioManager
+
+    journal = OrderLifecycleJournal(tmp_path / "order_lifecycle.jsonl")
+    now = datetime(2026, 11, 25, 18, 0, tzinfo=timezone.utc)
+
+    cdns_parent = {
+        "order_id": "cdns-entry",
+        "client_order_id": "mm-ict-cdns",
+        "symbol": "CDNS",
+        "side": "buy",
+        "order_type": "market",
+        "order_class": "bracket",
+        "status": "filled",
+        "time_in_force": "day",
+        "qty": "1",
+        "filled_qty": "1",
+        "order_role": "entry",
+    }
+    cdns_take_profit = {
+        "order_id": "953d960a-47bd-42ee-bd34-cabcd7ac4834",
+        "symbol": "CDNS",
+        "side": "sell",
+        "order_type": "limit",
+        "order_class": "bracket",
+        "status": "filled",
+        "time_in_force": "day",
+        "qty": "1",
+        "filled_qty": "1",
+        "limit_price": "291.27",
+        "parent_order_id": "cdns-entry",
+        "order_role": "unknown",
+    }
+    cdns_stop = {
+        "order_id": "cdns-stop",
+        "symbol": "CDNS",
+        "side": "sell",
+        "order_type": "stop",
+        "order_class": "bracket",
+        "status": "canceled",
+        "time_in_force": "day",
+        "qty": "1",
+        "filled_qty": "0",
+        "stop_price": "277.22",
+        "parent_order_id": "cdns-entry",
+        "order_role": "stop_loss",
+    }
+    journal.append(
+        "entry_order_submitted",
+        client_order_id="mm-ict-cdns",
+        parent_order=cdns_parent,
+        child_orders=[cdns_take_profit, cdns_stop],
+    )
+    journal.append(
+        "fill",
+        **_fill("cdns-entry-fill", "cdns-entry", "CDNS", "buy", 1, 281.86, now),
+    )
+    journal.append(
+        "fill",
+        **_fill("cdns-tp-fill", cdns_take_profit["order_id"], "CDNS", "sell", 1, 291.36, now),
+    )
+
+    bito_parent = {
+        "order_id": "bito-entry",
+        "client_order_id": "mm-ict-bito",
+        "symbol": "BITO",
+        "side": "buy",
+        "order_type": "market",
+        "order_class": "bracket",
+        "status": "filled",
+        "time_in_force": "day",
+        "qty": "9",
+        "filled_qty": "9",
+        "order_role": "entry",
+    }
+    bito_take_profit = {
+        "order_id": "bito-tp",
+        "symbol": "BITO",
+        "side": "sell",
+        "order_type": "limit",
+        "order_class": "bracket",
+        "status": "expired",
+        "time_in_force": "day",
+        "qty": "9",
+        "filled_qty": "0",
+        "limit_price": "16.66",
+        "parent_order_id": "bito-entry",
+        "order_role": "unknown",
+    }
+    bito_stop = {
+        "order_id": "bito-stop",
+        "symbol": "BITO",
+        "side": "sell",
+        "order_type": "stop",
+        "order_class": "bracket",
+        "status": "canceled",
+        "time_in_force": "day",
+        "qty": "9",
+        "filled_qty": "0",
+        "stop_price": "14.39",
+        "parent_order_id": "bito-entry",
+        "order_role": "stop_loss",
+    }
+    journal.append(
+        "entry_order_submitted",
+        client_order_id="mm-ict-bito",
+        parent_order=bito_parent,
+        child_orders=[bito_take_profit, bito_stop],
+    )
+    journal.append(
+        "fill",
+        **_fill("bito-entry-fill", "bito-entry", "BITO", "buy", 9, 15.47, now),
+    )
+
+    close_time = now + timedelta(minutes=1)
+    close_order = SimpleNamespace(
+        id="bito-close-order",
+        client_order_id="mm-cleanup-bito-close",
+        symbol="BITO",
+        side="sell",
+        type="market",
+        order_class="simple",
+        status="filled",
+        time_in_force="day",
+        qty="9",
+        filled_qty="9",
+        filled_avg_price="15.40",
+        submitted_at=close_time,
+        filled_at=close_time,
+        group_id=None,
+        group_role=None,
+        limit_price=None,
+        stop_price=None,
+    )
+    close_activity = SimpleNamespace(
+        id="bito-close-fill",
+        order_id="bito-close-order",
+        symbol="BITO",
+        side="sell",
+        qty="9",
+        price="15.40",
+        transaction_time=close_time,
+        type="fill",
+        order_status="filled",
+        cum_qty="9",
+        leaves_qty="0",
+    )
+
+    class Broker:
+        def __init__(self):
+            self.close_requests = []
+
+        def close_position(self, symbol, request):
+            self.close_requests.append((symbol, request.qty))
+            return close_order
+
+        def get_order_by_id(self, order_id):
+            assert order_id == "bito-close-order"
+            return close_order
+
+        def get(self, path, params):
+            assert path == "/account/activities/FILL"
+            assert params["order_id"] == "bito-close-order"
+            return [close_activity]
+
+    broker = Broker()
+    manager = LivePortfolioManager(
+        broker,
+        logging.getLogger("legacy_bracket_role_flatten"),
+        order_journal=journal,
+    )
+    manager.fetch_account_and_positions = lambda: (
+        1000.0,
+        1000.0,
+        1000.0,
+        [{"symbol": "BITO", "side": "BUY", "quantity": "9"}],
+        [],
+        [],
+    )
+
+    remaining = manager.flatten_all(
+        sleep_fn=lambda _: None,
+        retry_delay=1,
+        max_wait_seconds=10,
+    )
+
+    assert remaining == []
+    assert broker.close_requests == [("BITO", "9")]
+    assert journal.owned_position_quantities() == {}
+    assert manager.last_flatten_errors == 0
+
