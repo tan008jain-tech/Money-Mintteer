@@ -463,6 +463,7 @@ def test_filled_close_order_waits_for_position_snapshot_to_catch_up():
     assert broker.close_all_calls == [True]
     assert float(broker.actual_quantity) == 0.0
 
+
 def test_mixed_per_symbol_close_results_retry_only_the_failed_position():
     class MixedResultBroker(FakeOwnedBroker):
         def __init__(self):
@@ -538,6 +539,46 @@ def test_mixed_per_symbol_close_results_retry_only_the_failed_position():
     assert manager.last_flatten_errors == 1
 
 
+
+def test_active_close_order_id_blocks_completion_even_if_open_order_list_lags():
+    class HiddenActiveOrderBroker(FakeOwnedBroker):
+        def get_orders(self, request):
+            return []
+
+        def close_all_positions(self, cancel_orders=None):
+            self.close_all_calls.append(cancel_orders)
+            if cancel_orders:
+                for order in self.orders.values():
+                    if str(getattr(order, "status", "")).lower() in self.ACTIVE_STATUSES:
+                        order.status = "canceled"
+            # Position snapshot has moved to flat, but the close order is still active.
+            self.actual_quantity = "0"
+            self.close_order = SimpleNamespace(
+                id="mm-close-order",
+                symbol="AAPL",
+                status="new",
+                qty="25",
+                filled_qty="0",
+            )
+            self.orders["mm-close-order"] = self.close_order
+            return [SimpleNamespace(
+                status=200,
+                symbol="AAPL",
+                order_id="mm-close-order",
+                body=self.close_order,
+            )]
+
+    broker = HiddenActiveOrderBroker(actual_quantity="25")
+    manager = LivePortfolioManager(broker, logging.getLogger("flatten_active_id_hidden"))
+
+    remaining = manager.flatten_all(
+        sleep_fn=lambda _: None, max_wait_seconds=2, retry_delay=1
+    )
+
+    assert remaining == ["AAPL"]
+    assert broker.close_all_calls == [True]
+    assert float(broker.actual_quantity) == 0.0
+
 def test_success_response_without_order_id_is_not_retried_blindly():
     class MissingOrderIdBroker(FakeOwnedBroker):
         def close_all_positions(self, cancel_orders=None):
@@ -563,6 +604,7 @@ def test_success_response_without_order_id_is_not_retried_blindly():
     assert remaining == ["AAPL"]
     assert broker.close_all_calls == [True]
     assert float(broker.actual_quantity) == 25.0
+
 
 def _session_bot_for_snapshot_test(
     *,
