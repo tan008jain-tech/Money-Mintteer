@@ -1132,3 +1132,103 @@ def test_order_journal_reconciliation_recovers_and_appends_fill_once(tmp_path):
     assert len(fills) == 1
     assert fills[0]["fill_id"] == "entry-fill-1"
     assert journal.owned_position_quantities() == {"AAPL": Decimal("1")}
+
+
+def test_legacy_unknown_take_profit_role_survives_order_state_for_exit_and_pnl(tmp_path):
+    journal = OrderLifecycleJournal(tmp_path / "order_lifecycle.jsonl")
+    start = datetime(2026, 11, 25, 15, 35, tzinfo=timezone.utc)
+    entry_fill_time = start + timedelta(seconds=1)
+    exit_fill_time = start + timedelta(minutes=140)
+
+    parent = {
+        "order_id": "cdns-entry",
+        "client_order_id": "mm-ict-cdns",
+        "symbol": "CDNS",
+        "side": "buy",
+        "order_type": "market",
+        "order_class": "bracket",
+        "status": "filled",
+        "time_in_force": "day",
+        "qty": "1",
+        "filled_qty": "1",
+        "order_role": "entry",
+    }
+    take_profit = {
+        "order_id": "953d960a-47bd-42ee-bd34-cabcd7ac4834",
+        "symbol": "CDNS",
+        "side": "sell",
+        "order_type": "limit",
+        "order_class": "bracket",
+        "status": "new",
+        "time_in_force": "day",
+        "qty": "1",
+        "filled_qty": "0",
+        "limit_price": "291.27",
+        "parent_order_id": "cdns-entry",
+        "order_role": "unknown",
+    }
+    stop_loss = {
+        "order_id": "cdns-stop",
+        "symbol": "CDNS",
+        "side": "sell",
+        "order_type": "stop",
+        "order_class": "bracket",
+        "status": "canceled",
+        "time_in_force": "day",
+        "qty": "1",
+        "filled_qty": "0",
+        "stop_price": "277.22",
+        "parent_order_id": "cdns-entry",
+        "order_role": "stop_loss",
+    }
+
+    journal.append(
+        "entry_order_submitted",
+        client_order_id="mm-ict-cdns",
+        symbol="CDNS",
+        parent_order=parent,
+        child_orders=[take_profit, stop_loss],
+    )
+    journal.append(
+        "order_state",
+        order={**parent, "status": "filled", "filled_qty": "1"},
+    )
+    journal.append(
+        "fill",
+        **_fill("cdns-entry-fill", "cdns-entry", "CDNS", "buy", 1, 281.86, entry_fill_time),
+    )
+    journal.append(
+        "order_state",
+        order={
+            **take_profit,
+            "status": "filled",
+            "filled_qty": "1",
+            "filled_avg_price": "291.36",
+            "order_role": "unknown",
+        },
+    )
+    journal.append(
+        "fill",
+        **_fill(
+            "cdns-tp-fill",
+            take_profit["order_id"],
+            "CDNS",
+            "sell",
+            1,
+            291.36,
+            exit_fill_time,
+        ),
+    )
+
+    records = journal.owned_order_records()
+    summary = journal.summarize_session(start, exit_fill_time + timedelta(seconds=1))
+
+    assert records[take_profit["order_id"]]["order_role"] == "take_profit"
+    assert journal.classify_exit("CDNS") == "take_profit"
+    assert summary["realized_gross_pnl_usd"] == 9.5
+    assert summary["matched_exit_quantity"] == 1.0
+    assert summary["unmatched_exit_quantity"] == 0.0
+    assert summary["unattributed_fill_count"] == 0
+    assert summary["open_entry_quantity_after_session"] == 0.0
+    assert summary["pnl_coverage_status"] == "complete_for_recorded_closed_trades"
+
