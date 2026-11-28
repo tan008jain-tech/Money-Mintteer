@@ -493,6 +493,7 @@ def test_mixed_per_symbol_close_results_retry_only_the_failed_position():
                     qty="9",
                     status="filled",
                 )
+                self.orders["aapl-close-order"] = body
                 results.append(SimpleNamespace(
                     status=200,
                     symbol="AAPL",
@@ -515,6 +516,7 @@ def test_mixed_per_symbol_close_results_retry_only_the_failed_position():
                         qty="4",
                         status="filled",
                     )
+                    self.orders["msft-close-order"] = body
                     results.append(SimpleNamespace(
                         status=200,
                         symbol="MSFT",
@@ -536,6 +538,23 @@ def test_mixed_per_symbol_close_results_retry_only_the_failed_position():
     assert float(broker.msft_quantity) == 0.0
     assert manager.last_flatten_errors == 1
 
+
+
+def test_failed_close_order_lookup_cannot_be_treated_as_flat_account():
+    class LookupUnavailableBroker(FakeOwnedBroker):
+        def get_order_by_id(self, order_id):
+            raise TimeoutError("order lookup temporarily unavailable")
+
+    broker = LookupUnavailableBroker(actual_quantity="25", include_open_orders=False)
+    manager = LivePortfolioManager(broker, logging.getLogger("flatten_unverified_close_order"))
+
+    remaining = manager.flatten_all(
+        sleep_fn=lambda _: None, max_wait_seconds=2, retry_delay=1
+    )
+
+    assert remaining == ["AAPL"]
+    assert broker.close_all_calls == [True]
+    assert float(broker.actual_quantity) == 0.0
 
 def test_active_close_order_id_blocks_completion_even_if_open_order_list_lags():
     class HiddenActiveOrderBroker(FakeOwnedBroker):
