@@ -1955,7 +1955,7 @@ class LivePortfolioManager:
         max_wait_seconds: int = 0,
         exit_reason: str = "session_flatten",
     ) -> list[str]:
-        """Clean up only Money Mintter-owned orders and filled position quantities."""
+        """Flatten the dedicated Alpaca account using broker positions as truth."""
         if max_wait_seconds <= 0:
             try:
                 max_wait_seconds = Settings().flatten_max_wait_seconds
@@ -1964,42 +1964,6 @@ class LivePortfolioManager:
 
         self.last_flatten_errors = 0
         journal = getattr(self, "order_journal", None)
-        if journal is None:
-            try:
-                _, _, _, positions, _, _ = self.fetch_account_and_positions()
-                open_orders = self.trading_client.get_orders(
-                    GetOrdersRequest(status=QueryOrderStatus.OPEN)
-                )
-                unresolved_symbols: set[str] = set()
-                for position in positions:
-                    symbol = str(position.get("symbol", "")).strip().upper()
-                    if not symbol:
-                        raise ValueError("broker position has no symbol")
-                    unresolved_symbols.add(symbol)
-                for order in open_orders or []:
-                    symbol_value = (
-                        order.get("symbol")
-                        if isinstance(order, dict)
-                        else getattr(order, "symbol", None)
-                    )
-                    symbol = str(symbol_value or "").strip().upper()
-                    if not symbol:
-                        raise ValueError("broker open order has no symbol")
-                    unresolved_symbols.add(symbol)
-            except Exception as exc:
-                self.last_flatten_errors += 1
-                self.logger.critical(f"[Owned Flatten] Cannot verify account state without a journal: {exc}")
-                return ["UNKNOWN"]
-
-            if unresolved_symbols:
-                remaining = sorted(unresolved_symbols)
-                self.logger.critical(
-                    "[Owned Flatten] Account activity exists but the ownership journal is unavailable; "
-                    f"leaving all activity untouched: {remaining}"
-                )
-                return remaining
-            return []
-
         exit_reason_value = str(exit_reason).strip().lower()
         liquidation_role = (
             "eod_liquidation"
@@ -2013,9 +1977,10 @@ class LivePortfolioManager:
             "new", "accepted", "pending_new", "partially_filled",
             "pending_cancel", "pending_replace", "accepted_for_bidding", "stopped",
         }
-        cancelable_roles = {"entry", "take_profit", "stop_loss", "unknown"}
-        close_roles = {"eod_liquidation", "emergency_cleanup"}
-        cancel_requested: set[str] = set()
+        tracked_close_orders: dict[str, str] = {}
+        untrackable_close_symbols: set[str] = set()
+        max_attempts = max(1, int(retries))
+        attempts = 0
         start_time = time.monotonic()
         total_slept = 0.0
         effective_delay = max(0.1, min(float(retry_delay), 15.0))
@@ -2030,7 +1995,23 @@ class LivePortfolioManager:
             value = getattr(status, "value", status)
             return str(value).strip().lower() if value is not None else ""
 
-        def _sleep_before_retry() -> bool:
+        def _broker_position_symbols() -> set[str]:
+            positions = self.trading_client.get_all_positions() or []
+            symbols: set[str] = set()
+            for position in positions:
+                symbol = str(_field(position, "symbol") or "").strip().upper()
+                quantity = Decimal(str(_field(position, "qty", "0")))
+                if (
+                    not symbol
+                    or any(character.isspace() for character in symbol)
+                    or not quantity.is_finite()
+                    or quantity == 0
+                ):
+                    raise RuntimeError(f"Invalid Alpaca position snapshot: {position!r}")
+                symbols.add(symbol)
+            return symbols
+
+        def _sleep_within_deadline() -> bool:
             nonlocal total_slept
             elapsed = max(time.monotonic() - start_time, total_slept)
             if elapsed >= max_wait_seconds:
@@ -2042,241 +2023,176 @@ class LivePortfolioManager:
             total_slept += delay
             return True
 
-        def _refresh_owned_records() -> dict[str, dict[str, Any]]:
-            # Reconciliation is read-only. Retry only classified transient broker/network
-            # failures, using the existing flatten deadline. Never infer ownership from
-            # stale journal state when the broker cannot be queried.
-            while True:
-                if max(time.monotonic() - start_time, total_slept) >= max_wait_seconds:
-                    raise RuntimeError(
-                        "order journal reconciliation exhausted the flatten time budget"
-                    ) from getattr(self, "last_order_journal_reconciliation_error", None)
-                if self.reconcile_order_journal():
-                    break
-                reconciliation_error = getattr(
-                    self, "last_order_journal_reconciliation_error", None
+        def _record_close_results(results: Any, requested_symbols: set[str]) -> None:
+            if not isinstance(results, (list, tuple)):
+                self.last_flatten_errors += 1
+                untrackable_close_symbols.update(requested_symbols)
+                self.logger.critical(
+                    "[Broker Flatten] Unexpected close_all_positions response; "
+                    "will verify broker state and will not guess."
                 )
-                if (
-                    reconciliation_error is None
-                    or not is_connectivity_error(reconciliation_error)
-                    or not _sleep_before_retry()
-                ):
-                    raise RuntimeError(
-                        "order journal reconciliation is unhealthy"
-                    ) from reconciliation_error
-                self.logger.warning(
-                    "[Owned Flatten] Transient broker/journal reconciliation failure; "
-                    f"retrying within the flatten time budget: {reconciliation_error}"
+                return
+
+            for result in results:
+                body = _field(result, "body")
+                symbol = str(
+                    _field(result, "symbol") or _field(body, "symbol") or ""
+                ).strip().upper()
+                status_value = _field(result, "status")
+                try:
+                    status_code = int(status_value)
+                except (TypeError, ValueError):
+                    status_code = 0
+
+                order_id = (
+                    _field(result, "order_id")
+                    or _field(body, "id")
+                    or _field(body, "order_id")
                 )
-            legacy_close_ids = journal.unowned_legacy_close_order_ids()
-            if legacy_close_ids:
-                raise RuntimeError(
-                    "legacy close orders from an earlier account-wide cleanup remain unresolved: "
-                    + ", ".join(legacy_close_ids)
-                )
-            if journal.has_unresolved_entry_intents(MONEY_MINTTER_CLIENT_ORDER_PREFIX):
-                raise RuntimeError("an MM entry intent has no confirmed broker submission outcome")
-            return journal.owned_order_records(MONEY_MINTTER_CLIENT_ORDER_PREFIX)
-
-        def _account_position_quantities() -> dict[str, Decimal]:
-            _, _, _, positions, _, _ = self.fetch_account_and_positions()
-            actual: dict[str, Decimal] = {}
-            for position in positions:
-                symbol = str(position.get("symbol", "")).strip().upper()
-                side = str(position.get("side", "")).strip().upper()
-                quantity = Decimal(str(position.get("quantity", "0")))
-                if (
-                    not symbol
-                    or side not in {"BUY", "SELL"}
-                    or not quantity.is_finite()
-                    or quantity <= 0
-                ):
-                    raise RuntimeError(f"Invalid broker position snapshot for {position!r}")
-                actual[symbol] = quantity if side == "BUY" else -quantity
-            return actual
-
-        while True:
-            elapsed = max(time.monotonic() - start_time, total_slept)
-            if elapsed >= max_wait_seconds:
-                break
-
-            try:
-                records = _refresh_owned_records()
-                active_bracket_orders: list[str] = []
-                active_close_orders: list[str] = []
-
-                for order_id, record in records.items():
-                    role = str(record.get("order_role", "unknown"))
-                    recorded_status = str(record.get("status", "")).strip().lower()
-                    recorded_filled = Decimal(str(record.get("filled_qty") or "0"))
-                    if recorded_status in terminal_statuses:
-                        if role == "unknown" and recorded_filled > 0:
-                            raise RuntimeError(
-                                f"MM-owned order {order_id} has fills but no recognized role"
-                            )
-                        continue
-
-                    get_order = getattr(self.trading_client, "get_order_by_id", None)
-                    if not callable(get_order):
-                        raise RuntimeError("broker client cannot verify Money Mintter order state")
-                    broker_order = get_order(order_id)
-                    broker_id = _field(broker_order, "id")
-                    if broker_id is not None and str(broker_id) != order_id:
-                        raise RuntimeError(f"broker order ID mismatch while reconciling {order_id}")
-
-                    expected_symbol = str(record.get("symbol") or "").strip()
-                    reported_symbol = str(_field(broker_order, "symbol") or "").strip()
-                    if (
-                        expected_symbol
-                        and reported_symbol
-                        and expected_symbol.upper() != reported_symbol.upper()
-                    ):
-                        raise RuntimeError(
-                            f"broker order symbol mismatch for {order_id}: "
-                            f"expected={expected_symbol}, received={reported_symbol}"
-                        )
-
-                    broker_status = _status_text(broker_order)
-                    if broker_status in terminal_statuses:
-                        continue
-                    if broker_status not in active_statuses:
-                        raise RuntimeError(
-                            f"unrecognized status {broker_status!r} for MM-owned order {order_id}"
-                        )
-
-                    if role in cancelable_roles:
-                        if (
-                            broker_status not in {"pending_cancel", "pending_replace"}
-                            and order_id not in cancel_requested
-                        ):
-                            self.trading_client.cancel_order_by_id(order_id)
-                            cancel_requested.add(order_id)
-                            self.logger.info(
-                                f"[Owned Flatten] Cancellation requested for MM order "
-                                f"{order_id} ({expected_symbol or reported_symbol or 'UNKNOWN'}, role={role})."
-                            )
-                        active_bracket_orders.append(order_id)
-                    elif role in close_roles:
-                        active_close_orders.append(order_id)
-                    else:
-                        raise RuntimeError(f"unsupported MM-owned order role {role!r} for {order_id}")
-
-                if active_bracket_orders or active_close_orders:
-                    if not _sleep_before_retry():
-                        break
+                if status_code != 200:
+                    self.last_flatten_errors += 1
+                    message = _field(body, "message") or _field(body, "detail") or body
+                    self.logger.error(
+                        f"[Broker Flatten] Alpaca close failed for {symbol or 'UNKNOWN'} "
+                        f"(status={status_value!r}): {message}"
+                    )
                     continue
 
-                owned_positions = journal.owned_position_quantities(
-                    MONEY_MINTTER_CLIENT_ORDER_PREFIX
+                if not symbol or not order_id:
+                    self.last_flatten_errors += 1
+                    untrackable_close_symbols.update(
+                        {symbol} if symbol else requested_symbols
+                    )
+                    self.logger.critical(
+                        "[Broker Flatten] Alpaca reported a successful close without "
+                        f"a trackable symbol/order ID: symbol={symbol!r}, order_id={order_id!r}"
+                    )
+                    continue
+
+                order_id = str(order_id)
+                tracked_close_orders[order_id] = symbol
+                quantity = _field(body, "qty")
+                self.logger.info(
+                    f"[Broker Flatten] Close order submitted for {symbol}: "
+                    f"order_id={order_id}, qty={quantity or 'broker-determined'}."
                 )
-                if not owned_positions:
-                    self.logger.info(
-                        "[Owned Flatten] Verified no remaining MM-owned filled exposure "
-                        "or active MM orders; unrelated account holdings and orders were left untouched."
-                    )
-                    return []
 
-                actual_positions = _account_position_quantities()
-                mismatches: list[str] = []
-                for symbol, owned_quantity in sorted(owned_positions.items()):
-                    actual_quantity = actual_positions.get(symbol)
-                    if actual_quantity is None:
-                        mismatches.append(symbol)
-                        self.logger.critical(
-                            f"[Owned Flatten] Journal shows MM exposure {owned_quantity} {symbol}, "
-                            "but no matching broker position exists; refusing to guess."
+                # Record lifecycle evidence, but journal availability never gates liquidation.
+                if journal is not None:
+                    try:
+                        journal.append(
+                            "flatten_close_order_submitted",
+                            owner="money_mintter",
+                            order_id=order_id,
+                            symbol=symbol,
+                            order_role=liquidation_role,
+                            time_in_force="day",
+                            qty=str(quantity) if quantity is not None else None,
+                            exit_reason=exit_reason_value,
+                            broker_status=_status_text(body) or "unknown",
                         )
-                        continue
-
-                    same_direction = (
-                        (owned_quantity > 0 and actual_quantity > 0)
-                        or (owned_quantity < 0 and actual_quantity < 0)
-                    )
-                    if (
-                        not same_direction
-                        or abs(actual_quantity) + Decimal("0.00000001") < abs(owned_quantity)
-                    ):
-                        mismatches.append(symbol)
-                        self.logger.critical(
-                            f"[Owned Flatten] Ownership/account quantity mismatch for {symbol}: "
-                            f"MM_net={owned_quantity}, account_net={actual_quantity}; "
-                            "no liquidation was submitted for this symbol."
-                        )
-                        continue
-
-                    quantity_text = format(abs(owned_quantity).normalize(), "f")
-                    response = self.trading_client.close_position(
-                        symbol,
-                        ClosePositionRequest(qty=quantity_text),
-                    )
-                    close_order_id = _field(response, "id")
-                    response_symbol = _field(response, "symbol")
-                    if (
-                        not close_order_id
-                        or (
-                            response_symbol
-                            and str(response_symbol).strip().upper() != symbol
-                        )
-                    ):
-                        raise RuntimeError(
-                            f"untrackable quantity-close response for {symbol}: "
-                            f"order_id={close_order_id!r}, symbol={response_symbol!r}"
+                    except Exception as exc:
+                        self.logger.warning(
+                            f"[Order Journal] Could not record close order {order_id} "
+                            f"for {symbol}; broker liquidation continues: {exc}"
                         )
 
-                    journal.append(
-                        "flatten_close_order_submitted",
-                        owner="money_mintter",
-                        order_id=str(close_order_id),
-                        symbol=symbol,
-                        order_role=liquidation_role,
-                        time_in_force="day",
-                        qty=quantity_text,
-                        signed_owned_quantity=str(owned_quantity),
-                        exit_reason=exit_reason_value,
-                        broker_status=_status_text(response) or "unknown",
+        def _pending_close_order_symbols(position_symbols: set[str]) -> set[str]:
+            get_order = getattr(self.trading_client, "get_order_by_id", None)
+            pending: set[str] = set()
+            for order_id, symbol in list(tracked_close_orders.items()):
+                if not callable(get_order):
+                    pending.add(symbol)
+                    continue
+                try:
+                    order = get_order(order_id)
+                except Exception as exc:
+                    pending.add(symbol)
+                    self.logger.warning(
+                        f"[Broker Flatten] Could not verify close order {order_id} "
+                        f"for {symbol}; duplicate submission is blocked: {exc}"
                     )
-                    self.logger.info(
-                        f"[Owned Flatten] Quantity close submitted for {symbol}: "
-                        f"qty={quantity_text}, order_id={close_order_id}, role={liquidation_role}."
+                    continue
+
+                status = _status_text(order)
+                if status in terminal_statuses:
+                    tracked_close_orders.pop(order_id, None)
+                elif status in active_statuses:
+                    pending.add(symbol)
+                else:
+                    pending.add(symbol)
+                    self.logger.warning(
+                        f"[Broker Flatten] Close order {order_id} for {symbol} "
+                        f"has unrecognized status {status!r}; treating it as active."
                     )
 
-                if mismatches:
-                    return sorted(set(mismatches))
-                if not _sleep_before_retry():
-                    break
+            pending.update(untrackable_close_symbols & position_symbols)
+            return pending
 
+        while True:
+            try:
+                position_symbols = _broker_position_symbols()
+                open_order_symbols = self.fetch_open_order_symbols()
+                pending_close_symbols = _pending_close_order_symbols(position_symbols)
             except Exception as exc:
                 self.last_flatten_errors += 1
                 self.logger.critical(
-                    f"[Owned Flatten] Cleanup stopped safely; account-wide liquidation was not attempted: {exc}"
+                    f"[Broker Flatten] Cannot verify Alpaca positions/orders; "
+                    f"stopping without guessing: {exc}"
                 )
                 return ["UNKNOWN"]
 
+            remaining = sorted(
+                position_symbols | open_order_symbols | pending_close_symbols
+            )
+            if not remaining:
+                self.logger.info(
+                    "[Broker Flatten] Alpaca confirms zero open positions and zero open orders."
+                )
+                return []
+
+            if open_order_symbols or pending_close_symbols:
+                if not _sleep_within_deadline():
+                    break
+                continue
+
+            if attempts >= max_attempts:
+                break
+            if attempts > 0 and not _sleep_within_deadline():
+                break
+
+            attempts += 1
+            self.logger.warning(
+                f"[Broker Flatten] Submitting account-wide close/cancel request "
+                f"(attempt {attempts}/{max_attempts}); positions={sorted(position_symbols)}, "
+                f"open_orders={sorted(open_order_symbols)}."
+            )
+            try:
+                results = self.trading_client.close_all_positions(cancel_orders=True)
+                _record_close_results(results, position_symbols)
+            except Exception as exc:
+                self.last_flatten_errors += 1
+                self.logger.error(
+                    f"[Broker Flatten] close_all_positions outcome is uncertain: {exc}; "
+                    "checking broker state before any retry."
+                )
+
         try:
-            records = _refresh_owned_records()
-            residual = journal.owned_position_quantities(MONEY_MINTTER_CLIENT_ORDER_PREFIX)
-            unresolved_orders = [
-                order_id
-                for order_id, record in records.items()
-                if str(record.get("status", "")).strip().lower() not in terminal_statuses
-            ]
-            remaining = sorted(set(residual) | {
-                str(records[order_id].get("symbol") or "").strip().upper()
-                for order_id in unresolved_orders
-                if records[order_id].get("symbol")
-            })
-            remaining = [symbol for symbol in remaining if symbol]
-            if unresolved_orders and not remaining:
-                remaining = ["UNKNOWN"]
+            position_symbols = _broker_position_symbols()
+            open_order_symbols = self.fetch_open_order_symbols()
+            pending_close_symbols = _pending_close_order_symbols(position_symbols)
+            remaining = sorted(
+                position_symbols | open_order_symbols | pending_close_symbols
+            )
             if remaining:
                 self.logger.critical(
-                    f"[Owned Flatten] Timed out with MM-owned exposure/orders unresolved: {remaining}"
+                    f"[Broker Flatten] Timed out with broker positions/orders unresolved: {remaining}"
                 )
                 return remaining
             return []
         except Exception as exc:
             self.last_flatten_errors += 1
-            self.logger.critical(f"[Owned Flatten] Final reconciliation failed: {exc}")
+            self.logger.critical(f"[Broker Flatten] Final broker verification failed: {exc}")
             return ["UNKNOWN"]
 
 
@@ -2780,7 +2696,6 @@ class LiveMarketBot:
         self.latest_state["final_account_snapshot_verified"] = False
 
         def _safe_flatten(exit_reason: str = "eod_flatten") -> list[str]:
-            journal = getattr(self.portfolio_manager, "order_journal", None)
 
             def _record_flatten_error() -> None:
                 try:
@@ -2836,47 +2751,29 @@ class LiveMarketBot:
                     f"account_open_order_symbols={len(final_open_order_symbols)}"
                 )
 
-                if journal is not None:
-                    try:
-                        if not self.portfolio_manager.reconcile_order_journal():
-                            raise RuntimeError("final order journal reconciliation is unhealthy")
-                        residual_owned = journal.owned_position_quantities(
-                            MONEY_MINTTER_CLIENT_ORDER_PREFIX
-                        )
-                        if journal.has_unresolved_entry_intents(MONEY_MINTTER_CLIENT_ORDER_PREFIX):
-                            raise RuntimeError("an MM entry intent remains unresolved")
-                        owned_records = journal.owned_order_records(
-                            MONEY_MINTTER_CLIENT_ORDER_PREFIX
-                        )
-                        terminal_statuses = {
-                            "filled", "canceled", "expired", "rejected", "replaced", "done_for_day"
-                        }
-                        active_owned = [
-                            order_id
-                            for order_id, record in owned_records.items()
-                            if str(record.get("status", "")).strip().lower() not in terminal_statuses
-                        ]
-                        if residual_owned or active_owned:
-                            remaining = sorted(
-                                set(residual_owned)
-                                | {
-                                    str(owned_records[order_id].get("symbol") or "").strip().upper()
-                                    for order_id in active_owned
-                                    if owned_records[order_id].get("symbol")
-                                }
-                            )
-                            remaining = [symbol for symbol in remaining if symbol] or ["UNKNOWN"]
-                            _record_flatten_error()
-                            self.logger.critical(
-                                f"Final broker snapshot found unresolved Money Mintter-owned activity: {remaining}"
-                            )
-                            return remaining
-                    except Exception as journal_exc:
-                        _record_flatten_error()
-                        self.logger.critical(
-                            f"Unable to verify final Money Mintter-owned positions/orders: {journal_exc}"
-                        )
-                        return ["UNKNOWN"]
+                remaining_symbols = {
+                    str(position.get("symbol") or "").strip().upper()
+                    for position in final_positions
+                    if isinstance(position, dict) and position.get("symbol")
+                }
+                if any(
+                    not isinstance(position, dict)
+                    or not str(position.get("symbol") or "").strip()
+                    for position in final_positions
+                ):
+                    remaining_symbols.add("UNKNOWN")
+                remaining_symbols.update(final_open_order_symbols)
+                if remaining_symbols:
+                    remaining = sorted(remaining_symbols)
+                    _record_flatten_error()
+                    self.latest_state["final_account_snapshot_verified"] = False
+                    self.logger.critical(
+                        "[Final Broker Snapshot] Alpaca still reports positions/open orders "
+                        f"after flatten: {remaining}"
+                    )
+                    return remaining
+
+                self.latest_state["final_account_snapshot_verified"] = True
             except Exception as exc:
                 _record_flatten_error()
                 self.logger.critical(
