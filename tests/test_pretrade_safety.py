@@ -403,6 +403,28 @@ def test_broken_journal_does_not_block_broker_liquidation():
 
 
 
+
+def test_returned_order_id_blocks_duplicate_when_open_order_list_lags():
+    class HiddenOrderBroker(FakeOwnedBroker):
+        def get_orders(self, request):
+            # Simulate a brief delay before the general open-orders list shows
+            # the newly submitted close, while direct order-ID lookup already sees it.
+            return []
+
+    broker = HiddenOrderBroker(actual_quantity="25", pending_close=True)
+    manager = LivePortfolioManager(broker, logging.getLogger("flatten_order_id_visibility"))
+
+    def complete_during_poll(_):
+        broker.complete_pending_close()
+
+    remaining = manager.flatten_all(
+        sleep_fn=complete_during_poll, max_wait_seconds=10, retry_delay=1
+    )
+
+    assert remaining == []
+    assert broker.close_all_calls == [True]
+    assert float(broker.actual_quantity) == 0.0
+
 def test_mixed_per_symbol_close_results_retry_only_the_failed_position():
     class MixedResultBroker(FakeOwnedBroker):
         def __init__(self):
