@@ -206,6 +206,61 @@ class OrderLifecycleJournal:
         return events
 
     @staticmethod
+    def _order_role_index(events: list[dict[str, Any]]) -> dict[str, str]:
+        """Build a stable order-role map, recovering legacy bracket-child roles.
+
+        Broker order-state snapshots may continue to report a legacy child role as
+        "unknown". Do not let that later snapshot erase a role inferred from the
+        original linked bracket structure.
+        """
+        order_roles: dict[str, str] = {}
+        recognized_roles = {"entry", *EXIT_ROLES}
+
+        for event in events:
+            event_type = event.get("event_type")
+            if event_type in {"entry_order_submitted", "entry_order_recovered"}:
+                parent = event.get("parent_order")
+                if not isinstance(parent, dict):
+                    parent = {}
+                children = event.get("child_orders")
+                if not isinstance(children, list):
+                    children = []
+
+                for index, snapshot in enumerate([parent, *children]):
+                    if not isinstance(snapshot, dict) or not snapshot.get("order_id"):
+                        continue
+                    order_id = str(snapshot["order_id"])
+                    role = str(snapshot.get("order_role") or "unknown").strip().lower()
+                    if index > 0 and role == "unknown":
+                        role = _infer_bracket_child_role(parent, snapshot)
+
+                    previous_role = order_roles.get(order_id, "unknown")
+                    if role in recognized_roles or previous_role == "unknown":
+                        order_roles[order_id] = role
+
+            elif event_type == "order_state":
+                snapshot = event.get("order")
+                if not isinstance(snapshot, dict) or not snapshot.get("order_id"):
+                    continue
+                order_id = str(snapshot["order_id"])
+                reported_role = str(snapshot.get("order_role") or "unknown").strip().lower()
+                if reported_role not in recognized_roles:
+                    reported_role = order_roles.get(order_id, "unknown")
+                order_roles[order_id] = reported_role
+
+            elif event_type in {"eod_close_order_submitted", "flatten_close_order_submitted"}:
+                if not event.get("order_id"):
+                    continue
+                role = event.get("order_role") or (
+                    "eod_liquidation"
+                    if event_type == "eod_close_order_submitted"
+                    else "emergency_cleanup"
+                )
+                order_roles[str(event["order_id"])] = str(role).strip().lower()
+
+        return order_roles
+
+    @staticmethod
     def _event_time(event: dict[str, Any]) -> datetime | None:
         raw = (
             event.get("transaction_time")
@@ -475,24 +530,8 @@ class OrderLifecycleJournal:
     def classify_exit(self, symbol: str) -> str:
         """Classify the most recent exit only when it follows the latest known entry."""
         normalized = str(symbol).strip().upper()
-        order_roles: dict[str, str] = {}
         events = self.read_events()
-        for event in events:
-            event_type = event.get("event_type")
-            if event_type in {"entry_order_submitted", "entry_order_recovered"}:
-                for snapshot in [event.get("parent_order"), *(event.get("child_orders") or [])]:
-                    if isinstance(snapshot, dict) and snapshot.get("order_id"):
-                        order_roles[str(snapshot["order_id"])] = str(snapshot.get("order_role", "unknown"))
-            elif event_type == "order_state":
-                snapshot = event.get("order")
-                if isinstance(snapshot, dict) and snapshot.get("order_id"):
-                    order_roles[str(snapshot["order_id"])] = str(snapshot.get("order_role", "unknown"))
-            elif event_type in {"eod_close_order_submitted", "flatten_close_order_submitted"}:
-                if event.get("order_id"):
-                    order_roles[str(event["order_id"])] = str(
-                        event.get("order_role")
-                        or ("eod_liquidation" if event_type == "eod_close_order_submitted" else "emergency_cleanup")
-                    )
+        order_roles = self._order_role_index(events)
 
         latest_entry_time: datetime | None = None
         exits: list[tuple[datetime, str]] = []
@@ -535,22 +574,7 @@ class OrderLifecycleJournal:
             raise ValueError("end_utc must not precede start_utc")
 
         events = self.read_events()
-        order_roles: dict[str, str] = {}
-        for event in events:
-            event_type = event.get("event_type")
-            if event_type in {"entry_order_submitted", "entry_order_recovered"}:
-                for snapshot in [event.get("parent_order"), *(event.get("child_orders") or [])]:
-                    if isinstance(snapshot, dict) and snapshot.get("order_id"):
-                        order_roles[str(snapshot["order_id"])] = str(snapshot.get("order_role", "unknown"))
-            elif event_type == "order_state":
-                snapshot = event.get("order")
-                if isinstance(snapshot, dict) and snapshot.get("order_id"):
-                    order_roles[str(snapshot["order_id"])] = str(snapshot.get("order_role", "unknown"))
-            elif event_type in {"eod_close_order_submitted", "flatten_close_order_submitted"} and event.get("order_id"):
-                order_roles[str(event["order_id"])] = str(
-                    event.get("order_role")
-                    or ("eod_liquidation" if event_type == "eod_close_order_submitted" else "emergency_cleanup")
-                )
+        order_roles = self._order_role_index(events)
 
         unique_fills: dict[str, dict[str, Any]] = {}
         for event in events:
