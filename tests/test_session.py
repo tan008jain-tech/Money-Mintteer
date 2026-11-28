@@ -273,7 +273,7 @@ def test_run_once_error_recovery(monkeypatch):
     assert res["errors"] == 1
 
 
-def test_flatten_never_uses_account_wide_cancel_or_close(monkeypatch):
+def test_flatten_skips_account_wide_close_when_broker_state_is_empty(monkeypatch):
     clock = FakeClock(is_open=True, next_open=datetime.now(), next_close=datetime.now())
     client = FakeTradingClient(clock, positions=[])
     client.cancel_orders_raises = True
