@@ -2110,7 +2110,7 @@ class LivePortfolioManager:
                 )
                 return []
 
-            if open_order_symbols or uncertain_close_symbols:
+            if (open_order_symbols and attempts > 0) or uncertain_close_symbols:
                 if not _sleep_within_deadline():
                     break
                 continue
