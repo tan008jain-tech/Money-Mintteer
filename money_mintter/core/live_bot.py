@@ -1973,11 +1973,6 @@ class LivePortfolioManager:
         terminal_statuses = {
             "filled", "canceled", "expired", "rejected", "replaced", "done_for_day",
         }
-        active_statuses = {
-            "new", "accepted", "pending_new", "partially_filled",
-            "pending_cancel", "pending_replace", "accepted_for_bidding", "stopped",
-        }
-        tracked_close_orders: dict[str, str] = {}
         untrackable_close_symbols: set[str] = set()
         max_attempts = max(1, int(retries))
         attempts = 0
@@ -2070,7 +2065,6 @@ class LivePortfolioManager:
                     continue
 
                 order_id = str(order_id)
-                tracked_close_orders[order_id] = symbol
                 quantity = _field(body, "qty")
                 self.logger.info(
                     f"[Broker Flatten] Close order submitted for {symbol}: "
@@ -2097,43 +2091,10 @@ class LivePortfolioManager:
                             f"for {symbol}; broker liquidation continues: {exc}"
                         )
 
-        def _pending_close_order_symbols(position_symbols: set[str]) -> set[str]:
-            get_order = getattr(self.trading_client, "get_order_by_id", None)
-            pending: set[str] = set()
-            for order_id, symbol in list(tracked_close_orders.items()):
-                if not callable(get_order):
-                    pending.add(symbol)
-                    continue
-                try:
-                    order = get_order(order_id)
-                except Exception as exc:
-                    pending.add(symbol)
-                    self.logger.warning(
-                        f"[Broker Flatten] Could not verify close order {order_id} "
-                        f"for {symbol}; duplicate submission is blocked: {exc}"
-                    )
-                    continue
-
-                status = _status_text(order)
-                if status in terminal_statuses:
-                    tracked_close_orders.pop(order_id, None)
-                elif status in active_statuses:
-                    pending.add(symbol)
-                else:
-                    pending.add(symbol)
-                    self.logger.warning(
-                        f"[Broker Flatten] Close order {order_id} for {symbol} "
-                        f"has unrecognized status {status!r}; treating it as active."
-                    )
-
-            pending.update(untrackable_close_symbols & position_symbols)
-            return pending
-
         while True:
             try:
                 position_symbols = _broker_position_symbols()
                 open_order_symbols = self.fetch_open_order_symbols()
-                pending_close_symbols = _pending_close_order_symbols(position_symbols)
             except Exception as exc:
                 self.last_flatten_errors += 1
                 self.logger.critical(
@@ -2143,7 +2104,7 @@ class LivePortfolioManager:
                 return ["UNKNOWN"]
 
             remaining = sorted(
-                position_symbols | open_order_symbols | pending_close_symbols
+                position_symbols | open_order_symbols
             )
             if not remaining:
                 self.logger.info(
@@ -2151,7 +2112,7 @@ class LivePortfolioManager:
                 )
                 return []
 
-            if open_order_symbols or pending_close_symbols:
+            if open_order_symbols:
                 if not _sleep_within_deadline():
                     break
                 continue
@@ -2180,9 +2141,8 @@ class LivePortfolioManager:
         try:
             position_symbols = _broker_position_symbols()
             open_order_symbols = self.fetch_open_order_symbols()
-            pending_close_symbols = _pending_close_order_symbols(position_symbols)
             remaining = sorted(
-                position_symbols | open_order_symbols | pending_close_symbols
+                position_symbols | open_order_symbols
             )
             if remaining:
                 self.logger.critical(
