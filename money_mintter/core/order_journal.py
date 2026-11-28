@@ -231,6 +231,8 @@ class OrderLifecycleJournal:
                         continue
                     order_id = str(snapshot["order_id"])
                     role = str(snapshot.get("order_role") or "unknown").strip().lower()
+                    if role not in recognized_roles:
+                        role = "unknown"
                     if index > 0 and role == "unknown":
                         role = _infer_bracket_child_role(parent, snapshot)
 
