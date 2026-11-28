@@ -2096,22 +2096,18 @@ class LivePortfolioManager:
             pending: set[str] = set()
             for order_id, symbol in list(tracked_close_orders.items()):
                 if not callable(get_order):
-                    if symbol in position_symbols:
-                        pending.add(symbol)
+                    pending.add(symbol)
                     continue
                 try:
                     broker_order = get_order(order_id)
                 except Exception as exc:
-                    # If the position remains, an unverified close must not be duplicated.
-                    # If both broker snapshots are clear, the account state is decisive.
-                    if symbol in position_symbols:
-                        pending.add(symbol)
-                        self.logger.warning(
-                            f"[Broker Flatten] Could not verify close order {order_id} "
-                            f"for {symbol}; duplicate submission is blocked: {exc}"
-                        )
-                    else:
-                        tracked_close_orders.pop(order_id, None)
+                    # An accepted close with an unverified order state must never be
+                    # treated as terminal, even if the position snapshot is already flat.
+                    pending.add(symbol)
+                    self.logger.warning(
+                        f"[Broker Flatten] Could not verify close order {order_id} "
+                        f"for {symbol}; duplicate submission and completion are blocked: {exc}"
+                    )
                     continue
 
                 status = _status_text(broker_order)
