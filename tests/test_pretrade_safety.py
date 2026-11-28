@@ -618,10 +618,34 @@ def test_success_response_without_order_id_is_not_retried_blindly():
         sleep_fn=lambda _: None, max_wait_seconds=2, retry_delay=1
     )
 
-    assert remaining == ["AAPL"]
+    assert remaining == ["AAPL", "UNKNOWN"]
     assert broker.close_all_calls == [True]
     assert float(broker.actual_quantity) == 25.0
 
+
+
+def test_malformed_success_response_cannot_mark_flat_account_complete():
+    class UntrackableButClosedBroker(FakeOwnedBroker):
+        def close_all_positions(self, cancel_orders=None):
+            self.close_all_calls.append(cancel_orders)
+            self.actual_quantity = "0"
+            return [SimpleNamespace(
+                status=200,
+                symbol="AAPL",
+                order_id=None,
+                body=SimpleNamespace(symbol="AAPL", qty="25", status="filled"),
+            )]
+
+    broker = UntrackableButClosedBroker(actual_quantity="25", include_open_orders=False)
+    manager = LivePortfolioManager(broker, logging.getLogger("flatten_untrackable_closed_response"))
+
+    remaining = manager.flatten_all(
+        sleep_fn=lambda _: None, max_wait_seconds=2, retry_delay=1
+    )
+
+    assert remaining == ["UNKNOWN"]
+    assert broker.close_all_calls == [True]
+    assert float(broker.actual_quantity) == 0.0
 
 def _session_bot_for_snapshot_test(
     *,
