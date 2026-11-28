@@ -2021,6 +2021,7 @@ class LivePortfolioManager:
             if not isinstance(results, (list, tuple)):
                 self.last_flatten_errors += 1
                 untrackable_close_symbols.update(requested_symbols)
+                untrackable_close_symbols.add("UNKNOWN")
                 self.logger.critical(
                     "[Broker Flatten] Unexpected close_all_positions response; "
                     "will verify broker state and will not guess."
@@ -2057,6 +2058,7 @@ class LivePortfolioManager:
                     untrackable_close_symbols.update(
                         {symbol} if symbol else requested_symbols
                     )
+                    untrackable_close_symbols.add("UNKNOWN")
                     self.logger.critical(
                         "[Broker Flatten] Alpaca reported a successful close without "
                         f"a trackable symbol/order ID: symbol={symbol!r}, order_id={order_id!r}"
@@ -2156,6 +2158,8 @@ class LivePortfolioManager:
                 return ["UNKNOWN"]
 
             uncertain_close_symbols = untrackable_close_symbols & position_symbols
+            if "UNKNOWN" in untrackable_close_symbols:
+                uncertain_close_symbols.add("UNKNOWN")
             remaining = sorted(
                 position_symbols | open_order_symbols | pending_close_symbols | uncertain_close_symbols
             )
@@ -2196,6 +2200,8 @@ class LivePortfolioManager:
             open_order_symbols = self.fetch_open_order_symbols()
             pending_close_symbols = _pending_close_order_symbols(position_symbols)
             uncertain_close_symbols = untrackable_close_symbols & position_symbols
+            if "UNKNOWN" in untrackable_close_symbols:
+                uncertain_close_symbols.add("UNKNOWN")
             remaining = sorted(
                 position_symbols | open_order_symbols | pending_close_symbols | uncertain_close_symbols
             )
