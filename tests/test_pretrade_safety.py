@@ -647,6 +647,75 @@ def test_malformed_success_response_cannot_mark_flat_account_complete():
     assert broker.close_all_calls == [True]
     assert float(broker.actual_quantity) == 0.0
 
+
+def test_accepted_close_without_order_lookup_is_never_marked_flat():
+    class BrokerWithoutOrderLookup(FakeOwnedBroker):
+        get_order_by_id = None
+
+    broker = BrokerWithoutOrderLookup(actual_quantity="25", include_open_orders=False)
+    manager = LivePortfolioManager(broker, logging.getLogger("flatten_without_order_lookup"))
+
+    remaining = manager.flatten_all(
+        sleep_fn=lambda _: None, max_wait_seconds=2, retry_delay=1
+    )
+
+    assert remaining == ["AAPL"]
+    assert broker.close_all_calls == [True]
+    assert float(broker.actual_quantity) == 0.0
+
+
+def test_unparseable_per_position_status_cannot_mark_flat_account_complete():
+    class UnparseableStatusBroker(FakeOwnedBroker):
+        def close_all_positions(self, cancel_orders=None):
+            self.close_all_calls.append(cancel_orders)
+            self.actual_quantity = "0"
+            body = SimpleNamespace(
+                id="mm-close-order",
+                symbol="AAPL",
+                status="filled",
+                qty="25",
+                filled_qty="25",
+            )
+            self.orders["mm-close-order"] = body
+            return [SimpleNamespace(
+                status=None,
+                symbol="AAPL",
+                order_id="mm-close-order",
+                body=body,
+            )]
+
+    broker = UnparseableStatusBroker(actual_quantity="25", include_open_orders=False)
+    manager = LivePortfolioManager(broker, logging.getLogger("flatten_unparseable_status"))
+
+    remaining = manager.flatten_all(
+        sleep_fn=lambda _: None, max_wait_seconds=2, retry_delay=1
+    )
+
+    assert remaining == ["UNKNOWN"]
+    assert broker.close_all_calls == [True]
+    assert float(broker.actual_quantity) == 0.0
+
+
+def test_missing_per_position_result_cannot_mark_flat_account_complete():
+    class MissingResultBroker(FakeOwnedBroker):
+        def close_all_positions(self, cancel_orders=None):
+            self.close_all_calls.append(cancel_orders)
+            self.actual_quantity = "0"
+            return []
+
+    broker = MissingResultBroker(actual_quantity="25", include_open_orders=False)
+    manager = LivePortfolioManager(broker, logging.getLogger("flatten_missing_result"))
+
+    remaining = manager.flatten_all(
+        sleep_fn=lambda _: None, max_wait_seconds=2, retry_delay=1
+    )
+
+    assert remaining == ["UNKNOWN"]
+    assert broker.close_all_calls == [True]
+    assert float(broker.actual_quantity) == 0.0
+
+
+
 def _session_bot_for_snapshot_test(
     *,
     account_snapshot_error: Exception | None = None,
@@ -798,4 +867,3 @@ def test_quote_spread_limit_is_configurable_and_validated(monkeypatch):
         Settings(max_quote_spread_pct=0.0)
 
     with pytest.raises(ValueError, match="MAX_QUOTE_SPREAD_PCT"):
-        Settings(max_quote_spread_pct=1.01)
