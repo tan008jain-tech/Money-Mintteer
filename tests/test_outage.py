@@ -136,73 +136,94 @@ def test_scanner_connectivity_vs_runtime_error():
         bot.run_cycle(open_time)
 
 
-def test_flatten_without_journal_reports_positions_and_preserves_manual_gtc_orders():
+def test_flatten_without_journal_closes_all_broker_positions_and_cancels_gtc_orders():
     client = MagicMock()
-    client.get_account.return_value = SimpleNamespace(
-        cash="100000.0", equity="100000.0", buying_power="100000.0", last_equity="100000.0"
+    positions = {
+        "AAPL": SimpleNamespace(symbol="AAPL", qty="20", avg_entry_price="150.0", current_price="150.0", unrealized_pl="0.0"),
+        "MSFT": SimpleNamespace(symbol="MSFT", qty="10", avg_entry_price="300.0", current_price="300.0", unrealized_pl="0.0"),
+    }
+    manual_gtc = SimpleNamespace(
+        id="manual-msft-gtc", symbol="MSFT", time_in_force="gtc", status="new"
     )
-    client.get_all_positions.return_value = [
-        SimpleNamespace(symbol="AAPL", qty="20", avg_entry_price="150.0", current_price="150.0", unrealized_pl="0.0"),
-        SimpleNamespace(symbol="MSFT", qty="10", avg_entry_price="300.0", current_price="300.0", unrealized_pl="0.0"),
-    ]
-    manual_gtc = SimpleNamespace(id="manual-msft-gtc", symbol="MSFT", time_in_force="gtc")
-    client.get_orders.return_value = [manual_gtc]
+    open_orders = [manual_gtc]
+    close_orders = {}
+
+    client.get_all_positions.side_effect = lambda: list(positions.values())
+    client.get_orders.side_effect = lambda request: list(open_orders)
+    client.get_order_by_id.side_effect = lambda order_id: close_orders[str(order_id)]
+
+    def close_all_positions(cancel_orders=None):
+        assert cancel_orders is True
+        for order in open_orders:
+            order.status = "canceled"
+        open_orders.clear()
+        results = []
+        for symbol, position in list(positions.items()):
+            order_id = f"close-{symbol.lower()}"
+            close_order = SimpleNamespace(
+                id=order_id,
+                symbol=symbol,
+                status="filled",
+                qty=str(abs(float(position.qty))),
+                filled_qty=str(abs(float(position.qty))),
+            )
+            close_orders[order_id] = close_order
+            results.append(SimpleNamespace(
+                order_id=order_id,
+                status=200,
+                symbol=symbol,
+                body=close_order,
+            ))
+        positions.clear()
+        return results
+
+    client.close_all_positions.side_effect = close_all_positions
 
     pm = LivePortfolioManager(client, logging.getLogger("no_journal_manual_holdings"))
     result = pm.flatten_all(sleep_fn=lambda _: None, max_wait_seconds=60, retry_delay=15)
 
-    assert result == ["AAPL", "MSFT"]
-    client.close_all_positions.assert_not_called()
-    client.cancel_orders.assert_not_called()
-    client.cancel_order_by_id.assert_not_called()
-    client.close_position.assert_not_called()
-    assert client.get_orders.call_count == 1
+    assert result == []
+    client.close_all_positions.assert_called_once_with(cancel_orders=True)
+    assert manual_gtc.status == "canceled"
+    assert positions == {}
+    assert open_orders == []
 
 
-def test_flatten_without_journal_reports_manual_open_orders_without_cancelling():
+def test_flatten_without_journal_cancels_open_orders_even_without_positions():
     client = MagicMock()
-    client.get_account.return_value = SimpleNamespace(
-        cash="100000.0", equity="100000.0", buying_power="100000.0", last_equity="100000.0"
+    open_order = SimpleNamespace(
+        id="manual-aapl-gtc", symbol="AAPL", time_in_force="gtc", status="new"
     )
+    open_orders = [open_order]
     client.get_all_positions.return_value = []
-    client.get_orders.return_value = [
-        SimpleNamespace(id="manual-aapl-gtc", symbol="AAPL", time_in_force="gtc")
-    ]
+    client.get_orders.side_effect = lambda request: list(open_orders)
+
+    def close_all_positions(cancel_orders=None):
+        assert cancel_orders is True
+        open_order.status = "canceled"
+        open_orders.clear()
+        return []
+
+    client.close_all_positions.side_effect = close_all_positions
 
     pm = LivePortfolioManager(client, logging.getLogger("no_journal_open_order"))
     result = pm.flatten_all(sleep_fn=lambda _: None, max_wait_seconds=2, retry_delay=1)
 
-    assert result == ["AAPL"]
-    client.close_all_positions.assert_not_called()
-    client.cancel_orders.assert_not_called()
-    client.cancel_order_by_id.assert_not_called()
-    client.close_position.assert_not_called()
+    assert result == []
+    client.close_all_positions.assert_called_once_with(cancel_orders=True)
+    assert open_order.status == "canceled"
+    assert open_orders == []
 
 
-def test_flatten_without_journal_returns_empty_only_when_account_is_empty():
+def test_flatten_without_journal_fails_closed_when_position_snapshot_is_unavailable():
     client = MagicMock()
-    client.get_account.return_value = SimpleNamespace(
-        cash="100000.0", equity="100000.0", buying_power="100000.0", last_equity="100000.0"
-    )
-    client.get_all_positions.return_value = []
-    client.get_orders.return_value = []
+    client.get_all_positions.side_effect = RuntimeError("positions endpoint down")
 
-    pm = LivePortfolioManager(client, logging.getLogger("no_journal_empty_account"))
-    assert pm.flatten_all(sleep_fn=lambda _: None, max_wait_seconds=2, retry_delay=1) == []
-    client.close_all_positions.assert_not_called()
-    client.cancel_orders.assert_not_called()
-
-
-def test_flatten_without_journal_fails_closed_when_account_state_is_unavailable():
-    client = MagicMock()
-    client.get_account.side_effect = RuntimeError("account down")
-
-    pm = LivePortfolioManager(client, logging.getLogger("no_journal_account_down"))
+    pm = LivePortfolioManager(client, logging.getLogger("no_journal_positions_down"))
     result = pm.flatten_all(sleep_fn=lambda _: None, max_wait_seconds=2, retry_delay=1)
 
     assert result == ["UNKNOWN"]
     client.close_all_positions.assert_not_called()
-    client.cancel_orders.assert_not_called()
 
 
 def test_flatten_without_journal_fails_closed_when_open_order_has_no_symbol():
@@ -513,5 +534,4 @@ def test_live_market_bot_position_management_continuity_on_l2_failure(monkeypatc
         # 5. Legitimate existing-position management and safety actions remain possible (AAPL is locked/managed in position-management-only mode)
         locked_arg = call_args[1]
         assert "AAPL" in locked_arg
-
 
