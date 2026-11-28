@@ -867,3 +867,7 @@ def test_quote_spread_limit_is_configurable_and_validated(monkeypatch):
         Settings(max_quote_spread_pct=0.0)
 
     with pytest.raises(ValueError, match="MAX_QUOTE_SPREAD_PCT"):
+        Settings(max_quote_spread_pct=0.0)
+
+    with pytest.raises(ValueError, match="MAX_QUOTE_SPREAD_PCT"):
+        Settings(max_quote_spread_pct=1.01)
