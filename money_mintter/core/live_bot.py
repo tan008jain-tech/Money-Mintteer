@@ -1970,9 +1970,6 @@ class LivePortfolioManager:
             if exit_reason_value == "eod_flatten"
             else "emergency_cleanup"
         )
-        terminal_statuses = {
-            "filled", "canceled", "expired", "rejected", "replaced", "done_for_day",
-        }
         untrackable_close_symbols: set[str] = set()
         max_attempts = max(1, int(retries))
         attempts = 0
