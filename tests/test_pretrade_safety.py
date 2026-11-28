@@ -318,6 +318,19 @@ def test_unjournaled_broker_positions_and_manual_gtc_are_closed():
     assert broker.manual_gtc_order.status == "canceled"
 
 
+
+def test_flatten_cancels_open_orders_even_when_account_has_no_positions():
+    broker = FakeOwnedBroker(actual_quantity="0", include_open_orders=True)
+    manager = LivePortfolioManager(broker, logging.getLogger("open_orders_without_positions"))
+
+    remaining = manager.flatten_all(
+        sleep_fn=lambda _: None, max_wait_seconds=10, retry_delay=1
+    )
+
+    assert remaining == []
+    assert broker.close_all_calls == [True]
+    assert broker.manual_gtc_order.status == "canceled"
+
 def test_flatten_closes_short_quantity_reported_by_alpaca(tmp_path):
     journal = _owned_journal(tmp_path, side="sell_short", quantity="5")
     broker = FakeOwnedBroker(actual_quantity="-25")
