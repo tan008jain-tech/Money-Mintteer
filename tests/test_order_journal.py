@@ -1232,3 +1232,76 @@ def test_legacy_unknown_take_profit_role_survives_order_state_for_exit_and_pnl(t
     assert summary["open_entry_quantity_after_session"] == 0.0
     assert summary["pnl_coverage_status"] == "complete_for_recorded_closed_trades"
 
+
+def test_legacy_open_bito_position_recovers_unknown_take_profit_without_false_exit(tmp_path):
+    journal = OrderLifecycleJournal(tmp_path / "order_lifecycle.jsonl")
+    now = datetime(2026, 11, 25, 16, 45, tzinfo=timezone.utc)
+
+    parent = {
+        "order_id": "bito-entry",
+        "client_order_id": "mm-ict-bito",
+        "symbol": "BITO",
+        "side": "buy",
+        "order_type": "market",
+        "order_class": "bracket",
+        "status": "filled",
+        "time_in_force": "day",
+        "qty": "9",
+        "filled_qty": "9",
+        "order_role": "entry",
+    }
+    take_profit = {
+        "order_id": "90fb54a4-9524-4320-a9dd-baaf330f0ba6",
+        "symbol": "BITO",
+        "side": "sell",
+        "order_type": "limit",
+        "order_class": "bracket",
+        "status": "new",
+        "time_in_force": "day",
+        "qty": "9",
+        "filled_qty": "0",
+        "limit_price": "16.66",
+        "parent_order_id": "bito-entry",
+        "order_role": "unknown",
+    }
+    stop_loss = {
+        "order_id": "bito-stop",
+        "symbol": "BITO",
+        "side": "sell",
+        "order_type": "stop",
+        "order_class": "bracket",
+        "status": "new",
+        "time_in_force": "day",
+        "qty": "9",
+        "filled_qty": "0",
+        "stop_price": "14.39",
+        "parent_order_id": "bito-entry",
+        "order_role": "stop_loss",
+    }
+
+    journal.append(
+        "entry_order_submitted",
+        client_order_id="mm-ict-bito",
+        symbol="BITO",
+        parent_order=parent,
+        child_orders=[take_profit, stop_loss],
+    )
+    journal.append(
+        "order_state",
+        order={**parent, "status": "filled", "filled_qty": "9"},
+    )
+    journal.append(
+        "order_state",
+        order={**take_profit, "status": "new", "order_role": "unknown"},
+    )
+    journal.append(
+        "fill",
+        **_fill("bito-entry-fill", "bito-entry", "BITO", "buy", 9, 15.47, now),
+    )
+
+    records = journal.owned_order_records()
+
+    assert records[take_profit["order_id"]]["order_role"] == "take_profit"
+    assert journal.owned_position_quantities() == {"BITO": Decimal("9")}
+    assert journal.classify_exit("BITO") == "external_or_unattributed"
+
