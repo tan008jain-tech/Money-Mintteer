@@ -425,6 +425,44 @@ def test_returned_order_id_blocks_duplicate_when_open_order_list_lags():
     assert broker.close_all_calls == [True]
     assert float(broker.actual_quantity) == 0.0
 
+
+def test_filled_close_order_waits_for_position_snapshot_to_catch_up():
+    class FilledButStalePositionBroker(FakeOwnedBroker):
+        def close_all_positions(self, cancel_orders=None):
+            self.close_all_calls.append(cancel_orders)
+            if cancel_orders:
+                for order in self.orders.values():
+                    if str(getattr(order, "status", "")).lower() in self.ACTIVE_STATUSES:
+                        order.status = "canceled"
+            self.close_order = SimpleNamespace(
+                id="mm-close-order",
+                symbol="AAPL",
+                status="filled",
+                qty="25",
+                filled_qty="25",
+            )
+            self.orders["mm-close-order"] = self.close_order
+            return [SimpleNamespace(
+                status=200,
+                symbol="AAPL",
+                order_id="mm-close-order",
+                body=self.close_order,
+            )]
+
+    broker = FilledButStalePositionBroker(actual_quantity="25")
+    manager = LivePortfolioManager(broker, logging.getLogger("flatten_filled_position_lag"))
+
+    def refresh_position_snapshot(_):
+        broker.actual_quantity = "0"
+
+    remaining = manager.flatten_all(
+        sleep_fn=refresh_position_snapshot, max_wait_seconds=10, retry_delay=1
+    )
+
+    assert remaining == []
+    assert broker.close_all_calls == [True]
+    assert float(broker.actual_quantity) == 0.0
+
 def test_mixed_per_symbol_close_results_retry_only_the_failed_position():
     class MixedResultBroker(FakeOwnedBroker):
         def __init__(self):
