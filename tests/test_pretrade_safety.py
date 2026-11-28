@@ -81,15 +81,35 @@ def _owned_journal(tmp_path, *, symbol="AAPL", side="buy", quantity="5"):
 
 
 class FakeOwnedBroker:
-    def __init__(self, *, actual_quantity="25"):
-        self.actual_quantity = actual_quantity
+    ACTIVE_STATUSES = {
+        "new", "accepted", "pending_new", "partially_filled",
+        "pending_cancel", "pending_replace", "accepted_for_bidding", "stopped",
+    }
+
+    def __init__(
+        self,
+        *,
+        actual_quantity="25",
+        include_open_orders=True,
+        fail_before_close=0,
+        fail_close_responses=0,
+        pending_close=False,
+        raise_after_close=False,
+    ):
+        self.actual_quantity = str(actual_quantity)
+        self.close_all_calls = []
         self.cancel_calls = []
-        self.close_calls = []
+        self.fail_before_close = fail_before_close
+        self.fail_close_responses = fail_close_responses
+        self.pending_close = pending_close
+        self.raise_after_close = raise_after_close
+        child_status = "new" if include_open_orders else "canceled"
+        manual_status = "new" if include_open_orders else "canceled"
         self.manual_gtc_order = SimpleNamespace(
             id="manual-gtc-order",
             symbol="MSFT",
             side="buy",
-            status="new",
+            status=manual_status,
             time_in_force="gtc",
             client_order_id="manual-long-term-order",
         )
@@ -99,11 +119,12 @@ class FakeOwnedBroker:
                 filled_qty="5", client_order_id="mm-ict-unit-entry",
             ),
             "mm-take-profit": SimpleNamespace(
-                id="mm-take-profit", symbol="AAPL", status="new", filled_qty="0",
+                id="mm-take-profit", symbol="AAPL", status=child_status, filled_qty="0",
             ),
             "mm-stop-loss": SimpleNamespace(
-                id="mm-stop-loss", symbol="AAPL", status="new", filled_qty="0",
+                id="mm-stop-loss", symbol="AAPL", status=child_status, filled_qty="0",
             ),
+            "manual-gtc-order": self.manual_gtc_order,
         }
         self.close_order = None
         self.close_fill = None
@@ -118,70 +139,108 @@ class FakeOwnedBroker:
             return []
         return [SimpleNamespace(
             symbol="AAPL",
-            qty=str(self.actual_quantity),
+            qty=self.actual_quantity,
             avg_entry_price="100.00",
             current_price="100.00",
             unrealized_pl="0.00",
         )]
 
     def get_order_by_id(self, order_id):
-        order_id = str(order_id)
-        if order_id == "mm-close-order":
-            self.close_order.status = "filled"
-            self.close_order.filled_qty = self.close_calls[-1][1]
-            return self.close_order
-        return self.orders[order_id]
+        return self.orders[str(order_id)]
+
+    def get_orders(self, request):
+        return [
+            order for order in self.orders.values()
+            if str(getattr(order, "status", "")).lower() in self.ACTIVE_STATUSES
+        ]
 
     def cancel_order_by_id(self, order_id):
         order_id = str(order_id)
         self.cancel_calls.append(order_id)
         self.orders[order_id].status = "canceled"
 
-    def close_position(self, symbol, close_options=None):
-        quantity = str(close_options.qty)
-        self.close_calls.append((symbol, quantity))
-        current_quantity = float(self.actual_quantity)
-        if current_quantity > 0:
-            self.actual_quantity = str(current_quantity - float(quantity))
-            close_side = "sell"
-        else:
-            self.actual_quantity = str(current_quantity + float(quantity))
-            close_side = "buy"
-        self.close_order = SimpleNamespace(
-            id="mm-close-order",
-            symbol=symbol,
-            status="accepted",
-            filled_qty="0",
-        )
-        self.orders["mm-close-order"] = self.close_order
+    def _complete_close(self, quantity, close_side):
+        self.actual_quantity = "0"
+        if self.close_order is not None:
+            self.close_order.status = "filled"
+            self.close_order.filled_qty = quantity
         self.close_fill = {
             "id": "mm-close-fill",
             "order_id": "mm-close-order",
-            "symbol": symbol,
+            "symbol": "AAPL",
             "side": close_side,
             "qty": quantity,
             "price": "101",
             "transaction_time": datetime.now(timezone.utc).isoformat(),
         }
-        return self.close_order
+
+    def complete_pending_close(self):
+        if self.close_order is not None:
+            quantity = self.close_order.qty
+            close_side = "sell" if float(self.actual_quantity) > 0 else "buy"
+            self._complete_close(quantity, close_side)
+
+    def close_all_positions(self, cancel_orders=None):
+        self.close_all_calls.append(cancel_orders)
+        if cancel_orders:
+            for order in self.orders.values():
+                if str(getattr(order, "status", "")).lower() in self.ACTIVE_STATUSES:
+                    order.status = "canceled"
+
+        if self.fail_before_close:
+            self.fail_before_close -= 1
+            raise TimeoutError("temporary close-all request timeout")
+
+        if self.fail_close_responses:
+            self.fail_close_responses -= 1
+            return [SimpleNamespace(
+                status=403,
+                symbol="AAPL",
+                order_id=None,
+                body=SimpleNamespace(message="position temporarily unavailable"),
+            )]
+
+        if float(self.actual_quantity) == 0:
+            results = []
+        else:
+            quantity = str(abs(float(self.actual_quantity)))
+            close_side = "sell" if float(self.actual_quantity) > 0 else "buy"
+            self.close_order = SimpleNamespace(
+                id="mm-close-order",
+                symbol="AAPL",
+                status="new" if self.pending_close else "filled",
+                qty=quantity,
+                filled_qty="0" if self.pending_close else quantity,
+                side=close_side,
+                time_in_force="day",
+            )
+            self.orders["mm-close-order"] = self.close_order
+            if not self.pending_close:
+                self._complete_close(quantity, close_side)
+            results = [SimpleNamespace(
+                order_id="mm-close-order",
+                status=200,
+                symbol="AAPL",
+                body=self.close_order,
+            )]
+
+        if self.raise_after_close:
+            self.raise_after_close = False
+            raise TimeoutError("response timed out after Alpaca accepted the close")
+        return results
 
     def get(self, path, params):
         assert path == "/account/activities/FILL"
-        if params.get("order_id") == "mm-close-order":
+        if params.get("order_id") == "mm-close-order" and self.close_fill:
             return [self.close_fill]
         return []
 
-    def get_orders(self, request):
-        return [self.manual_gtc_order]
 
-
-def test_owned_flatten_cancels_mm_bracket_and_closes_only_mm_filled_quantity(tmp_path):
-    from money_mintter.core.live_bot import LivePortfolioManager
-
+def test_flatten_uses_broker_quantity_and_cancels_all_open_orders(tmp_path):
     journal = _owned_journal(tmp_path, quantity="5")
     broker = FakeOwnedBroker(actual_quantity="25")
     manager = LivePortfolioManager(
-        broker, logging.getLogger("owned_flatten"), order_journal=journal
+        broker, logging.getLogger("broker_authoritative_flatten"), order_journal=journal
     )
 
     remaining = manager.flatten_all(
@@ -189,99 +248,145 @@ def test_owned_flatten_cancels_mm_bracket_and_closes_only_mm_filled_quantity(tmp
     )
 
     assert remaining == []
-    assert broker.cancel_calls == ["mm-take-profit", "mm-stop-loss"]
-    assert broker.close_calls == [("AAPL", "5")]
-    assert float(broker.actual_quantity) == 20.0
-    assert broker.manual_gtc_order.status == "new"
-    assert "manual-gtc-order" not in broker.cancel_calls
-    assert journal.owned_position_quantities() == {}
+    assert broker.close_all_calls == [True]
+    assert float(broker.actual_quantity) == 0.0
+    assert broker.manual_gtc_order.status == "canceled"
+    assert broker.orders["mm-take-profit"].status == "canceled"
+    assert broker.orders["mm-stop-loss"].status == "canceled"
+    close_events = [
+        event for event in journal.read_events()
+        if event["event_type"] == "flatten_close_order_submitted"
+    ]
+    assert len(close_events) == 1
+    assert close_events[0]["order_id"] == "mm-close-order"
+    assert close_events[0]["symbol"] == "AAPL"
 
 
-def test_owned_flatten_retries_transient_reconciliation_then_closes_only_mm_quantity(tmp_path):
-    journal = _owned_journal(tmp_path, quantity="5")
-    broker = FakeOwnedBroker(actual_quantity="25")
-    original_get_order = broker.get_order_by_id
-    timed_out = False
-
-    def get_order_with_one_transient_timeout(order_id):
-        nonlocal timed_out
-        if order_id == "mm-take-profit" and not timed_out:
-            timed_out = True
-            raise TimeoutError("temporary broker order lookup timeout")
-        return original_get_order(order_id)
-
-    broker.get_order_by_id = get_order_with_one_transient_timeout
-    manager = LivePortfolioManager(
-        broker, logging.getLogger("owned_flatten_retry"), order_journal=journal
-    )
+def test_flatten_retries_after_uncertain_request_only_after_broker_check():
+    broker = FakeOwnedBroker(actual_quantity="25", include_open_orders=False, fail_before_close=1)
+    manager = LivePortfolioManager(broker, logging.getLogger("flatten_retry_after_check"))
 
     remaining = manager.flatten_all(
         sleep_fn=lambda _: None, max_wait_seconds=10, retry_delay=1
     )
 
-    assert timed_out is True
     assert remaining == []
-    assert broker.cancel_calls == ["mm-take-profit", "mm-stop-loss"]
-    assert broker.close_calls == [("AAPL", "5")]
-    assert float(broker.actual_quantity) == 20.0
-    assert broker.manual_gtc_order.status == "new"
-    assert journal.owned_position_quantities() == {}
+    assert broker.close_all_calls == [True, True]
+    assert float(broker.actual_quantity) == 0.0
 
 
-def test_owned_flatten_leaves_untracked_manual_holdings_and_gtc_orders_untouched(tmp_path):
-    from money_mintter.core.live_bot import LivePortfolioManager
-    from money_mintter.core.order_journal import OrderLifecycleJournal
-
-    journal = OrderLifecycleJournal(tmp_path / "empty-order-lifecycle.jsonl")
-    broker = FakeOwnedBroker(actual_quantity="25")
-    manager = LivePortfolioManager(
-        broker, logging.getLogger("manual_holdings"), order_journal=journal
-    )
+def test_ambiguous_timeout_after_close_submission_does_not_duplicate():
+    broker = FakeOwnedBroker(actual_quantity="25", raise_after_close=True)
+    manager = LivePortfolioManager(broker, logging.getLogger("flatten_ambiguous_timeout"))
 
     remaining = manager.flatten_all(
-        sleep_fn=lambda _: None, max_wait_seconds=2, retry_delay=1
+        sleep_fn=lambda _: None, max_wait_seconds=10, retry_delay=1
     )
 
     assert remaining == []
-    assert broker.close_calls == []
-    assert broker.cancel_calls == []
-    assert broker.actual_quantity == "25"
-    assert broker.manual_gtc_order.status == "new"
+    assert broker.close_all_calls == [True]
+    assert float(broker.actual_quantity) == 0.0
 
 
-def test_owned_flatten_fails_closed_when_account_quantity_conflicts_with_mm_ledger(tmp_path):
-    from money_mintter.core.live_bot import LivePortfolioManager
-
+def test_broker_quantity_mismatch_does_not_block_full_account_close(tmp_path):
     journal = _owned_journal(tmp_path, quantity="5")
     broker = FakeOwnedBroker(actual_quantity="3")
     manager = LivePortfolioManager(
-        broker, logging.getLogger("owned_quantity_mismatch"), order_journal=journal
+        broker, logging.getLogger("broker_quantity_mismatch"), order_journal=journal
     )
 
     remaining = manager.flatten_all(
-        sleep_fn=lambda _: None, max_wait_seconds=2, retry_delay=1
+        sleep_fn=lambda _: None, max_wait_seconds=10, retry_delay=1
     )
 
-    assert remaining == ["AAPL"]
-    assert broker.close_calls == []
-    assert broker.actual_quantity == "3"
+    assert remaining == []
+    assert broker.close_all_calls == [True]
+    assert float(broker.actual_quantity) == 0.0
 
 
-def test_unjournaled_positions_and_manual_gtc_are_not_touched(tmp_path):
-    from money_mintter.core.live_bot import LivePortfolioManager
-
+def test_unjournaled_broker_positions_and_manual_gtc_are_closed():
     broker = FakeOwnedBroker(actual_quantity="25")
     manager = LivePortfolioManager(broker, logging.getLogger("missing_journal"))
 
     remaining = manager.flatten_all(
-        sleep_fn=lambda _: None, max_wait_seconds=2, retry_delay=1
+        sleep_fn=lambda _: None, max_wait_seconds=10, retry_delay=1
     )
 
-    assert remaining == ["AAPL", "MSFT"]
-    assert broker.close_calls == []
-    assert broker.cancel_calls == []
-    assert broker.actual_quantity == "25"
-    assert broker.manual_gtc_order.status == "new"
+    assert remaining == []
+    assert broker.close_all_calls == [True]
+    assert float(broker.actual_quantity) == 0.0
+    assert broker.manual_gtc_order.status == "canceled"
+
+
+def test_flatten_closes_short_quantity_reported_by_alpaca(tmp_path):
+    journal = _owned_journal(tmp_path, side="sell_short", quantity="5")
+    broker = FakeOwnedBroker(actual_quantity="-25")
+    manager = LivePortfolioManager(
+        broker, logging.getLogger("broker_short_flatten"), order_journal=journal
+    )
+
+    remaining = manager.flatten_all(
+        sleep_fn=lambda _: None, max_wait_seconds=10, retry_delay=1
+    )
+
+    assert remaining == []
+    assert broker.close_all_calls == [True]
+    assert float(broker.actual_quantity) == 0.0
+    assert broker.close_order.side == "buy"
+
+
+def test_failed_per_symbol_close_is_retried_after_no_active_orders_remain():
+    broker = FakeOwnedBroker(
+        actual_quantity="25", include_open_orders=False, fail_close_responses=1
+    )
+    manager = LivePortfolioManager(broker, logging.getLogger("flatten_partial_failure"))
+
+    remaining = manager.flatten_all(
+        sleep_fn=lambda _: None, max_wait_seconds=10, retry_delay=1
+    )
+
+    assert remaining == []
+    assert broker.close_all_calls == [True, True]
+    assert float(broker.actual_quantity) == 0.0
+    assert manager.last_flatten_errors == 1
+
+
+def test_pending_close_order_is_tracked_without_duplicate_submission():
+    broker = FakeOwnedBroker(actual_quantity="25", pending_close=True)
+    manager = LivePortfolioManager(broker, logging.getLogger("flatten_pending_close"))
+
+    def complete_during_poll(_):
+        broker.complete_pending_close()
+
+    remaining = manager.flatten_all(
+        sleep_fn=complete_during_poll, max_wait_seconds=10, retry_delay=1
+    )
+
+    assert remaining == []
+    assert broker.close_all_calls == [True]
+    assert float(broker.actual_quantity) == 0.0
+
+
+def test_broken_journal_does_not_block_broker_liquidation():
+    class BrokenJournal:
+        def append(self, event_type, **payload):
+            raise OSError("journal disk unavailable")
+
+        def read_events(self):
+            raise ValueError("journal corrupt")
+
+    broker = FakeOwnedBroker(actual_quantity="25")
+    manager = LivePortfolioManager(
+        broker, logging.getLogger("flatten_broken_journal"), order_journal=BrokenJournal()
+    )
+
+    remaining = manager.flatten_all(
+        sleep_fn=lambda _: None, max_wait_seconds=10, retry_delay=1
+    )
+
+    assert remaining == []
+    assert broker.close_all_calls == [True]
+    assert float(broker.actual_quantity) == 0.0
 
 
 def _session_bot_for_snapshot_test(
