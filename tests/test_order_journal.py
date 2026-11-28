@@ -1055,6 +1055,26 @@ def test_order_journal_reconciliation_recovers_and_appends_fill_once(tmp_path):
             self.order_lookups += 1
             if self.order_lookups == 1:
                 raise TimeoutError("temporary order lookup timeout")
+            if order_id != "entry-order":
+                return SimpleNamespace(
+                    id=order_id,
+                    symbol="AAPL",
+                    side="sell",
+                    type="limit" if order_id == "tp-order" else "stop",
+                    order_class="bracket",
+                    order_role="take_profit" if order_id == "tp-order" else "stop_loss",
+                    status="canceled",
+                    qty="1",
+                    filled_qty="0",
+                    filled_avg_price=None,
+                    submitted_at=None,
+                    filled_at=None,
+                    time_in_force="day",
+                    group_id=None,
+                    group_role=None,
+                    limit_price=None,
+                    stop_price=None,
+                )
             return SimpleNamespace(
                 id=order_id,
                 client_order_id="mm-ict-aapl",
@@ -1107,7 +1127,7 @@ def test_order_journal_reconciliation_recovers_and_appends_fill_once(tmp_path):
 
     events = journal.read_events()
     fills = [event for event in events if event["event_type"] == "fill"]
-    assert broker.order_lookups == 2
+    assert broker.order_lookups == 4
     assert broker.activity_lookups == 1
     assert len(fills) == 1
     assert fills[0]["fill_id"] == "entry-fill-1"
