@@ -2100,8 +2100,9 @@ class LivePortfolioManager:
                 )
                 return ["UNKNOWN"]
 
+            uncertain_close_symbols = untrackable_close_symbols & position_symbols
             remaining = sorted(
-                position_symbols | open_order_symbols
+                position_symbols | open_order_symbols | uncertain_close_symbols
             )
             if not remaining:
                 self.logger.info(
@@ -2109,7 +2110,7 @@ class LivePortfolioManager:
                 )
                 return []
 
-            if open_order_symbols:
+            if open_order_symbols or uncertain_close_symbols:
                 if not _sleep_within_deadline():
                     break
                 continue
@@ -2138,8 +2139,9 @@ class LivePortfolioManager:
         try:
             position_symbols = _broker_position_symbols()
             open_order_symbols = self.fetch_open_order_symbols()
+            uncertain_close_symbols = untrackable_close_symbols & position_symbols
             remaining = sorted(
-                position_symbols | open_order_symbols
+                position_symbols | open_order_symbols | uncertain_close_symbols
             )
             if remaining:
                 self.logger.critical(
