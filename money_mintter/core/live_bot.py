@@ -1972,6 +1972,7 @@ class LivePortfolioManager:
         )
         untrackable_close_symbols: set[str] = set()
         tracked_close_orders: dict[str, str] = {}
+        filled_close_symbols: set[str] = set()
         max_attempts = max(1, int(retries))
         attempts = 0
         start_time = time.monotonic()
@@ -2114,10 +2115,20 @@ class LivePortfolioManager:
                     continue
 
                 status = _status_text(broker_order)
-                if status in {"filled", "canceled", "expired", "rejected", "replaced", "done_for_day"}:
+                if status == "filled":
+                    tracked_close_orders.pop(order_id, None)
+                    if symbol in position_symbols:
+                        filled_close_symbols.add(symbol)
+                elif status in {"canceled", "expired", "rejected", "replaced", "done_for_day"}:
                     tracked_close_orders.pop(order_id, None)
                 else:
                     pending.add(symbol)
+
+            for symbol in list(filled_close_symbols):
+                if symbol in position_symbols:
+                    pending.add(symbol)
+                else:
+                    filled_close_symbols.discard(symbol)
             return pending
 
         while True:
