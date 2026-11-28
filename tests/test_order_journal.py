@@ -1132,3 +1132,210 @@ def test_order_journal_reconciliation_recovers_and_appends_fill_once(tmp_path):
     assert len(fills) == 1
     assert fills[0]["fill_id"] == "entry-fill-1"
     assert journal.owned_position_quantities() == {"AAPL": Decimal("1")}
+
+
+def test_unresolved_entry_intent_requires_complete_broker_bracket_identity(tmp_path):
+    journal = OrderLifecycleJournal(tmp_path / "order_lifecycle.jsonl")
+    client_id = "mm-ict-pending-aapl"
+
+    journal.append(
+        "entry_intent",
+        client_order_id=client_id,
+        symbol="AAPL",
+    )
+    assert journal.unresolved_entry_intent_ids() == {client_id}
+
+    # A parent ID and two list entries are not enough if a child ID is missing.
+    journal.append(
+        "entry_order_submitted",
+        client_order_id=client_id,
+        parent_order={"order_id": "aapl-parent"},
+        child_orders=[
+            {"order_id": "aapl-tp"},
+            {"order_id": None},
+        ],
+    )
+    assert journal.has_unresolved_entry_intents()
+
+    journal.append(
+        "entry_order_recovered",
+        client_order_id=client_id,
+        parent_order={"order_id": "aapl-parent"},
+        child_orders=[
+            {"order_id": "aapl-tp"},
+            {"order_id": "aapl-sl"},
+        ],
+    )
+    assert journal.unresolved_entry_intent_ids() == set()
+    assert not journal.has_unresolved_entry_intents()
+
+    rejected_id = "mm-ict-rejected-msft"
+    journal.append("entry_intent", client_order_id=rejected_id, symbol="MSFT")
+    journal.append(
+        "entry_submission_rejected",
+        client_order_id=rejected_id,
+        symbol="MSFT",
+        error="broker rejected order",
+    )
+    assert journal.unresolved_entry_intent_ids() == set()
+
+
+def test_ambiguous_persisted_entry_intent_blocks_entries_until_broker_recovery(tmp_path):
+    import logging
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+
+    from money_mintter.config import Settings
+    from money_mintter.core.live_bot import LivePortfolioManager
+    from money_mintter.domain import Side
+    from money_mintter.strategy.ict.integration import ICTExecutionInstruction
+
+    journal = OrderLifecycleJournal(tmp_path / "order_lifecycle.jsonl")
+    client_id = "mm-ict-pending-aapl"
+    journal.append(
+        "entry_intent",
+        client_order_id=client_id,
+        symbol="AAPL",
+        side="buy",
+        quantity=1,
+    )
+
+    class NotFoundError(Exception):
+        status_code = 404
+
+    class Broker:
+        def __init__(self):
+            self.visible = False
+            self.submit_calls = 0
+            self.parent = SimpleNamespace(
+                id="aapl-parent",
+                client_order_id=client_id,
+                symbol="AAPL",
+                side="buy",
+                type="market",
+                order_class="bracket",
+                status="new",
+                time_in_force="day",
+                qty="1",
+                filled_qty="0",
+                legs=[],
+            )
+            self.take_profit = SimpleNamespace(
+                id="aapl-tp",
+                symbol="AAPL",
+                side="sell",
+                type="limit",
+                order_class="bracket",
+                status="new",
+                time_in_force="day",
+                qty="1",
+                filled_qty="0",
+                group_role="take_profit",
+                limit_price="105.00",
+            )
+            self.stop_loss = SimpleNamespace(
+                id="aapl-sl",
+                symbol="AAPL",
+                side="sell",
+                type="stop",
+                order_class="bracket",
+                status="new",
+                time_in_force="day",
+                qty="1",
+                filled_qty="0",
+                group_role="stop_loss",
+                stop_price="98.00",
+            )
+            self.parent.legs = [self.take_profit, self.stop_loss]
+            self.orders = {
+                "aapl-parent": self.parent,
+                "aapl-tp": self.take_profit,
+                "aapl-sl": self.stop_loss,
+            }
+
+        def get_order_by_client_id(self, requested_client_id):
+            assert requested_client_id == client_id
+            if not self.visible:
+                raise NotFoundError("order is not visible yet")
+            return self.parent
+
+        def get_order_by_id(self, order_id, request=None):
+            return self.orders[order_id]
+
+        def get(self, path, params):
+            assert path == "/account/activities/FILL"
+            return []
+
+        def submit_order(self, request):
+            self.submit_calls += 1
+            return self.parent
+
+    class Quotes:
+        def __init__(self):
+            self.calls = 0
+
+        def get_stock_latest_quote(self, request):
+            self.calls += 1
+            raise AssertionError("quote lookup must not run while an intent is unresolved")
+
+    broker = Broker()
+    quotes = Quotes()
+    manager = LivePortfolioManager(
+        broker,
+        logging.getLogger("unresolved_entry_intent_recovery"),
+        stock_client=quotes,
+        order_journal=journal,
+    )
+
+    assert manager.reconcile_order_journal() is False
+    assert manager.order_journal_healthy is False
+    assert journal.unresolved_entry_intent_ids() == {client_id}
+
+    now = datetime.now(timezone.utc)
+    instruction = ICTExecutionInstruction(
+        symbol="AAPL",
+        side=Side.BUY,
+        entry_price=100.0,
+        stop_price=98.0,
+        target_price=105.0,
+        risk_pts=2.0,
+        timestamp=now,
+        timestamp_ns=1,
+        zone_type="disp_fvg",
+        score=1,
+        zone_top=101.0,
+        zone_bot=99.0,
+        reason="unresolved_intent_test",
+    )
+
+    # The persisted unresolved intent blocks execution before a quote or order call.
+    sent = manager.submit_ict_instructions(
+        [instruction],
+        set(),
+        100_000.0,
+        Settings(),
+        execution_time_utc=now,
+    )
+    assert sent == 0
+    assert quotes.calls == 0
+    assert broker.submit_calls == 0
+
+    # Once the broker exposes the original order and both bracket legs, recovery
+    # records the broker IDs and the new-entry gate can safely reopen.
+    broker.visible = True
+    assert manager.reconcile_order_journal() is True
+    assert manager.order_journal_healthy is True
+    assert journal.unresolved_entry_intent_ids() == set()
+    events = journal.read_events()
+    recovered = [
+        event for event in events
+        if event.get("event_type") == "entry_order_recovered"
+    ]
+    assert len(recovered) == 1
+    assert recovered[0]["parent_order"]["order_id"] == "aapl-parent"
+    assert {child["order_id"] for child in recovered[0]["child_orders"]} == {
+        "aapl-tp",
+        "aapl-sl",
+    }
+    assert broker.submit_calls == 0
+
