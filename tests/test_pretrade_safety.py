@@ -351,7 +351,7 @@ def test_failed_per_symbol_close_is_retried_after_no_active_orders_remain():
     assert manager.last_flatten_errors == 1
 
 
-def test_pending_close_order_is_tracked_without_duplicate_submission():
+def test_pending_close_order_waits_for_broker_snapshot_without_duplicate_submission():
     broker = FakeOwnedBroker(actual_quantity="25", pending_close=True)
     manager = LivePortfolioManager(broker, logging.getLogger("flatten_pending_close"))
 
@@ -388,6 +388,108 @@ def test_broken_journal_does_not_block_broker_liquidation():
     assert broker.close_all_calls == [True]
     assert float(broker.actual_quantity) == 0.0
 
+
+
+def test_mixed_per_symbol_close_results_retry_only_the_failed_position():
+    class MixedResultBroker(FakeOwnedBroker):
+        def __init__(self):
+            super().__init__(actual_quantity="9", include_open_orders=False)
+            self.msft_quantity = "4"
+            self.mixed_attempts = 0
+
+        def get_all_positions(self):
+            positions = super().get_all_positions()
+            if float(self.msft_quantity) != 0:
+                positions.append(SimpleNamespace(
+                    symbol="MSFT",
+                    qty=self.msft_quantity,
+                    avg_entry_price="50.00",
+                    current_price="50.00",
+                    unrealized_pl="0.00",
+                ))
+            return positions
+
+        def close_all_positions(self, cancel_orders=None):
+            self.close_all_calls.append(cancel_orders)
+            self.mixed_attempts += 1
+            results = []
+            if float(self.actual_quantity) != 0:
+                self.actual_quantity = "0"
+                body = SimpleNamespace(
+                    id="aapl-close-order",
+                    symbol="AAPL",
+                    qty="9",
+                    status="filled",
+                )
+                results.append(SimpleNamespace(
+                    status=200,
+                    symbol="AAPL",
+                    order_id="aapl-close-order",
+                    body=body,
+                ))
+            if float(self.msft_quantity) != 0:
+                if self.mixed_attempts == 1:
+                    results.append(SimpleNamespace(
+                        status=403,
+                        symbol="MSFT",
+                        order_id=None,
+                        body=SimpleNamespace(message="temporary position rejection"),
+                    ))
+                else:
+                    self.msft_quantity = "0"
+                    body = SimpleNamespace(
+                        id="msft-close-order",
+                        symbol="MSFT",
+                        qty="4",
+                        status="filled",
+                    )
+                    results.append(SimpleNamespace(
+                        status=200,
+                        symbol="MSFT",
+                        order_id="msft-close-order",
+                        body=body,
+                    ))
+            return results
+
+    broker = MixedResultBroker()
+    manager = LivePortfolioManager(broker, logging.getLogger("flatten_mixed_results"))
+
+    remaining = manager.flatten_all(
+        sleep_fn=lambda _: None, max_wait_seconds=10, retry_delay=1
+    )
+
+    assert remaining == []
+    assert broker.close_all_calls == [True, True]
+    assert float(broker.actual_quantity) == 0.0
+    assert float(broker.msft_quantity) == 0.0
+    assert manager.last_flatten_errors == 1
+
+
+def test_success_response_without_order_id_is_not_retried_blindly():
+    class MissingOrderIdBroker(FakeOwnedBroker):
+        def close_all_positions(self, cancel_orders=None):
+            self.close_all_calls.append(cancel_orders)
+            if cancel_orders:
+                for order in self.orders.values():
+                    if str(getattr(order, "status", "")).lower() in self.ACTIVE_STATUSES:
+                        order.status = "canceled"
+            return [SimpleNamespace(
+                status=200,
+                symbol="AAPL",
+                order_id=None,
+                body=SimpleNamespace(symbol="AAPL", qty="25", status="accepted"),
+            )]
+
+    broker = MissingOrderIdBroker(actual_quantity="25")
+    manager = LivePortfolioManager(broker, logging.getLogger("flatten_missing_order_id"))
+
+    remaining = manager.flatten_all(
+        sleep_fn=lambda _: None, max_wait_seconds=2, retry_delay=1
+    )
+
+    assert remaining == ["AAPL"]
+    assert broker.close_all_calls == [True]
+    assert float(broker.actual_quantity) == 25.0
 
 def _session_bot_for_snapshot_test(
     *,
