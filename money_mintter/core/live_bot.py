@@ -2110,6 +2110,21 @@ class LivePortfolioManager:
                     )
                     continue
 
+                broker_order_id = _field(broker_order, "id")
+                broker_order_symbol = str(_field(broker_order, "symbol") or "").strip().upper()
+                if (
+                    broker_order_id is None
+                    or str(broker_order_id) != order_id
+                    or broker_order_symbol != symbol
+                ):
+                    pending.add(symbol)
+                    self.logger.critical(
+                        f"[Broker Flatten] Close order identity mismatch for {order_id}: "
+                        f"received_id={broker_order_id!r}, received_symbol={broker_order_symbol!r}; "
+                        "treating it as unresolved."
+                    )
+                    continue
+
                 status = _status_text(broker_order)
                 if status == "filled":
                     tracked_close_orders.pop(order_id, None)
