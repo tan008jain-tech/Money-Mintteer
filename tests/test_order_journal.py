@@ -1016,3 +1016,99 @@ def test_session_summary_marks_fill_without_parseable_timestamp_as_incomplete(tm
     assert summary["unmatched_exit_quantity"] == 0.0
     assert summary["unattributed_fill_count"] == 1
     assert summary["pnl_coverage_status"] == "open_or_unmatched_records"
+
+
+def test_order_journal_reconciliation_recovers_and_appends_fill_once(tmp_path):
+    import logging
+
+    from money_mintter.core.live_bot import LivePortfolioManager
+
+    journal = OrderLifecycleJournal(tmp_path / "order_lifecycle.jsonl")
+    journal.append(
+        "entry_order_submitted",
+        client_order_id="mm-ict-aapl",
+        parent_order={
+            "order_id": "entry-order",
+            "client_order_id": "mm-ict-aapl",
+            "symbol": "AAPL",
+            "side": "buy",
+            "order_type": "market",
+            "order_class": "bracket",
+            "order_role": "entry",
+            "status": "accepted",
+            "qty": "1",
+            "filled_qty": "0",
+            "time_in_force": "day",
+        },
+        child_orders=[
+            {"order_id": "tp-order", "symbol": "AAPL", "order_role": "take_profit", "status": "new"},
+            {"order_id": "sl-order", "symbol": "AAPL", "order_role": "stop_loss", "status": "new"},
+        ],
+    )
+
+    class Broker:
+        def __init__(self):
+            self.order_lookups = 0
+            self.activity_lookups = 0
+
+        def get_order_by_id(self, order_id):
+            self.order_lookups += 1
+            if self.order_lookups == 1:
+                raise TimeoutError("temporary order lookup timeout")
+            return SimpleNamespace(
+                id=order_id,
+                client_order_id="mm-ict-aapl",
+                symbol="AAPL",
+                side="buy",
+                type="market",
+                order_class="bracket",
+                order_role="entry",
+                status="filled",
+                qty="1",
+                filled_qty="1",
+                filled_avg_price="100.00",
+                submitted_at=None,
+                filled_at=None,
+                time_in_force="day",
+                group_id=None,
+                group_role=None,
+                limit_price=None,
+                stop_price=None,
+            )
+
+        def get(self, path, params):
+            assert path == "/account/activities/FILL"
+            assert params["order_id"] == "entry-order"
+            self.activity_lookups += 1
+            return [{
+                "id": "entry-fill-1",
+                "order_id": "entry-order",
+                "symbol": "AAPL",
+                "side": "buy",
+                "qty": "1",
+                "price": "100.00",
+                "transaction_time": datetime(2026, 11, 27, 15, 0, tzinfo=timezone.utc),
+                "type": "fill",
+                "order_status": "filled",
+                "cum_qty": "1",
+                "leaves_qty": "0",
+            }]
+
+    broker = Broker()
+    manager = LivePortfolioManager(
+        broker, logging.getLogger("order_journal_reconciliation_test"), order_journal=journal
+    )
+
+    assert manager.reconcile_order_journal() is False
+    assert manager.order_journal_healthy is False
+    assert manager.reconcile_order_journal() is True
+    assert manager.order_journal_healthy is True
+    assert manager.reconcile_order_journal() is True
+
+    events = journal.read_events()
+    fills = [event for event in events if event["event_type"] == "fill"]
+    assert broker.order_lookups == 2
+    assert broker.activity_lookups == 1
+    assert len(fills) == 1
+    assert fills[0]["fill_id"] == "entry-fill-1"
+    assert journal.owned_position_quantities() == {"AAPL": Decimal("1")}
