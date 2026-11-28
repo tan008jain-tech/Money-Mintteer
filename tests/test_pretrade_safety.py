@@ -392,6 +392,8 @@ def test_broken_journal_does_not_block_broker_liquidation():
 def _session_bot_for_snapshot_test(
     *,
     account_snapshot_error: Exception | None = None,
+    final_positions: list[dict] | None = None,
+    final_open_order_symbols: set[str] | None = None,
 ):
     from money_mintter.core.live_bot import LiveMarketBot
 
@@ -421,13 +423,13 @@ def _session_bot_for_snapshot_test(
                 1200.00,
                 2071.26,
                 2071.26,
-                [],
+                list(final_positions or []),
                 [],
                 set(),
             )
 
         def fetch_open_order_symbols(self):
-            return set()
+            return set(final_open_order_symbols or set())
 
     bot.portfolio_manager = Portfolio()
     bot.kill_switch = SimpleNamespace(tripped=False, reason="")
@@ -473,6 +475,26 @@ def test_session_cannot_complete_when_post_flatten_snapshot_fails(caplog):
     assert bot.latest_state["final_account_snapshot_verified"] is False
     assert bot.portfolio_manager.last_flatten_errors == 1
     assert "Unable to verify final broker account/positions/orders snapshot" in caplog.text
+
+
+def test_session_cannot_complete_when_final_broker_snapshot_is_not_flat(caplog):
+    bot, moment = _session_bot_for_snapshot_test(
+        final_positions=[{"symbol": "AAPL"}],
+        final_open_order_symbols={"MSFT"},
+    )
+
+    with caplog.at_level(logging.CRITICAL):
+        result = bot.run_session(
+            now_fn=lambda: moment,
+            sleep_fn=lambda _: None,
+        )
+
+    assert result["status"] == "flatten_incomplete"
+    assert result["remaining"] == ["AAPL", "MSFT"]
+    assert bot.latest_state["final_account_snapshot_verified"] is False
+    assert bot.portfolio_manager.last_flatten_errors == 1
+    assert "Alpaca still reports positions/open orders after flatten" in caplog.text
+
 
 
 def test_quote_spread_gate_rejects_wide_iex_reference_quote():
