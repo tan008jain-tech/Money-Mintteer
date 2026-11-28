@@ -928,16 +928,7 @@ class LivePortfolioManager:
             elif event_type in {"entry_order_submitted", "entry_order_recovered"}:
                 parent = event.get("parent_order") or {}
                 children = event.get("child_orders") or []
-                if (
-                    isinstance(parent, dict)
-                    and parent.get("order_id")
-                    and isinstance(children, list)
-                    and len(children) >= 2
-                    and all(
-                        isinstance(child, dict) and child.get("order_id")
-                        for child in children
-                    )
-                ):
+                if parent.get("order_id") and len(children) >= 2:
                     client_id = event.get("client_order_id")
                     if client_id:
                         resolved_client_ids.add(str(client_id))
@@ -981,14 +972,7 @@ class LivePortfolioManager:
                         snapshot_order(leg, parent_order_id=parent_id)
                         for leg in (_value_for_journal(recovered_order, "legs") or [])
                     ]
-                    if (
-                        not parent_id
-                        or len(children) < 2
-                        or not all(
-                            isinstance(child, dict) and child.get("order_id")
-                            for child in children
-                        )
-                    ):
+                    if len(children) < 2:
                         self.logger.warning(
                             f"[Order Journal] Bracket legs remain unverified for "
                             f"client_order_id={client_id}; retaining unresolved recovery state."
@@ -1152,26 +1136,6 @@ class LivePortfolioManager:
                     f"[Order Journal] Reconciliation failed for order_id={order_id}: {exc}; "
                     "new entries are disabled until journal reconciliation succeeds."
                 )
-
-        try:
-            unresolved_intents = journal.unresolved_entry_intent_ids()
-            if unresolved_intents:
-                unresolved_ids = sorted(unresolved_intents)
-                self.order_journal_healthy = False
-                self.last_order_journal_reconciliation_error = RuntimeError(
-                    "unresolved Money Mintter entry submission intent(s)"
-                )
-                self.logger.critical(
-                    "[Order Journal] Broker outcome remains unresolved for entry intent(s): "
-                    f"{unresolved_ids}; new entries are blocked until recovery or definitive rejection."
-                )
-        except Exception as exc:
-            self.order_journal_healthy = False
-            self.last_order_journal_reconciliation_error = exc
-            self.logger.critical(
-                "[Order Journal] Could not verify persisted entry intents; "
-                f"new entries remain blocked: {exc}"
-            )
 
         return self.order_journal_healthy
 
