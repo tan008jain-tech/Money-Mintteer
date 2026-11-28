@@ -2186,7 +2186,7 @@ class LivePortfolioManager:
             pending_close_symbols = _pending_close_order_symbols(position_symbols)
             uncertain_close_symbols = untrackable_close_symbols & position_symbols
             remaining = sorted(
-                position_symbols | open_order_symbols | uncertain_close_symbols
+                position_symbols | open_order_symbols | pending_close_symbols | uncertain_close_symbols
             )
             if remaining:
                 self.logger.critical(
