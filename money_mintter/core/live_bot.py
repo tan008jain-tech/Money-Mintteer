@@ -2028,16 +2028,38 @@ class LivePortfolioManager:
                 )
                 return
 
+            reported_symbols: set[str] = set()
             for result in results:
                 body = _field(result, "body")
                 symbol = str(
                     _field(result, "symbol") or _field(body, "symbol") or ""
                 ).strip().upper()
+                if symbol:
+                    reported_symbols.add(symbol)
                 status_value = _field(result, "status")
                 try:
                     status_code = int(status_value)
                 except (TypeError, ValueError):
-                    status_code = 0
+                    self.last_flatten_errors += 1
+                    untrackable_close_symbols.update(requested_symbols)
+                    if symbol:
+                        untrackable_close_symbols.add(symbol)
+                    untrackable_close_symbols.add("UNKNOWN")
+                    self.logger.critical(
+                        f"[Broker Flatten] Alpaca returned an unparseable close status "
+                        f"for {symbol or 'UNKNOWN'}: {status_value!r}; treating the result as unresolved."
+                    )
+                    continue
+
+                if symbol and symbol not in requested_symbols:
+                    self.last_flatten_errors += 1
+                    untrackable_close_symbols.add(symbol)
+                    untrackable_close_symbols.add("UNKNOWN")
+                    self.logger.critical(
+                        f"[Broker Flatten] Alpaca returned an unexpected symbol {symbol} "
+                        f"for a close request covering {sorted(requested_symbols)}."
+                    )
+                    continue
 
                 order_id = (
                     _field(result, "order_id")
@@ -2092,6 +2114,16 @@ class LivePortfolioManager:
                             f"[Order Journal] Could not record close order {order_id} "
                             f"for {symbol}; broker liquidation continues: {exc}"
                         )
+
+            missing_symbols = requested_symbols - reported_symbols
+            if missing_symbols:
+                self.last_flatten_errors += 1
+                untrackable_close_symbols.update(missing_symbols)
+                untrackable_close_symbols.add("UNKNOWN")
+                self.logger.critical(
+                    "[Broker Flatten] Alpaca omitted per-position close results for "
+                    f"{sorted(missing_symbols)}; treating the response as unresolved."
+                )
 
         def _pending_close_order_symbols(position_symbols: set[str]) -> set[str]:
             get_order = getattr(self.trading_client, "get_order_by_id", None)
