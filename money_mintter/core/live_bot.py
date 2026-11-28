@@ -45,7 +45,6 @@
                 self.latest_state["cash"] = final_cash
                 self.latest_state["equity"] = final_equity
                 self.latest_state["open_positions"] = final_dashboard_positions
-                self.latest_state["final_account_snapshot_verified"] = True
 
                 self.logger.info(
                     f"[Final Broker Snapshot] equity=${final_equity:.2f} "
