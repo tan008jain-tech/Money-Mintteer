@@ -375,16 +375,11 @@ class OrderLifecycleJournal:
                         status_by_id[order_id] = str(snapshot.get("status") or "unknown").strip().lower()
         return sorted(order_id for order_id in legacy_ids if status_by_id.get(order_id) not in terminal)
 
-    def unresolved_entry_intent_ids(
+    def has_unresolved_entry_intents(
         self,
         client_order_prefix: str = MONEY_MINTTER_CLIENT_ORDER_PREFIX,
-    ) -> set[str]:
-        """Return MM entry intents without a verified broker outcome.
-
-        A persisted intent is resolved only by a definitive broker rejection or by
-        a submitted/recovered parent with at least two identifiable bracket legs.
-        Incomplete broker responses must remain pending across process restarts.
-        """
+    ) -> bool:
+        """Return True if an MM entry intent has no persisted submission outcome."""
         intents: set[str] = set()
         resolved: set[str] = set()
         for event in self.read_events():
@@ -394,35 +389,16 @@ class OrderLifecycleJournal:
                 or not client_order_id.startswith(client_order_prefix)
             ):
                 continue
-
             event_type = event.get("event_type")
             if event_type == "entry_intent":
                 intents.add(client_order_id)
-            elif event_type == "entry_submission_rejected":
+            elif event_type in {
+                "entry_submission_rejected",
+                "entry_order_submitted",
+                "entry_order_recovered",
+            }:
                 resolved.add(client_order_id)
-            elif event_type in {"entry_order_submitted", "entry_order_recovered"}:
-                parent = event.get("parent_order")
-                children = event.get("child_orders")
-                if (
-                    isinstance(parent, dict)
-                    and parent.get("order_id")
-                    and isinstance(children, list)
-                    and len(children) >= 2
-                    and all(
-                        isinstance(child, dict) and child.get("order_id")
-                        for child in children
-                    )
-                ):
-                    resolved.add(client_order_id)
-
-        return intents - resolved
-
-    def has_unresolved_entry_intents(
-        self,
-        client_order_prefix: str = MONEY_MINTTER_CLIENT_ORDER_PREFIX,
-    ) -> bool:
-        """Return True if an MM entry intent has no verified broker outcome."""
-        return bool(self.unresolved_entry_intent_ids(client_order_prefix))
+        return bool(intents - resolved)
 
     def owned_position_quantities(
         self,
