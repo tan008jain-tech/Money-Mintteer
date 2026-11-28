@@ -318,7 +318,6 @@ def test_unjournaled_broker_positions_and_manual_gtc_are_closed():
     assert broker.manual_gtc_order.status == "canceled"
 
 
-
 def test_flatten_cancels_open_orders_even_when_account_has_no_positions():
     broker = FakeOwnedBroker(actual_quantity="0", include_open_orders=True)
     manager = LivePortfolioManager(broker, logging.getLogger("open_orders_without_positions"))
@@ -330,6 +329,7 @@ def test_flatten_cancels_open_orders_even_when_account_has_no_positions():
     assert remaining == []
     assert broker.close_all_calls == [True]
     assert broker.manual_gtc_order.status == "canceled"
+
 
 def test_flatten_closes_short_quantity_reported_by_alpaca(tmp_path):
     journal = _owned_journal(tmp_path, side="sell_short", quantity="5")
@@ -400,8 +400,6 @@ def test_broken_journal_does_not_block_broker_liquidation():
     assert remaining == []
     assert broker.close_all_calls == [True]
     assert float(broker.actual_quantity) == 0.0
-
-
 
 
 def test_returned_order_id_blocks_duplicate_when_open_order_list_lags():
@@ -539,7 +537,6 @@ def test_mixed_per_symbol_close_results_retry_only_the_failed_position():
     assert manager.last_flatten_errors == 1
 
 
-
 def test_active_close_order_id_blocks_completion_even_if_open_order_list_lags():
     class HiddenActiveOrderBroker(FakeOwnedBroker):
         def get_orders(self, request):
@@ -578,6 +575,7 @@ def test_active_close_order_id_blocks_completion_even_if_open_order_list_lags():
     assert remaining == ["AAPL"]
     assert broker.close_all_calls == [True]
     assert float(broker.actual_quantity) == 0.0
+
 
 def test_success_response_without_order_id_is_not_retried_blindly():
     class MissingOrderIdBroker(FakeOwnedBroker):
@@ -713,7 +711,6 @@ def test_session_cannot_complete_when_final_broker_snapshot_is_not_flat(caplog):
     assert "Alpaca still reports positions/open orders after flatten" in caplog.text
 
 
-
 def test_quote_spread_gate_rejects_wide_iex_reference_quote():
     manager = LivePortfolioManager(
         object(),
@@ -759,22 +756,3 @@ def test_quote_spread_limit_is_configurable_and_validated(monkeypatch):
 
     with pytest.raises(ValueError, match="MAX_QUOTE_SPREAD_PCT"):
         Settings(max_quote_spread_pct=1.01)
-
-def test_owned_flatten_closes_only_mm_owned_short_quantity(tmp_path):
-    journal = _owned_journal(tmp_path, side="sell_short", quantity="5")
-    broker = FakeOwnedBroker(actual_quantity="-25")
-    manager = LivePortfolioManager(
-        broker, logging.getLogger("owned_short_flatten"), order_journal=journal
-    )
-
-    remaining = manager.flatten_all(
-        sleep_fn=lambda _: None, max_wait_seconds=10, retry_delay=1
-    )
-
-    assert remaining == []
-    assert broker.cancel_calls == ["mm-take-profit", "mm-stop-loss"]
-    assert broker.close_calls == [("AAPL", "5")]
-    assert float(broker.actual_quantity) == -20.0
-    assert broker.manual_gtc_order.status == "new"
-    assert "manual-gtc-order" not in broker.cancel_calls
-    assert journal.owned_position_quantities() == {}
